@@ -13,15 +13,20 @@ use crate::{
 /// Canonical declaration identity bound to a node start in the ASTs section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SkeletonDeclaration {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Byte address in the TASTy AST section for this node or reference.
     pub address: u32,
 }
 
 /// A real typed RHS deliberately not serialized by this declaration increment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OmittedMethodBody {
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Exact typed root root in the canonical session arena.
     pub typed_root: TreeId<Typed>,
 }
 
@@ -53,27 +58,37 @@ pub struct MutableCounterDeclarationFragment {
 }
 
 impl MutableCounterDeclarationFragment {
+    /// Borrows encoded bytes of this deliberately incomplete fragment. They are for structural
+    /// inspection, not publication as a complete TASTy artifact.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Borrows the source identity and normalized path retained by this fragment.
     pub fn source(&self) -> &SourceMetadata {
         &self.source
     }
+    /// Returns the intended relative sidecar path; fragment completeness does not authorize
+    /// publication at this path.
     pub fn intended_tasty_path(&self) -> &str {
         &self.intended_tasty_path
     }
+    /// Borrows canonical declaration identities and AST-section byte addresses in emitted order.
     pub fn declarations(&self) -> &[SkeletonDeclaration] {
         &self.declarations
     }
+    /// Returns the original mutable local whose declaration this fragment retains.
     pub fn selected(&self) -> SymbolId {
         self.binding.local
     }
+    /// Returns the canonical constructor target of the retained initializer.
     pub fn initializer_target(&self) -> SymbolId {
         self.binding.target
     }
+    /// Returns the exact original untyped declaration root.
     pub fn selected_declaration(&self) -> TreeId<dotty_core::Untyped> {
         self.binding.source_declaration
     }
+    /// Returns the exact typed initializer root paired with that declaration.
     pub fn selected_initializer(&self) -> TreeId<dotty_core::Typed> {
         self.binding.typed_initializer
     }
@@ -92,21 +107,29 @@ pub struct MutableCounterReferenceAssignmentFragment {
 }
 
 impl MutableCounterReferenceAssignmentFragment {
+    /// Borrows encoded bytes of this deliberately incomplete fragment. They are for structural
+    /// inspection, not publication as a complete TASTy artifact.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Borrows the source identity and normalized path retained by this fragment.
     pub fn source(&self) -> &SourceMetadata {
         &self.source
     }
+    /// Returns the intended relative sidecar path; fragment completeness does not authorize
+    /// publication at this path.
     pub fn intended_tasty_path(&self) -> &str {
         &self.intended_tasty_path
     }
+    /// Borrows canonical declaration identities and AST-section byte addresses in emitted order.
     pub fn declarations(&self) -> &[SkeletonDeclaration] {
         &self.declarations
     }
+    /// Returns the original mutable local whose declaration this fragment retains.
     pub fn selected(&self) -> SymbolId {
         self.declaration.local
     }
+    /// Returns the canonical local used as the retained assignment's right-hand side.
     pub fn assigned_value(&self) -> SymbolId {
         self.assignment.rhs_local
     }

@@ -102,14 +102,42 @@ pub(crate) fn peek_base_type(cursor: &Cursor<'_>) -> Option<FieldType> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Grammar failure in a JVM field or method descriptor, with byte offsets where available.
 pub enum DescriptorError {
+    /// The descriptor string is empty.
     Empty,
-    UnknownTypeChar { offset: usize, found: char },
-    UnterminatedClassName { offset: usize },
-    TooManyArrayDimensions { offset: usize },
-    TrailingCharacters { offset: usize },
-    MissingOpenParen { offset: usize },
-    MissingCloseParen { offset: usize },
+    /// A type position contains an unrecognized descriptor character.
+    UnknownTypeChar {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+        /// Value encountered at the point where the enclosing rule failed.
+        found: char,
+    },
+    /// A class descriptor lacks its closing semicolon.
+    UnterminatedClassName {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// An array descriptor exceeds the JVM dimension limit.
+    TooManyArrayDimensions {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// Characters remain after a complete descriptor.
+    TrailingCharacters {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A method descriptor lacks its opening parenthesis.
+    MissingOpenParen {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A method descriptor lacks its parameter-list closing parenthesis.
+    MissingCloseParen {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
 }
 
 impl fmt::Display for DescriptorError {
@@ -183,23 +211,34 @@ pub(crate) fn parse_field_type(
 /// A parsed field descriptor (JVMS §4.3.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
+    /// JVM signed byte (`B`) field type.
     Byte,
+    /// JVM UTF-16 character (`C`) field type.
     Char,
+    /// JVM double (`D`) field type.
     Double,
+    /// JVM float (`F`) field type.
     Float,
+    /// JVM int (`I`) field type.
     Int,
+    /// JVM long (`J`) field type.
     Long,
+    /// JVM short (`S`) field type.
     Short,
+    /// JVM boolean (`Z`) field type.
     Boolean,
     /// Reference type; the class name is in internal form (e.g. `java/lang/Object`).
     Object(String),
+    /// Array with the specified component type.
     Array(Box<FieldType>),
 }
 
 /// A parsed method descriptor (JVMS §4.3.3). `return_type: None` means `void`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodDescriptor {
+    /// Parameter types or declarations in signature order.
     pub parameters: Vec<FieldType>,
+    /// Descriptor return type; absent for JVM void.
     pub return_type: Option<FieldType>,
 }
 
@@ -266,8 +305,14 @@ impl MethodDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Failure resolving descriptor text from a pool entry or parsing that text.
 pub enum ResolveDescriptorError {
-    NotUtf8 { index: ConstantPoolIndex },
+    /// The descriptor index does not resolve to a UTF-8 constant-pool entry.
+    NotUtf8 {
+        /// Constant-pool index involved in this failure.
+        index: ConstantPoolIndex,
+    },
+    /// The resolved descriptor text does not satisfy descriptor grammar.
     Parse(DescriptorError),
 }
 

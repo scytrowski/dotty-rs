@@ -51,7 +51,10 @@ pub enum ControlFlowGraphError {
     /// A sequence without executable instructions cannot have an entry block.
     EmptyCodeSequence,
     /// A defined label sits after the final instruction and has no block.
-    LabelAtCodeEnd { label: LabelId },
+    LabelAtCodeEnd {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: LabelId,
+    },
     /// A reachable block can fall through beyond the final instruction.
     FallthroughPastEnd {
         /// The block whose fallthrough leaves the sequence.

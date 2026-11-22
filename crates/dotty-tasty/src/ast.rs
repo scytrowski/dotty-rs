@@ -7,12 +7,15 @@
 //! reference in `docs/tasty-format-3.9.0.md`; the higher-level API contract is
 //! documented in `docs/tasty-api.md`.
 //!
-//! This module contains a large, mechanical structural schema. Its item-level
-//! documentation lint is allowed here because duplicating the format table as
-//! prose on every raw field would make the Rust API documentation diverge from
-//! the normative reference. The semantic entry points, constructors, query
-//! methods, and error types are documented at their declarations.
-#![allow(missing_docs)]
+//! The wire schema is documented at its definitions as well as in the format
+//! reference. Structural decoding does not resolve semantic symbols or types.
+//! Name references are zero-based file-local indexes; AST addresses and node
+//! offsets have a different coordinate space. Readers over borrowed payloads
+//! start at payload-relative byte zero unless supplied with a base offset.
+//!
+//! Direct node encoding writes the retained references. Editing child order or
+//! encoded widths can require file-level address relocation; a structural node
+//! round trip alone does not establish semantic validity or Scala compatibility.
 
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
@@ -436,6 +439,7 @@ impl<'a> RawNode<'a> {
         NodeCategory::is_known_tag(self.tag)
     }
 
+    /// Creates a reader over this raw node’s payload, initially at payload-relative byte zero.
     pub fn reader(&self) -> Reader<'a> {
         Reader::new(self.payload)
     }
@@ -677,245 +681,399 @@ impl<'a> StructuredNode<'a> {
 }
 
 impl EncodedAstNodes {
+    /// Borrows the encoded AST bytes without copying.
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// Consumes this output and returns the owned encoded AST bytes.
     pub fn into_inner(self) -> Vec<u8> {
         self.bytes
     }
 
+    /// Borrows the newly encoded top-level node addresses in emission order.
     pub fn addresses(&self) -> &[u32] {
         &self.addresses
     }
 
+    /// Returns the encoded address of the zero-based node position, or None outside the recorded
+    /// list.
     pub fn address(&self, index: usize) -> Option<u32> {
         self.addresses.get(index).copied()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Package path with its ordered raw declaration nodes.
 pub struct PackageNode<'a> {
     /// The package path. TASTy permits any `Path` form here, including a
     /// shared type reference used by nested package nodes.
     pub path: RawTree<'a>,
+    /// Child declarations or statements in their original wire order.
     pub stats: RawNodes<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Borrowed value, method, or type definition header with an undecoded body.
 pub enum DefinitionNode<'a> {
-    ValDef { name: u32, body: &'a [u8] },
-    DefDef { name: u32, body: &'a [u8] },
-    TypeDef { name: u32, body: &'a [u8] },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefinitionBody<'a> {
+    /// Value definition header retaining its undecoded type, body, and tail.
     ValDef {
+        /// Zero-based reference into the enclosing TASTy name table.
         name: u32,
+        /// Borrowed definition body after its leading name; decoding it is a separate operation.
+        body: &'a [u8],
+    },
+    /// Method definition header retaining its undecoded parameter clauses, result, and body.
+    DefDef {
+        /// Zero-based reference into the enclosing TASTy name table.
+        name: u32,
+        /// Borrowed definition body after its leading name; decoding it is a separate operation.
+        body: &'a [u8],
+    },
+    /// Type or class definition header retaining its undecoded body.
+    TypeDef {
+        /// Zero-based reference into the enclosing TASTy name table.
+        name: u32,
+        /// Borrowed definition body after its leading name; decoding it is a separate operation.
+        body: &'a [u8],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded value or type definition body; method bodies use DefDefBody.
+pub enum DefinitionBody<'a> {
+    /// Decoded value declaration type, optional RHS, and modifier/annotation tail.
+    ValDef {
+        /// Zero-based reference into the enclosing TASTy name table.
+        name: u32,
+        /// Encoded type tree; this structure does not resolve its semantic meaning.
         type_tree: RawTree<'a>,
+        /// Optional encoded right-hand side, absent for a declaration without a body.
         rhs: Option<RawTree<'a>>,
+        /// Ordered definition modifiers and annotations after the type or body.
         tail: Vec<DefinitionTail<'a>>,
     },
+    /// Decoded alias, bounds, or template body of a type declaration.
     TypeDef {
+        /// Zero-based reference into the enclosing TASTy name table.
         name: u32,
+        /// Alias/bounds type tree or class template selected by the declaration shape.
         type_or_template: RawTree<'a>,
+        /// Ordered definition modifiers and annotations after the type or body.
         tail: Vec<DefinitionTail<'a>>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One method-header item preserving interleaved parameter and clause-marker order.
 pub enum DefDefHeaderItem<'a> {
+    /// Original parameter declaration at this position in the method header.
     Parameter(ParameterNode<'a>),
+    /// Clause boundary or empty-clause marker at this position in the header.
     Clause(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded method result, optional RHS, ordered parameter/header items, and definition tail.
 pub struct DefDefBody<'a> {
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
     /// Parameters and clause markers in wire order. Edit this sequence to
     /// change the encoded header.
     pub header_items: Vec<DefDefHeaderItem<'a>>,
+    /// Encoded method result type before an optional body and definition tail.
     pub return_type: RawTree<'a>,
+    /// Optional encoded right-hand side, absent for a declaration without a body.
     pub rhs: Option<RawTree<'a>>,
+    /// Ordered definition modifiers and annotations after the type or body.
     pub tail: Vec<DefinitionTail<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a selector list imports names or exports members.
 pub enum ImportExportKind {
+    /// Import names into the enclosing source scope.
     Import,
+    /// Export members from the encoded qualifier.
     Export,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One wire-level import/export selector; renames remain separate ordered entries.
 pub enum ImportSelector<'a> {
-    Imported { name: u32 },
-    Renamed { name: u32 },
-    Bounded { type_tree: RawTree<'a> },
+    /// Name selected from the qualifier, including a wildcard name where encoded.
+    Imported {
+        /// Zero-based reference into the enclosing TASTy name table.
+        name: u32,
+    },
+    /// Rename target for the preceding imported name.
+    Renamed {
+        /// Zero-based reference into the enclosing TASTy name table.
+        name: u32,
+    },
+    /// Type-bound selector used for contextual imports.
+    Bounded {
+        /// Encoded type tree; this structure does not resolve its semantic meaning.
+        type_tree: RawTree<'a>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Import or export qualifier with selectors retained in wire order.
 pub struct ImportExportNode<'a> {
+    /// Whether this node represents import or export syntax.
     pub kind: ImportExportKind,
+    /// Qualifier from which members are imported or exported.
     pub expr: RawTree<'a>,
+    /// Selectors in original wire order, including separate rename and bound entries.
     pub selectors: Vec<ImportSelector<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Template self declaration containing a name reference and type tree.
 pub struct SelfDefNode<'a> {
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Value application callee and arguments in wire order.
 pub struct ApplyNode<'a> {
+    /// Callee or type constructor tree to which the arguments apply.
     pub function: RawTree<'a>,
+    /// Argument trees in their original application order.
     pub arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Block result expression and its preceding statements; field order follows the wire grammar.
 pub struct BlockNode<'a> {
+    /// Block result expression, evaluated after the ordered statements.
     pub expression: RawTree<'a>,
+    /// Statements evaluated before the block result, in source order.
     pub stats: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Conditional expression retaining the optional inline marker.
 pub struct IfNode<'a> {
+    /// Whether the wire node carries the inline marker.
     pub inline: bool,
+    /// Boolean condition expression controlling this construct.
     pub condition: RawTree<'a>,
+    /// Expression evaluated when the condition is true.
     pub then_branch: RawTree<'a>,
+    /// Expression evaluated when the condition is false.
     pub else_branch: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Closure method reference and optional target function type.
 pub struct LambdaNode<'a> {
+    /// Closure method-reference tree.
     pub method: RawTree<'a>,
+    /// Optional target function type encoded after the method reference.
     pub target_type: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Super reference retaining the current-instance term and optional mixin type.
 pub struct SuperNode<'a> {
+    /// Current-instance qualifier of the super reference.
     pub this_term: RawTree<'a>,
+    /// Optional mixin type qualifying the super reference.
     pub mixin_type: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Repeated argument sequence and its element type.
 pub struct RepeatedNode<'a> {
+    /// Encoded element type shared by the repeated arguments.
     pub element_type: RawTree<'a>,
+    /// Repeated argument elements in source evaluation order.
     pub elements: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outer-instance selection with a lexical nesting distance and underlying type.
 pub struct SelectOuterNode<'a> {
+    /// Number of enclosing-instance levels traversed by this selection.
     pub levels: u32,
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
+    /// Explicit underlying type retained by the wire form.
     pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Explicit type application with ordered type arguments.
 pub struct TypeApplyNode<'a> {
+    /// Callee or type constructor tree to which the arguments apply.
     pub function: RawTree<'a>,
+    /// Explicit type argument trees in application order.
     pub type_arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Expression carrying an explicit type ascription.
 pub struct TypedNode<'a> {
+    /// Result or protected expression of this construct.
     pub expression: RawTree<'a>,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Assignment target and value expression.
 pub struct AssignNode<'a> {
+    /// Left child of the binary type form or assignment target.
     pub left: RawTree<'a>,
+    /// Right child of the binary type form or assignment value.
     pub right: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Return-target reference with an optional result expression.
 pub struct ReturnNode<'a> {
+    /// AST reference naming the return destination.
     pub target: AstRef,
+    /// Result or protected expression of this construct.
     pub expression: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Loop condition and body expression.
 pub struct WhileNode<'a> {
+    /// Boolean condition expression controlling this construct.
     pub condition: RawTree<'a>,
+    /// Loop body evaluated while the condition remains true.
     pub body: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Tagged single-child AST wrapper retaining its decoded offset.
 pub struct AstChildNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Single encoded child wrapped by this tag.
     pub child: RawTree<'a>,
+    /// Original byte offset in the coordinate system used by the decoder.
     pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Class literal represented by the referenced type tree.
 pub struct ClassConstNode<'a> {
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Named value argument with a name-table reference.
 pub struct NamedArgNode<'a> {
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Value expression supplied for the named argument.
     pub argument: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Identifier term or type tree with its name and encoded type.
 pub struct IdentNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Symbol or name reference with a qualifier; tag determines the reference index space.
 pub struct ReferenceNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Name-table index for name-designed reference tags, or AST address for symbol-designed
+    /// reference tags.
     pub reference: u32,
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Term or type member selection retaining its name and qualifier.
 pub struct SelectNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Owner-space reference with a qualifier and explicit underlying type.
 pub struct InReferenceNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
+    /// Explicit underlying type retained by the wire form.
     pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Member selection retaining the owner-space underlying type.
 pub struct SelectInNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
+    /// Explicit underlying type retained by the wire form.
     pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Case pattern, body, optional guard, and borrowed original payload.
 pub struct CaseDefNode<'a> {
+    /// Pattern tree tested by this case or splice.
     pub pattern: RawTree<'a>,
+    /// Encoded body expression or type syntax in this construct.
     pub body: RawTree<'a>,
+    /// Optional guard evaluated after a successful pattern match.
     pub guard: Option<RawTree<'a>>,
+    /// Original borrowed payload bytes of this length-delimited node.
     pub payload: &'a [u8],
+    /// Original byte offset in the coordinate system used by the decoder.
     pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Context-dependent suffix distinguishing a pattern binding from a type binding.
 pub enum BindBody<'a> {
+    /// Nested pattern matched by a term binding.
     Pattern(RawTree<'a>),
-    Type { modifiers: Vec<u8> },
+    /// Type-binding suffix represented by ordered modifier tags.
+    Type {
+        /// Raw modifier tags retained in their encoded order.
+        modifiers: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Pattern or type binding retaining its name, type, and context-dependent tail.
 pub struct BindNode<'a> {
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
+    /// Pattern body or type-binding modifiers, distinguished explicitly by BindBody.
     pub body: BindBody<'a>,
     /// Bytes after a pattern body whose meaning depends on the enclosing
     /// type or pattern context.
@@ -923,54 +1081,82 @@ pub struct BindNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Ordered alternatives of a pattern.
 pub struct AlternativeNode<'a> {
+    /// Alternative pattern trees in matching order.
     pub alternatives: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Extractor pattern with implicit arguments, result type, and ordered patterns.
 pub struct UnapplyNode<'a> {
+    /// Callee or type constructor tree to which the arguments apply.
     pub function: RawTree<'a>,
+    /// Implicit argument wrappers in their original wire order.
     pub implicit_args: Vec<AstChildNode<'a>>,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
+    /// Extractor argument patterns in source matching order.
     pub patterns: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Semantic refinement with a parent, member name, and member type.
 pub struct RefinedTypeNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
+    /// Encoded parent type refined by this node.
     pub parent: RawTree<'a>,
+    /// Encoded type of the named refinement member.
     pub refinement: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Refined type syntax with a parent qualifier and raw refinement declarations.
 pub struct RefinedTptNode<'a> {
+    /// Encoded qualifier or prefix of this selection or reference.
     pub qualifier: RawTree<'a>,
+    /// Child declarations or statements in their original wire order.
     pub stats: RawNodes<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Type-lambda syntax with ordered parameter declarations and result body.
 pub struct LambdaTptNode<'a> {
+    /// Leading type-parameter declarations in wire order.
     pub type_params: Vec<ParameterNode<'a>>,
+    /// Encoded body expression or type syntax in this construct.
     pub body: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Inlined result expression with optional call-site tree and ordered local definitions.
 pub struct InlinedNode<'a> {
+    /// Result or protected expression of this construct.
     pub expression: RawTree<'a>,
+    /// Optional original call-site tree retained by inlining.
     pub call_site: Option<RawTree<'a>>,
+    /// Local definition nodes preceding the inlined result.
     pub definitions: RawNodes<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Wire form of a match selector, including implicit, inline, and sub-match markers.
 pub enum MatchSelector<'a> {
+    /// Implicit-match marker with no explicit scrutinee tree.
     Implicit,
+    /// Ordinary match with an explicit scrutinee.
     Plain(RawTree<'a>),
+    /// Inline match retaining an explicit scrutinee.
     Inline(RawTree<'a>),
+    /// Sub-match marker retaining its selector tree.
     SubMatch(RawTree<'a>),
 }
 
 impl<'a> MatchSelector<'a> {
+    /// Borrows the selector tree, or None for an implicit-match selector.
     pub fn scrutinee(&self) -> Option<&RawTree<'a>> {
         match self {
             Self::Implicit => None,
@@ -980,50 +1166,80 @@ impl<'a> MatchSelector<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Match selector form with cases in their original matching order.
 pub struct MatchNode<'a> {
+    /// Scrutinee or selector form encoded by the match construct.
     pub selector: MatchSelector<'a>,
+    /// Case trees in their original matching order.
     pub cases: Vec<MatchCase<'a>>,
 }
 
 /// One case in a MATCH payload, in its original wire position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchCase<'a> {
+    /// Case definition encoded directly in this match payload.
     Inline(CaseDefNode<'a>),
-    Shared { offset: usize, address: u32 },
+    /// Shared case reference targeting an existing case-definition address.
+    Shared {
+        /// AST-section offset of the SHAREDterm reference in this match payload.
+        offset: usize,
+        /// AST-section byte address targeted by the encoded reference.
+        address: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Protected expression, ordered exception cases, and optional finalizer.
 pub struct TryNode<'a> {
+    /// Result or protected expression of this construct.
     pub expression: RawTree<'a>,
+    /// Case trees in their original matching order.
     pub cases: Vec<CaseDefNode<'a>>,
+    /// Optional finally expression evaluated after the protected computation.
     pub finalizer: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Quote or splice expression with its encoded type; tag distinguishes the wire form.
 pub struct QuoteNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Result or protected expression of this construct.
     pub expression: RawTree<'a>,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Signature-polymorphic invocation with a result type and ordered arguments.
 pub struct ApplySigPolyNode<'a> {
+    /// Callee or type constructor tree to which the arguments apply.
     pub function: RawTree<'a>,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
+    /// Argument trees in their original application order.
     pub arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Quoted pattern body, Quotes context, pattern type, and ordered bindings.
 pub struct QuotePatternNode<'a> {
+    /// Encoded body expression or type syntax in this construct.
     pub body: RawTree<'a>,
+    /// Contextual Quotes tree retained by the quoted pattern.
     pub quotes: RawTree<'a>,
+    /// Encoded semantic type of the quoted or spliced pattern.
     pub pattern_type: RawTree<'a>,
+    /// Pattern bindings in their encoded order.
     pub bindings: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Splice pattern and type with the argument tail retained for contextual classification.
 pub struct SplicePatternNode<'a> {
+    /// Pattern tree tested by this case or splice.
     pub pattern: RawTree<'a>,
+    /// Encoded semantic type of the quoted or spliced pattern.
     pub pattern_type: RawTree<'a>,
     /// The format does not encode a count separating type arguments from
     /// term arguments. Keep the complete ordered tail until typed decoding
@@ -1032,9 +1248,13 @@ pub struct SplicePatternNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Quotation hole identified by an index, type, and ordered captured arguments.
 pub struct HoleNode<'a> {
+    /// Zero-based quotation-hole index assigned by the producer.
     pub index: u32,
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
+    /// Argument trees in their original application order.
     pub arguments: Vec<RawTree<'a>>,
 }
 
@@ -1052,70 +1272,104 @@ impl<'a> SplicePatternNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Semantic match type with its bound, selector, and ordered case types.
 pub struct MatchTypeNode<'a> {
+    /// Encoded bound restricting the semantic match-type result.
     pub bound: RawTree<'a>,
+    /// Scrutinee or selector form encoded by the match construct.
     pub selector: RawTree<'a>,
+    /// Case trees in their original matching order.
     pub cases: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Match-type syntax with an optional bound, selector, and ordered case definitions.
 pub struct MatchTptNode<'a> {
     /// The optional lower bound is omitted when the type-test has only a
     /// selector tree.
     pub bound: Option<RawTree<'a>>,
+    /// Scrutinee or selector form encoded by the match construct.
     pub selector: RawTree<'a>,
+    /// Case trees in their original matching order.
     pub cases: Vec<CaseDefNode<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Two-child semantic type form whose tag selects intersection, union, super, or match-case
+/// grammar.
 pub struct BinaryTypeNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Left child of the binary type form or assignment target.
     pub left: RawTree<'a>,
+    /// Right child of the binary type form or assignment value.
     pub right: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Applied type or type syntax with a constructor and ordered arguments.
 pub struct AppliedTypeNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Encoded type constructor of the application or annotation.
     pub tycon: RawTree<'a>,
+    /// Argument trees in their original application order.
     pub arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Flexible type wrapper around an underlying semantic type.
 pub struct FlexibleTypeNode<'a> {
+    /// Explicit underlying type retained by the wire form.
     pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Type bounds or alias form retaining its tag and variance markers.
 pub struct TypeBoundsNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Lower-bound tree, or the alias target when no separate high bound is present.
     pub low_or_alias: RawTree<'a>,
+    /// Optional upper bound; absence distinguishes the compact alias form.
     pub high: Option<RawTree<'a>>,
     /// The optional alias tree used by `TYPEBOUNDStpt`.
     pub alias: Option<RawTree<'a>>,
+    /// Raw variance modifier tags retained in encoded order.
     pub variances: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Annotated type or syntax tree with its underlying value and annotation.
 pub struct AnnotatedNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Encoded underlying type or tree carrying the annotation.
     pub underlying: RawTree<'a>,
+    /// Encoded annotation tree attached to the underlying type or tree.
     pub annotation: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Annotation constructor type and complete annotation expression.
 pub struct AnnotationNode<'a> {
+    /// Encoded type constructor of the application or annotation.
     pub tycon: RawTree<'a>,
+    /// Complete annotation expression retained alongside its constructor type.
     pub full_annotation: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Reference to one parameter of an AST-addressed type binder.
 pub struct ParamTypeNode {
+    /// AST reference to the enclosing method, polymorphic, or type-lambda binder.
     pub binder: AstRef,
+    /// Zero-based parameter position within the referenced binder.
     pub parameter_number: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One binder parameter’s type or bounds paired with its name-table reference.
 pub struct TypeName<'a> {
     /// The complete type or bounds tree associated with the type parameter.
     ///
@@ -1123,59 +1377,84 @@ pub struct TypeName<'a> {
     /// not an AST reference encoded as a bare Nat; keeping the tree here
     /// preserves nested references and names for indexing and round-trips.
     pub type_or_bounds: RawTree<'a>,
+    /// Zero-based reference into the enclosing TASTy name table.
     pub name: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Polymorphic method or type-lambda binder with result and ordered parameter entries.
 pub struct PolyTypeNode<'a> {
+    /// TASTy wire tag selecting the exact supported grammar form.
     pub tag: u8,
+    /// Encoded result type within this binder.
     pub result_type: RawTree<'a>,
+    /// Parameter type/bounds and name pairs in binder parameter order.
     pub type_names: Vec<TypeName<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Method binder result, ordered parameter entries, and clause modifiers.
 pub struct MethodTypeNode<'a> {
+    /// Encoded result type within this binder.
     pub result_type: RawTree<'a>,
+    /// Parameter type/bounds and name pairs in binder parameter order.
     pub type_names: Vec<TypeName<'a>>,
+    /// Raw modifier tags retained in their encoded order.
     pub modifiers: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One definition suffix entry preserving modifier and annotation order.
 pub enum DefinitionTail<'a> {
+    /// Single category-one modifier tag.
     Modifier(u8),
     /// A `private[qualifier]` or `protected[qualifier]` modifier.
     ///
     /// The qualifier is an AST tree rather than a category-one modifier, so
     /// it must remain available to reference collection and AST indexing.
     QualifiedModifier(AstChildNode<'a>),
+    /// Raw annotation node retained for separate structural decoding.
     Annotation(RawNode<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Borrowed type or value parameter declaration, with a name, body, and original payload.
 pub enum ParameterNode<'a> {
+    /// Type parameter declaration with its bounds or type body.
     TypeParam {
+        /// Zero-based reference into the enclosing TASTy name table.
         name: u32,
+        /// Borrowed definition body after its leading name; decoding it is a separate operation.
         body: &'a [u8],
         /// Full node payload (name followed by `body`), as for definition nodes.
         payload: &'a [u8],
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// Value parameter declaration with its type body.
     TermParam {
+        /// Zero-based reference into the enclosing TASTy name table.
         name: u32,
+        /// Borrowed definition body after its leading name; decoding it is a separate operation.
         body: &'a [u8],
         /// Full node payload (name followed by `body`), as for definition nodes.
         payload: &'a [u8],
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded parameter type and ordered modifier/annotation tail.
 pub struct ParameterBody<'a> {
+    /// Encoded type tree; this structure does not resolve its semantic meaning.
     pub type_tree: RawTree<'a>,
+    /// Ordered definition modifiers and annotations after the type or body.
     pub tail: Vec<DefinitionTail<'a>>,
 }
 
 impl<'a> ParameterNode<'a> {
+    /// Returns the wire tag distinguishing this declaration or parameter form.
     pub fn tag(&self) -> u8 {
         match self {
             Self::TypeParam { .. } => TYPEPARAM_TAG,
@@ -1183,18 +1462,21 @@ impl<'a> ParameterNode<'a> {
         }
     }
 
+    /// Returns the original decoded byte offset in the node’s reader coordinate system.
     pub fn offset(&self) -> usize {
         match self {
             Self::TypeParam { offset, .. } | Self::TermParam { offset, .. } => *offset,
         }
     }
 
+    /// Returns the zero-based reference into the enclosing file’s name table.
     pub fn name(&self) -> u32 {
         match self {
             Self::TypeParam { name, .. } | Self::TermParam { name, .. } => *name,
         }
     }
 
+    /// Borrows the undecoded body bytes after the leading name reference.
     pub fn body(&self) -> &'a [u8] {
         match self {
             Self::TypeParam { body, .. } | Self::TermParam { body, .. } => body,
@@ -1209,6 +1491,8 @@ impl<'a> ParameterNode<'a> {
         }
     }
 
+    /// Decodes the parameter type and modifier/annotation tail. Malformed child trees or suffixes
+    /// return AstError; the borrowed input is unchanged.
     pub fn decode_body(&self) -> Result<ParameterBody<'a>, AstError> {
         let mut reader = Reader::new(self.body());
         let type_tree = RawTree::decode(&mut reader)?;
@@ -1218,18 +1502,28 @@ impl<'a> ParameterNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Leading class parameters and an undecoded borrowed template remainder.
 pub struct TemplateNode<'a> {
+    /// Leading type-parameter declarations in wire order.
     pub type_params: Vec<ParameterNode<'a>>,
+    /// Leading value-parameter declarations in wire order.
     pub term_params: Vec<ParameterNode<'a>>,
+    /// Borrowed template payload following the leading parameter declarations.
     pub remainder: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded class parameters, parents, self definition, split marker, and ordered body terms.
 pub struct TemplateStructure<'a> {
+    /// Leading type-parameter declarations in wire order.
     pub type_params: Vec<ParameterNode<'a>>,
+    /// Leading value-parameter declarations in wire order.
     pub term_params: Vec<ParameterNode<'a>>,
+    /// Parent type or constructor trees in wire order.
     pub parents: Vec<RawTree<'a>>,
+    /// Optional explicit template self declaration.
     pub self_def: Option<RawTree<'a>>,
+    /// Whether the template contains the split-clause marker.
     pub split_clause: bool,
     /// Template stats are ordered terms, not only category-five definitions.
     /// Compiler-generated templates can contain a path or another term here.
@@ -1237,6 +1531,7 @@ pub struct TemplateStructure<'a> {
 }
 
 impl<'a> DefinitionNode<'a> {
+    /// Returns the zero-based reference into the enclosing file’s name table.
     pub fn name(&self) -> u32 {
         match self {
             Self::ValDef { name, .. } | Self::DefDef { name, .. } | Self::TypeDef { name, .. } => {
@@ -1245,6 +1540,7 @@ impl<'a> DefinitionNode<'a> {
         }
     }
 
+    /// Borrows the undecoded body bytes after the leading name reference.
     pub fn body(&self) -> &'a [u8] {
         match self {
             Self::ValDef { body, .. } | Self::DefDef { body, .. } | Self::TypeDef { body, .. } => {
@@ -1253,48 +1549,78 @@ impl<'a> DefinitionNode<'a> {
         }
     }
 
+    /// Creates a reader over the body bytes, initially at body-relative offset zero.
     pub fn body_reader(&self) -> Reader<'a> {
         Reader::new(self.body())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Structural decoding, indexing, depth-limit, or address-relocation failure in a TASTy AST.
 pub enum AstError {
+    /// Bounded reader failure while reading the AST payload.
     Read(ReadError),
+    /// Structured term decoder rejected a child tree.
     Term(TermError),
+    /// The tag cannot designate a valid node in this context.
     InvalidTag {
+        /// TASTy wire tag selecting the exact supported grammar form.
         tag: u8,
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// This decoder cannot determine a raw boundary for the tag category.
     UnsupportedCategory {
+        /// TASTy wire tag selecting the exact supported grammar form.
         tag: u8,
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// The node has a different tag than required by this structural query.
     UnexpectedTag {
+        /// Tag or node count required by the enclosing structural validation rule.
         expected: u8,
+        /// Tag or node count actually encountered during structural validation.
         actual: u8,
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// Address indexing exceeded the configured traversal depth.
     RecursionLimit {
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
+        /// Maximum recursive indexing depth configured for this operation.
         limit: usize,
     },
+    /// An AST address does not identify a visible node boundary.
     InvalidAstReference {
+        /// AST-section byte address targeted by the encoded reference.
         address: u32,
     },
+    /// Relocation changed the visible node count unexpectedly.
     AstNodeCountMismatch {
+        /// Tag or node count required by the enclosing structural validation rule.
         expected: usize,
+        /// Tag or node count actually encountered during structural validation.
         actual: usize,
     },
+    /// Editing siblings left insufficient identity evidence to relocate this node.
     AmbiguousRelocation {
+        /// TASTy wire tag selecting the exact supported grammar form.
         tag: u8,
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// An opaque node has references this relocation path cannot rewrite safely.
     UnsupportedRelocation {
+        /// TASTy wire tag selecting the exact supported grammar form.
         tag: u8,
+        /// Original byte offset in the coordinate system used by the decoder.
         offset: usize,
     },
+    /// Address widths and node layout did not stabilize within the allowed passes.
     RelocationDidNotConverge {
+        /// Number of layout attempts before relocation failed to converge.
         iterations: usize,
     },
 }
@@ -1415,26 +1741,33 @@ impl<'a> RawNodes<'a> {
         Ok(Self { nodes })
     }
 
+    /// Returns the number of node entries represented by this collection.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns whether this collection contains no node entries.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    /// Borrows the node at a zero-based list index, or None when out of range.
     pub fn get(&self, index: usize) -> Option<&RawNode<'a>> {
         self.nodes.get(index)
     }
 
+    /// Iterates over the recorded node entries in collection order.
     pub fn iter(&self) -> impl Iterator<Item = &RawNode<'a>> {
         self.nodes.iter()
     }
 
+    /// Borrows the recorded node list in collection order.
     pub fn entries(&self) -> &[RawNode<'a>] {
         &self.nodes
     }
 
+    /// Builds a shallow address index over these raw top-level entries. Nested child edges require
+    /// the file’s deep AST indexing API.
     pub fn address_index(&self) -> AstAddressIndex<'a> {
         let mut nodes = self.nodes.clone();
         nodes.sort_unstable_by_key(|node| node.offset);
@@ -1481,6 +1814,9 @@ impl<'a> RawNodes<'a> {
         })
     }
 
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for node in &self.nodes {
             node.encode(writer)?;
@@ -1498,6 +1834,9 @@ impl<'a> RawNodes<'a> {
         Ok(())
     }
 
+    /// Encodes the raw top-level nodes and records their newly emitted addresses. Stored offsets
+    /// are inspection metadata; this operation alone does not establish semantic reference
+    /// validity.
     pub fn encode_with_addresses(&self) -> Result<EncodedAstNodes, WriteError> {
         let mut writer = Writer::new();
         let mut addresses = Vec::with_capacity(self.nodes.len());
@@ -1683,18 +2022,22 @@ impl<'a> AstAddressIndex<'a> {
         self.edges.iter().copied()
     }
 
+    /// Iterates recorded node-start addresses in ascending byte-offset order.
     pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
         self.all_nodes.iter().map(|node| node.offset as u32)
     }
 
+    /// Iterates the recorded category-five node-start addresses in ascending byte-offset order.
     pub fn addresses(&self) -> impl Iterator<Item = u32> + '_ {
         self.nodes.iter().map(|node| node.offset as u32)
     }
 
+    /// Returns the number of recorded category-five raw nodes, excluding smaller child terms.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns whether the index records no category-five raw nodes.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -2404,6 +2747,9 @@ fn collect_structured_nodes<'a>(
 }
 
 impl<'a> RawNode<'a> {
+    /// Decodes a recognized structural node variant, retaining an opaque Raw form for an unmodeled
+    /// length-delimited node. Rejects malformed payloads without resolving names or semantic
+    /// symbols.
     pub fn decode_structured(&self) -> Result<StructuredNode<'a>, AstError> {
         Ok(match self.tag {
             PACKAGE_TAG => StructuredNode::Package(self.decode_package()?),
@@ -2536,6 +2882,9 @@ impl<'a> RawNode<'a> {
         Ok(())
     }
 
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         if NodeCategory::from_tag(self.tag) != Some(NodeCategory::Category5) {
             return Err(WriteError::InvalidTag { tag: self.tag });
@@ -2554,6 +2903,9 @@ impl<'a> RawNode<'a> {
         }
     }
 
+    /// Decodes the package path and ordered raw declarations. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_package(&self) -> Result<PackageNode<'a>, AstError> {
         let mut reader = self.reader();
         if self.tag != PACKAGE_TAG {
@@ -2570,6 +2922,9 @@ impl<'a> RawNode<'a> {
         Ok(PackageNode { path, stats })
     }
 
+    /// Decodes the definition header and borrowed undecoded body. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_definition(&self) -> Result<DefinitionNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = match self.tag {
@@ -2592,6 +2947,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the value or type definition body. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_definition_body(&self) -> Result<DefinitionBody<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -2625,6 +2983,9 @@ impl<'a> RawNode<'a> {
         }
     }
 
+    /// Decodes the method header, result, RHS, and tail. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_defdef_body(&self) -> Result<DefDefBody<'a>, AstError> {
         if self.tag != DEFDEF_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2672,6 +3033,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the import/export qualifier and selector list. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_import_export(&self) -> Result<ImportExportNode<'a>, AstError> {
         let kind = match self.tag {
             IMPORT_TAG => ImportExportKind::Import,
@@ -2732,6 +3096,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the owner-space reference and underlying type. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_in_reference(&self) -> Result<InReferenceNode<'a>, AstError> {
         if !matches!(self.tag, TERMREFIN_TAG | TYPEREFIN_TAG) {
             return Err(AstError::UnexpectedTag {
@@ -2760,6 +3127,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the owner-space selection and underlying type. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_select_in(&self) -> Result<SelectInNode<'a>, AstError> {
         if self.tag != SELECTIN_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2788,6 +3158,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the case pattern, body, and optional guard. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_case_def(&self) -> Result<CaseDefNode<'a>, AstError> {
         if self.tag != CASEDEF_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2821,6 +3194,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the pattern or type binding. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_bind(&self) -> Result<BindNode<'a>, AstError> {
         if self.tag != BIND_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2872,6 +3247,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the quotation hole and ordered arguments. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_hole(&self) -> Result<HoleNode<'a>, AstError> {
         if self.tag != HOLE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2896,6 +3274,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the ordered alternative patterns. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_alternative(&self) -> Result<AlternativeNode<'a>, AstError> {
         if self.tag != ALTERNATIVE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2914,6 +3294,9 @@ impl<'a> RawNode<'a> {
         Ok(AlternativeNode { alternatives })
     }
 
+    /// Decodes the extractor application and pattern arguments. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_unapply(&self) -> Result<UnapplyNode<'a>, AstError> {
         if self.tag != UNAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2943,6 +3326,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the semantic refinement parent, name, and member type. Wrong tags or malformed
+    /// payloads return AstError. This structural query does not resolve semantic symbols or mutate
+    /// the borrowed input.
     pub fn decode_refined_type(&self) -> Result<RefinedTypeNode<'a>, AstError> {
         if self.tag != REFINEDTYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2971,6 +3357,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the refined type syntax and declaration list. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_refined_tpt(&self) -> Result<RefinedTptNode<'a>, AstError> {
         if self.tag != REFINEDTPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2987,6 +3376,9 @@ impl<'a> RawNode<'a> {
         Ok(RefinedTptNode { qualifier, stats })
     }
 
+    /// Decodes the type-lambda parameter declarations and body. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_lambda_tpt(&self) -> Result<LambdaTptNode<'a>, AstError> {
         if self.tag != LAMBDATPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3016,6 +3408,9 @@ impl<'a> RawNode<'a> {
         Ok(LambdaTptNode { type_params, body })
     }
 
+    /// Decodes the inlined result, optional call site, and local definitions. Wrong tags or
+    /// malformed payloads return AstError. This structural query does not resolve semantic symbols
+    /// or mutate the borrowed input.
     pub fn decode_inlined(&self) -> Result<InlinedNode<'a>, AstError> {
         if self.tag != INLINED_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3042,6 +3437,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the match selector form and ordered cases. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_match(&self) -> Result<MatchNode<'a>, AstError> {
         if self.tag != MATCH_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3091,6 +3489,9 @@ impl<'a> RawNode<'a> {
         Ok(MatchNode { selector, cases })
     }
 
+    /// Decodes the protected expression, handlers, and finalizer. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_try(&self) -> Result<TryNode<'a>, AstError> {
         if self.tag != TRY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3122,10 +3523,14 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the quote expression and type. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_quote(&self) -> Result<QuoteNode<'a>, AstError> {
         self.decode_quote_like(QUOTE_TAG)
     }
 
+    /// Decodes the splice expression and type. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_splice(&self) -> Result<QuoteNode<'a>, AstError> {
         self.decode_quote_like(SPLICE_TAG)
     }
@@ -3156,6 +3561,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the signature-polymorphic application. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_apply_sigpoly(&self) -> Result<ApplySigPolyNode<'a>, AstError> {
         if self.tag != APPLYSIGPOLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3180,6 +3588,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the quoted pattern and contextual metadata. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_quote_pattern(&self) -> Result<QuotePatternNode<'a>, AstError> {
         if self.tag != QUOTEPATTERN_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3206,6 +3617,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the splice pattern and unclassified argument tail. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_splice_pattern(&self) -> Result<SplicePatternNode<'a>, AstError> {
         if self.tag != SPLICEPATTERN_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3230,6 +3644,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the semantic match-type bound, scrutinee, and cases. Wrong tags or malformed
+    /// payloads return AstError. This structural query does not resolve semantic symbols or mutate
+    /// the borrowed input.
     pub fn decode_match_type(&self) -> Result<MatchTypeNode<'a>, AstError> {
         if self.tag != MATCHTYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3254,6 +3671,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the match-type syntax and case definitions. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_match_tpt(&self) -> Result<MatchTptNode<'a>, AstError> {
         if self.tag != MATCHTPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3297,6 +3717,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the value application and ordered arguments. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
         if self.tag != APPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3319,6 +3742,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the block result and preceding statements. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_block(&self) -> Result<BlockNode<'a>, AstError> {
         if self.tag != BLOCK_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3338,6 +3764,9 @@ impl<'a> RawNode<'a> {
         Ok(BlockNode { expression, stats })
     }
 
+    /// Decodes the conditional and its optional inline marker. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_if(&self) -> Result<IfNode<'a>, AstError> {
         if self.tag != IF_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3372,6 +3801,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the closure method reference and optional target type. Wrong tags or malformed
+    /// payloads return AstError. This structural query does not resolve semantic symbols or mutate
+    /// the borrowed input.
     pub fn decode_lambda(&self) -> Result<LambdaNode<'a>, AstError> {
         if self.tag != LAMBDA_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3401,6 +3833,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the super reference and optional mixin type. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_super(&self) -> Result<SuperNode<'a>, AstError> {
         if self.tag != SUPER_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3430,6 +3865,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the repeated argument type and elements. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_repeated(&self) -> Result<RepeatedNode<'a>, AstError> {
         if self.tag != REPEATED_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3452,6 +3890,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the outer-instance selection and lexical distance. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_select_outer(&self) -> Result<SelectOuterNode<'a>, AstError> {
         if self.tag != SELECTOUTER_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3479,18 +3920,27 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the intersection type. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_and_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
         self.decode_binary_type(ANDTYPE_TAG)
     }
 
+    /// Decodes the union type. Wrong tags or malformed payloads return AstError. This structural
+    /// query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_or_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
         self.decode_binary_type(ORTYPE_TAG)
     }
 
+    /// Decodes the super type pair. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_super_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
         self.decode_binary_type(SUPERTYPE_TAG)
     }
 
+    /// Decodes the match-case pattern and result type pair. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_matchcase_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
         self.decode_binary_type(MATCHCASETYPE_TAG)
     }
@@ -3521,6 +3971,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the type constructor and arguments. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_applied_type(&self) -> Result<AppliedTypeNode<'a>, AstError> {
         if self.tag != APPLIEDTYPE_TAG && self.tag != APPLIEDTPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3544,6 +3997,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the flexible underlying type. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_flexible_type(&self) -> Result<FlexibleTypeNode<'a>, AstError> {
         if self.tag != FLEXIBLETYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3565,6 +4020,9 @@ impl<'a> RawNode<'a> {
         Ok(FlexibleTypeNode { underlying_type })
     }
 
+    /// Decodes the bounds or alias form with variance markers. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_type_bounds(&self) -> Result<TypeBoundsNode<'a>, AstError> {
         if self.tag != TYPEBOUNDS_TAG && self.tag != TYPEBOUNDSTPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3624,6 +4082,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the annotated type or syntax. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_annotated(&self) -> Result<AnnotatedNode<'a>, AstError> {
         if self.tag != ANNOTATEDTYPE_TAG && self.tag != ANNOTATEDTPT_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3650,6 +4110,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the annotation constructor and full expression. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_annotation(&self) -> Result<AnnotationNode<'a>, AstError> {
         if self.tag != ANNOTATION_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3675,6 +4138,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the binder reference and parameter position. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_param_type(&self) -> Result<ParamTypeNode, AstError> {
         if self.tag != PARAMTYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3703,6 +4169,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the polymorphic or type-lambda binder. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_poly_type(&self) -> Result<PolyTypeNode<'a>, AstError> {
         if self.tag != POLYTYPE_TAG && self.tag != TYPELAMBDATYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3729,6 +4198,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the method binder and clause modifiers. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_method_type(&self) -> Result<MethodTypeNode<'a>, AstError> {
         if self.tag != METHODTYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3828,6 +4300,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the type application and ordered arguments. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3850,6 +4325,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the type-ascribed expression. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_typed(&self) -> Result<TypedNode<'a>, AstError> {
         if self.tag != TYPED_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3875,6 +4352,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the assignment target and value. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_assign(&self) -> Result<AssignNode<'a>, AstError> {
         if self.tag != ASSIGN_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3897,6 +4376,9 @@ impl<'a> RawNode<'a> {
         Ok(AssignNode { left, right })
     }
 
+    /// Decodes the return-target reference and optional value. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_return(&self) -> Result<ReturnNode<'a>, AstError> {
         if self.tag != RETURN_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3923,6 +4405,8 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the loop condition and body. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_while(&self) -> Result<WhileNode<'a>, AstError> {
         if self.tag != WHILE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -3945,6 +4429,9 @@ impl<'a> RawNode<'a> {
         Ok(WhileNode { condition, body })
     }
 
+    /// Decodes the parameter header and borrowed body. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -3971,6 +4458,9 @@ impl<'a> RawNode<'a> {
         }
     }
 
+    /// Decodes the leading template parameters and borrowed remainder. Wrong tags or malformed
+    /// payloads return AstError. This structural query does not resolve semantic symbols or mutate
+    /// the borrowed input.
     pub fn decode_template(&self) -> Result<TemplateNode<'a>, AstError> {
         if self.tag != TEMPLATE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -4003,6 +4493,9 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes the template parameters, parents, self definition, and statements. Wrong tags or
+    /// malformed payloads return AstError. This structural query does not resolve semantic symbols
+    /// or mutate the borrowed input.
     pub fn decode_template_structure(&self) -> Result<TemplateStructure<'a>, AstError> {
         let template = self.decode_template()?;
         let remainder_offset = subslice_offset(self.payload, template.remainder).unwrap_or(0);
@@ -4050,6 +4543,9 @@ impl<'a> RawNode<'a> {
 }
 
 impl<'a> PackageNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PACKAGE_TAG, writer, |payload| {
             self.path.encode(payload)?;
@@ -4075,6 +4571,9 @@ impl<'a> PackageNode<'a> {
 }
 
 impl<'a> ImportExportNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         let tag = match self.kind {
             ImportExportKind::Import => IMPORT_TAG,
@@ -4103,6 +4602,9 @@ impl<'a> ImportExportNode<'a> {
 }
 
 impl<'a> DefinitionNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         let tag = match self {
             Self::ValDef { .. } => VALDEF_TAG,
@@ -4118,6 +4620,9 @@ impl<'a> DefinitionNode<'a> {
 }
 
 impl<'a> TemplateNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(TEMPLATE_TAG, writer, |payload| {
             for parameter in &self.type_params {
@@ -4133,6 +4638,9 @@ impl<'a> TemplateNode<'a> {
 }
 
 impl<'a> DefinitionTail<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         match self {
             Self::Modifier(tag) => {
@@ -4155,16 +4663,21 @@ impl<'a> DefinitionTail<'a> {
 }
 
 impl<'a> DefinitionBody<'a> {
+    /// Returns the zero-based reference into the enclosing file’s name table.
     pub fn name(&self) -> u32 {
         match self {
             Self::ValDef { name, .. } | Self::TypeDef { name, .. } => *name,
         }
     }
 
+    /// Encodes the definition with its retained name and ordered body fields. Writer failures can
+    /// leave a prefix in the output; no semantic validation or file publication is performed.
     pub fn encode_self(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         self.encode(self.name(), writer)
     }
 
+    /// Encodes this definition body using the supplied zero-based name-table reference. Output can
+    /// contain a prefix on error; the caller must preserve valid names and AST references.
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         let tag = match self {
             Self::ValDef { .. } => VALDEF_TAG,
@@ -4220,14 +4733,19 @@ impl<'a> DefDefBody<'a> {
         })
     }
 
+    /// Returns the zero-based reference into the enclosing file’s name table.
     pub fn name(&self) -> u32 {
         self.name
     }
 
+    /// Encodes the definition with its retained name and ordered body fields. Writer failures can
+    /// leave a prefix in the output; no semantic validation or file publication is performed.
     pub fn encode_self(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         self.encode(self.name, writer)
     }
 
+    /// Encodes this definition body using the supplied zero-based name-table reference. Output can
+    /// contain a prefix on error; the caller must preserve valid names and AST references.
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(DEFDEF_TAG, writer, |payload| {
             payload.write_nat(name)?;
@@ -4258,6 +4776,9 @@ fn encode_defdef_clause(clause: u8, writer: &mut Writer) -> Result<(), TermEncod
 }
 
 impl<'a> TemplateStructure<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(TEMPLATE_TAG, writer, |payload| {
             for parameter in &self.type_params {
@@ -4279,6 +4800,9 @@ impl<'a> TemplateStructure<'a> {
 }
 
 impl<'a> ApplyNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(APPLY_TAG, writer, |payload| {
             self.function.encode(payload)?;
@@ -4288,6 +4812,9 @@ impl<'a> ApplyNode<'a> {
 }
 
 impl<'a> TypeApplyNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(TYPEAPPLY_TAG, writer, |payload| {
             self.function.encode(payload)?;
@@ -4297,6 +4824,9 @@ impl<'a> TypeApplyNode<'a> {
 }
 
 impl<'a> TypedNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(TYPED_TAG, writer, |payload| {
             self.expression.encode(payload)?;
@@ -4306,6 +4836,9 @@ impl<'a> TypedNode<'a> {
 }
 
 impl<'a> AssignNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(ASSIGN_TAG, writer, |payload| {
             self.left.encode(payload)?;
@@ -4315,6 +4848,9 @@ impl<'a> AssignNode<'a> {
 }
 
 impl<'a> BlockNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(BLOCK_TAG, writer, |payload| {
             self.expression.encode(payload)?;
@@ -4324,6 +4860,9 @@ impl<'a> BlockNode<'a> {
 }
 
 impl<'a> IfNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(IF_TAG, writer, |payload| {
             if self.inline {
@@ -4337,6 +4876,9 @@ impl<'a> IfNode<'a> {
 }
 
 impl<'a> LambdaNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(LAMBDA_TAG, writer, |payload| {
             self.method.encode(payload)?;
@@ -4349,6 +4891,9 @@ impl<'a> LambdaNode<'a> {
 }
 
 impl<'a> SuperNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(SUPER_TAG, writer, |payload| {
             self.this_term.encode(payload)?;
@@ -4361,6 +4906,9 @@ impl<'a> SuperNode<'a> {
 }
 
 impl<'a> RepeatedNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(REPEATED_TAG, writer, |payload| {
             self.element_type.encode(payload)?;
@@ -4370,6 +4918,9 @@ impl<'a> RepeatedNode<'a> {
 }
 
 impl<'a> SelectOuterNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(SELECTOUTER_TAG, writer, |payload| {
             payload.write_nat(self.levels)?;
@@ -4380,6 +4931,9 @@ impl<'a> SelectOuterNode<'a> {
 }
 
 impl<'a> ReturnNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(RETURN_TAG, writer, |payload| {
             payload.write_ast_ref(self.target.address)?;
@@ -4392,6 +4946,9 @@ impl<'a> ReturnNode<'a> {
 }
 
 impl<'a> WhileNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(WHILE_TAG, writer, |payload| {
             self.condition.encode(payload)?;
@@ -4401,6 +4958,9 @@ impl<'a> WhileNode<'a> {
 }
 
 impl<'a> CaseDefNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(CASEDEF_TAG, writer, |payload| {
             self.pattern.encode(payload)?;
@@ -4414,6 +4974,9 @@ impl<'a> CaseDefNode<'a> {
 }
 
 impl<'a> MatchNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(MATCH_TAG, writer, |payload| {
             match &self.selector {
@@ -4443,6 +5006,9 @@ impl<'a> MatchNode<'a> {
 }
 
 impl<'a> TryNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(TRY_TAG, writer, |payload| {
             self.expression.encode(payload)?;
@@ -4458,6 +5024,9 @@ impl<'a> TryNode<'a> {
 }
 
 impl<'a> InlinedNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(INLINED_TAG, writer, |payload| {
             self.expression.encode(payload)?;
@@ -4470,6 +5039,9 @@ impl<'a> InlinedNode<'a> {
 }
 
 impl<'a> QuoteNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, QUOTE_TAG | SPLICE_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4482,6 +5054,9 @@ impl<'a> QuoteNode<'a> {
 }
 
 impl<'a> ApplySigPolyNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(APPLYSIGPOLY_TAG, writer, |payload| {
             self.function.encode(payload)?;
@@ -4492,6 +5067,9 @@ impl<'a> ApplySigPolyNode<'a> {
 }
 
 impl<'a> BinaryTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(
             self.tag,
@@ -4507,6 +5085,9 @@ impl<'a> BinaryTypeNode<'a> {
 }
 
 impl<'a> AppliedTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, APPLIEDTYPE_TAG | APPLIEDTPT_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4519,6 +5100,9 @@ impl<'a> AppliedTypeNode<'a> {
 }
 
 impl<'a> FlexibleTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(FLEXIBLETYPE_TAG, writer, |payload| {
             self.underlying_type.encode(payload)
@@ -4527,6 +5111,9 @@ impl<'a> FlexibleTypeNode<'a> {
 }
 
 impl<'a> TypeBoundsNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, TYPEBOUNDS_TAG | TYPEBOUNDSTPT_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4575,6 +5162,9 @@ pub const fn is_compact_annot_type_tag(tag: u8) -> bool {
 }
 
 impl<'a> AnnotatedNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, ANNOTATEDTYPE_TAG | ANNOTATEDTPT_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4587,6 +5177,9 @@ impl<'a> AnnotatedNode<'a> {
 }
 
 impl<'a> AnnotationNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(ANNOTATION_TAG, writer, |payload| {
             self.tycon.encode(payload)?;
@@ -4596,6 +5189,9 @@ impl<'a> AnnotationNode<'a> {
 }
 
 impl ParamTypeNode {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PARAMTYPE_TAG, writer, |payload| {
             payload.write_ast_ref(self.binder.address)?;
@@ -4606,6 +5202,9 @@ impl ParamTypeNode {
 }
 
 impl<'a> PolyTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, POLYTYPE_TAG | TYPELAMBDATYPE_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4622,6 +5221,9 @@ impl<'a> PolyTypeNode<'a> {
 }
 
 impl<'a> MethodTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(METHODTYPE_TAG, writer, |payload| {
             self.result_type.encode(payload)?;
@@ -4641,6 +5243,9 @@ impl<'a> MethodTypeNode<'a> {
 }
 
 impl<'a> RefinedTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if self.tag != REFINEDTYPE_TAG {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4654,6 +5259,9 @@ impl<'a> RefinedTypeNode<'a> {
 }
 
 impl<'a> RefinedTptNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(REFINEDTPT_TAG, writer, |payload| {
             self.qualifier.encode(payload)?;
@@ -4663,6 +5271,9 @@ impl<'a> RefinedTptNode<'a> {
 }
 
 impl<'a> ParameterNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         let (tag, name) = match self {
             Self::TypeParam { name, .. } => (TYPEPARAM_TAG, *name),
@@ -4686,6 +5297,9 @@ impl<'a> ParameterNode<'a> {
 }
 
 impl<'a> LambdaTptNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(LAMBDATPT_TAG, writer, |payload| {
             for parameter in &self.type_params {
@@ -4697,6 +5311,9 @@ impl<'a> LambdaTptNode<'a> {
 }
 
 impl<'a> BindNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(BIND_TAG, writer, |payload| {
             payload.write_nat(self.name)?;
@@ -4716,6 +5333,9 @@ impl<'a> BindNode<'a> {
 }
 
 impl<'a> HoleNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(HOLE_TAG, writer, |payload| {
             payload.write_nat(self.index)?;
@@ -4726,6 +5346,9 @@ impl<'a> HoleNode<'a> {
 }
 
 impl<'a> AlternativeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(ALTERNATIVE_TAG, writer, |payload| {
             encode_trees(&self.alternatives, payload)
@@ -4734,6 +5357,9 @@ impl<'a> AlternativeNode<'a> {
 }
 
 impl<'a> UnapplyNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(UNAPPLY_TAG, writer, |payload| {
             self.function.encode(payload)?;
@@ -4747,6 +5373,9 @@ impl<'a> UnapplyNode<'a> {
 }
 
 impl<'a> QuotePatternNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(QUOTEPATTERN_TAG, writer, |payload| {
             self.body.encode(payload)?;
@@ -4758,6 +5387,9 @@ impl<'a> QuotePatternNode<'a> {
 }
 
 impl<'a> SplicePatternNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(SPLICEPATTERN_TAG, writer, |payload| {
             self.pattern.encode(payload)?;
@@ -4768,6 +5400,9 @@ impl<'a> SplicePatternNode<'a> {
 }
 
 impl<'a> MatchTypeNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(MATCHTYPE_TAG, writer, |payload| {
             self.bound.encode(payload)?;
@@ -4778,6 +5413,9 @@ impl<'a> MatchTypeNode<'a> {
 }
 
 impl<'a> MatchTptNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(MATCHTPT_TAG, writer, |payload| {
             if let Some(bound) = &self.bound {
@@ -4793,6 +5431,9 @@ impl<'a> MatchTptNode<'a> {
 }
 
 impl<'a> InReferenceNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, TERMREFIN_TAG | TYPEREFIN_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4806,6 +5447,9 @@ impl<'a> InReferenceNode<'a> {
 }
 
 impl<'a> SelectInNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if self.tag != SELECTIN_TAG {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -4888,6 +5532,8 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Writes the requested wrapper tag followed by this child tree. A tag invalid for this form
+    /// or a child encoding failure returns TermEncodeError; output can already contain a prefix.
     pub fn encode_ast_child(&self, tag: u8, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(tag, 90..=104) {
             return Err(TermEncodeError::InvalidValue { tag });
@@ -4896,6 +5542,8 @@ impl<'a> RawTree<'a> {
         self.encode(writer)
     }
 
+    /// Requires the supplied wrapper tag and decodes its single child. Wrong tags and malformed
+    /// child structure return AstError; no semantic reference resolution is performed.
     pub fn decode_ast_child(&self, expected: u8) -> Result<AstChildNode<'a>, AstError> {
         match self {
             RawTree::Ast { tag, offset, child } if *tag == expected => Ok(AstChildNode {
@@ -4914,72 +5562,115 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes the current-instance type wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_this(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(THIS_TAG)
     }
 
+    /// Decodes the qualified-this wrapper. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_qual_this(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(QUALTHIS_TAG)
     }
 
+    /// Decodes the class-constant type wrapper. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_class_const(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(CLASSCONST_TAG)
     }
 
+    /// Decodes the class literal with its referenced type. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_class_constant(&self) -> Result<ClassConstNode<'a>, AstError> {
         Ok(ClassConstNode {
             type_tree: self.decode_class_const()?.child,
         })
     }
 
+    /// Decodes the by-name semantic type wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_by_name_type(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(BYNAMETYPE_TAG)
     }
 
+    /// Decodes the by-name type-syntax wrapper. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_by_name_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(BYNAMETPT_TAG)
     }
 
+    /// Decodes the instance-construction type wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_new(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(NEW_TAG)
     }
 
+    /// Decodes the throw-expression wrapper. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_throw(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(THROW_TAG)
     }
 
+    /// Decodes the implicit argument wrapper. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_implicit_arg(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(IMPLICITARG_TAG)
     }
 
+    /// Decodes the qualified private-access wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_private_qualified(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(PRIVATEQUALIFIED_TAG)
     }
 
+    /// Decodes the qualified protected-access wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_protected_qualified(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(PROTECTEDQUALIFIED_TAG)
     }
 
+    /// Decodes the recursive type binder wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_rec_type(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(RECTYPE_TAG)
     }
 
+    /// Decodes the singleton type-syntax wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_singleton_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(SINGLETONTPT_TAG)
     }
 
+    /// Decodes the bounded-selector type wrapper. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_bounded(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(BOUNDED_TAG)
     }
 
+    /// Decodes the explicit type-syntax wrapper. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_explicit_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(EXPLICITTPT_TAG)
     }
 
+    /// Decodes the elided tree wrapper. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_elided(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(ELIDED_TAG)
     }
 
+    /// Decodes the template self declaration. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_self_def(&self) -> Result<SelfDefNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -5002,6 +5693,8 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes the named value argument. Wrong tags or malformed payloads return AstError. This
+    /// structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_named_arg(&self) -> Result<NamedArgNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -5024,6 +5717,8 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes the identifier name and type. Wrong tags or malformed payloads return AstError.
+    /// This structural query does not resolve semantic symbols or mutate the borrowed input.
     pub fn decode_ident(&self) -> Result<IdentNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -5047,6 +5742,9 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes the member-selection name and qualifier. Wrong tags or malformed payloads return
+    /// AstError. This structural query does not resolve semantic symbols or mutate the borrowed
+    /// input.
     pub fn decode_select(&self) -> Result<SelectNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -5070,6 +5768,9 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes the symbol or name reference with its qualifier. Wrong tags or malformed payloads
+    /// return AstError. This structural query does not resolve semantic symbols or mutate the
+    /// borrowed input.
     pub fn decode_reference(&self) -> Result<ReferenceNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -5095,18 +5796,27 @@ impl<'a> RawTree<'a> {
 }
 
 impl<'a> AstChildNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         self.child.encode_ast_child(self.tag, writer)
     }
 }
 
 impl<'a> ClassConstNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         self.type_tree.encode_ast_child(CLASSCONST_TAG, writer)
     }
 }
 
 impl<'a> NamedArgNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(NAMEDARG_TAG);
         writer.write_nat(self.name)?;
@@ -5115,6 +5825,9 @@ impl<'a> NamedArgNode<'a> {
 }
 
 impl<'a> IdentNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, IDENT_TAG | IDENTTPT_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -5126,6 +5839,9 @@ impl<'a> IdentNode<'a> {
 }
 
 impl<'a> SelectNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, SELECT_TAG | SELECTTPT_TAG) {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
@@ -5137,6 +5853,9 @@ impl<'a> SelectNode<'a> {
 }
 
 impl<'a> ReferenceNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(
             self.tag,
@@ -5151,6 +5870,9 @@ impl<'a> ReferenceNode<'a> {
 }
 
 impl<'a> SelfDefNode<'a> {
+    /// Encodes this structural representation into the supplied writer. Existing reference
+    /// identities are retained; errors can leave a written prefix. This does not complete
+    /// semantics or publish a file.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(SELFDEF_TAG);
         writer.write_nat(self.name)?;

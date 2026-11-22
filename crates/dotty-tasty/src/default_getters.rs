@@ -11,8 +11,11 @@ use crate::{
 /// zero-based term parameter ordinal, flattened across the target's clauses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultGetterSite {
+    /// Zero-based method position in the planned member sequence.
     pub method: usize,
+    /// Zero-based position in the ordered input sequence.
     pub ordinal: usize,
+    /// Zero-based getter position in the retained metadata.
     pub getter: usize,
     /// The marked parameter carries either GIVEN or IMPLICIT.
     pub contextual: bool,

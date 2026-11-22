@@ -14,6 +14,9 @@
 //! same-slot IDs from independently allocated sessions. Unsupported semantics
 //! remain the responsibility of the consuming phase, not this foundational crate.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 pub mod ast;
 mod context_closure;
 pub mod definitions;

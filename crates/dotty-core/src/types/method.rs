@@ -11,8 +11,11 @@ use crate::names::{TermName, TypeName};
 /// A term parameter of a [`MethodType`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MethodParam {
+    /// Interned name in the term namespace; resolve its text through the session interner.
     pub name: TermName,
+    /// Parameter type in the same semantic arena as its enclosing method binder.
     pub ty: TypeId,
+    /// Whether this parameter is erased from runtime argument passing.
     pub erased: bool,
     /// Whether this is a JVM `ACC_VARARGS` trailing array parameter (Java
     /// `T... xs`). Without this, `void f(String... xs)` and
@@ -25,16 +28,23 @@ pub struct MethodParam {
 /// How a [`MethodType`]'s parameter clause binds its arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MethodKind {
+    /// Ordinary value parameter clause.
     Plain,
+    /// Legacy implicit parameter clause.
     Implicit,
+    /// Contextual using parameter clause.
     Contextual,
 }
 
 /// `(params): result`, e.g. the method type of `def foo(x: Int): String`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodType {
+    /// Value parameters in this clause, preserving declaration order.
     pub params: Vec<MethodParam>,
+    /// Result type after this clause; a later parameter clause is represented by a nested callable
+    /// type.
     pub result: TypeId,
+    /// Whether this parameter clause is ordinary, implicit, or contextual.
     pub kind: MethodKind,
 }
 
@@ -51,8 +61,11 @@ pub struct MethodType {
 /// to a later typer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeParam {
+    /// Interned name in the type namespace; resolve its text through the session interner.
     pub name: TypeName,
+    /// Lower and upper semantic bounds in the enclosing binder’s type arena.
     pub bounds: TypeId,
+    /// Explicit source variance, absent when no variance marker was written.
     pub declared_variance: Option<Variance>,
 }
 
@@ -62,8 +75,11 @@ pub struct TypeParam {
 /// `Option::None` on [`TypeParam::declared_variance`], not a variance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variance {
+    /// Parameter appears invariantly in the declared type constructor.
     Invariant,
+    /// Parameter is declared covariant with a plus marker.
     Covariant,
+    /// Parameter is declared contravariant with a minus marker.
     Contravariant,
 }
 
@@ -73,6 +89,7 @@ pub enum Variance {
 /// can drift out of alignment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassTypeParameter {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: crate::SymbolId,
     /// `None` means an adapter could authenticate the parameter identity but
     /// could not interpret its variance evidence. A supported absent class
@@ -84,7 +101,10 @@ pub struct ClassTypeParameter {
 /// leading type-parameter clause.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolyType {
+    /// Bound type parameters in declaration order; parameter references use these positions.
     pub params: Vec<TypeParam>,
+    /// Result type in the same arena; further parameter clauses are represented by nested callable
+    /// types.
     pub result: TypeId,
 }
 
@@ -92,7 +112,10 @@ pub struct PolyType {
 /// `[X] =>> Either[String, X]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeLambda {
+    /// Bound type parameters in declaration order; parameter references use these positions.
     pub params: Vec<TypeParam>,
+    /// Result type in the same arena; further parameter clauses are represented by nested callable
+    /// types.
     pub result: TypeId,
 }
 

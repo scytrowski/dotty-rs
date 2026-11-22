@@ -16,8 +16,11 @@ pub const MAX_TYPE_NORMALIZATION_DEPTH: usize = 256;
 /// The symbol-info state reported when normalization cannot read a declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolInfoState {
+    /// No signature is recorded on the declaration.
     Missing,
+    /// Signature completion has not yet produced a type.
     Deferred,
+    /// Signature completion recorded a typing failure.
     Error,
 }
 
@@ -26,50 +29,96 @@ pub enum SymbolInfoState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeNormalizeError {
     /// A `TypeId` is a reserved slot that has not been filled.
-    UnfilledType { ty: TypeId },
+    UnfilledType {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A `TypeId` points outside the semantic store's type arena.
-    InvalidType { ty: TypeId },
+    InvalidType {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A symbol reference points outside this semantic store.
-    UnknownSymbol { symbol: SymbolId },
+    UnknownSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A type alias is opaque at this stage; its representation is hidden.
-    OpaqueAlias { symbol: SymbolId },
+    OpaqueAlias {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A type alias needs type-parameter substitution before it can be opened.
-    AliasRequiresSubstitution { symbol: SymbolId },
+    AliasRequiresSubstitution {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// An applied alias was supplied a different number of arguments than its binder requires.
     AliasArgumentArityMismatch {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
     /// Instantiating a structurally malformed alias failed in the shared rebinder.
     AliasInstantiationFailed {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: TypeRebindError,
     },
     /// An alias declaration has no complete semantic info.
     AliasInfoIncomplete {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Completion state observed when a completed signature was required.
         state: SymbolInfoState,
     },
     /// A completed alias does not have the required `AliasingBounds` shape.
-    AliasInfoNotAliasingBounds { symbol: SymbolId, info: TypeId },
+    AliasInfoNotAliasingBounds {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// Following aliases revisited a declaration symbol.
-    AliasCycle { symbol: SymbolId },
+    AliasCycle {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A malformed alias/proxy cycle revisited the same outer type node.
-    NormalizationCycle { ty: TypeId },
+    NormalizationCycle {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// The alias chain or wrapper path exceeds the configured bound.
     TooDeep,
     /// A term reference uses a target represented by a structural name.
-    NameTargetCannotBeWidened { ty: TypeId },
+    NameTargetCannotBeWidened {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A term reference designates a symbol category that is not a term value.
-    TermRefKindCannotBeWidened { symbol: SymbolId, kind: SymbolKind },
+    TermRefKindCannotBeWidened {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Stable declaration category, independent of flags and visibility.
+        kind: SymbolKind,
+    },
     /// A term reference's symbol info is not complete.
     TermRefInfoIncomplete {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Completion state observed when a completed signature was required.
         state: SymbolInfoState,
     },
     /// The input to term-reference widening is not a `TermRef`.
-    NotTermRef { ty: TypeId },
+    NotTermRef {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
 }
 
 impl fmt::Display for TypeNormalizeError {

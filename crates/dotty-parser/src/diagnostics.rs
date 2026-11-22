@@ -9,34 +9,48 @@ use crate::{Location, ParamOwner};
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseDiagnosticKind {
+    /// Parsing exceeded the configured syntax nesting bound.
     NestingLimitExceeded,
+    /// The required token was absent at this position.
     ExpectedToken,
+    /// The current token is invalid in this grammar position.
     UnexpectedToken,
+    /// Expression grammar could not start at this position.
     ExpectedExpression,
+    /// Type grammar could not start at this position.
     ExpectedType,
+    /// Pattern grammar could not start at this position.
     ExpectedPattern,
+    /// The source form is outside the parser subset.
     UnsupportedSyntax,
+    /// Placeholder parameter syntax has no enclosing supported function.
     UnboundPlaceholderParameter,
 }
 
 /// Kind of simple source-level value declaration being parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueDefinitionKind {
+    /// Immutable val declaration or constructor accessor.
     Val,
+    /// Mutable var declaration or constructor accessor.
     Var,
 }
 
 /// Mutability keyword used by a class parameter accessor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterMutability {
+    /// Immutable val declaration or constructor accessor.
     Val,
+    /// Mutable var declaration or constructor accessor.
     Var,
 }
 
 /// Contextual parameter-clause form relevant to a parser diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextualParameterClause {
+    /// Contextual parameter clause using the given form.
     Given,
+    /// Legacy implicit parameter clause.
     Implicit,
 }
 
@@ -44,31 +58,56 @@ pub enum ContextualParameterClause {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeclarationIssue {
     /// A method header is missing its return-type colon or body equals.
-    ExpectedMethodSeparator { found: TokenKind },
+    ExpectedMethodSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A secondary constructor appeared outside a class template.
     SecondaryConstructorOutsideTemplate,
     /// A method declaration has no valid name.
-    ExpectedMethodName { found: TokenKind },
+    ExpectedMethodName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A value declaration has no valid name.
     ExpectedValueName {
+        /// Whether the rejected value definition began with val or var.
         declaration: ValueDefinitionKind,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// A typed value declaration is missing its initializer equals.
-    ExpectedValueEquals { found: TokenKind },
+    ExpectedValueEquals {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A value declaration has neither a type ascription nor an initializer.
-    ExpectedValueTypeOrEquals { found: TokenKind },
+    ExpectedValueTypeOrEquals {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern definition has no pattern after its `val` or `var` keyword.
     ExpectedPatternAfterValueKeyword {
+        /// Whether the rejected value definition began with val or var.
         declaration: ValueDefinitionKind,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// A comma-separated value definition contains a non-identifier pattern.
-    CommaSeparatedValuePatternsMustBeIdentifiers { found: TokenKind },
+    CommaSeparatedValuePatternsMustBeIdentifiers {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma in a value definition is not followed by an identifier.
-    ExpectedIdentifierAfterValuePatternComma { found: TokenKind },
+    ExpectedIdentifierAfterValuePatternComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern definition is missing its initializer equals.
-    ExpectedEqualsAfterPatternDefinition { found: TokenKind },
+    ExpectedEqualsAfterPatternDefinition {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl DeclarationIssue {
@@ -124,37 +163,81 @@ impl DeclarationIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterIssue {
     /// A legacy `implicit` clause is not valid for this parameter owner.
-    LegacyImplicitClauseNotAllowed { owner: ParamOwner },
+    LegacyImplicitClauseNotAllowed {
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: ParamOwner,
+    },
     /// An `implicit` clause contains no parameter.
     EmptyImplicitClause,
     /// A named `using` clause contains no parameter.
     EmptyUsingClause,
     /// A class enum-case parameter clause ended before its parameter.
-    ExpectedParameterBeforeClauseEnd { found: TokenKind },
+    ExpectedParameterBeforeClauseEnd {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing a term parameter did not advance the token source.
-    TermParameterNoProgress { found: TokenKind },
+    TermParameterNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma is not followed by another term parameter.
-    ExpectedParameterAfterComma { found: TokenKind },
+    ExpectedParameterAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A hard modifier is not allowed on a named `using` parameter here.
-    HardModifierNotAllowedOnNamedUsingParameter { owner: ParamOwner, found: TokenKind },
+    HardModifierNotAllowedOnNamedUsingParameter {
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: ParamOwner,
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An explicit `val`/`var` parameter accessor appeared outside a constructor.
-    AccessorOnlyAllowedOnClassConstructor { accessor: ParameterMutability },
+    AccessorOnlyAllowedOnClassConstructor {
+        /// Whether the constructor parameter declares a val or var accessor.
+        accessor: ParameterMutability,
+    },
     /// A class parameter modifier requiring an accessor is missing `val` or `var`.
-    ExpectedClassParameterAccessor { found: TokenKind },
+    ExpectedClassParameterAccessor {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `val`/`var` constructor parameter cannot use a by-name type.
-    ByNameClassParameterNotAllowed { accessor: ParameterMutability },
+    ByNameClassParameterNotAllowed {
+        /// Whether the constructor parameter declares a val or var accessor.
+        accessor: ParameterMutability,
+    },
     /// Repeated parameters are not allowed in legacy contextual clauses.
-    RepeatedParameterNotAllowedInContextualClause { clause: ContextualParameterClause },
+    RepeatedParameterNotAllowedInContextualClause {
+        /// Parameter-clause category or position involved in this check.
+        clause: ContextualParameterClause,
+    },
     /// An anonymous or named `using` clause has no parameter type.
-    ExpectedUsingParameterType { found: TokenKind },
+    ExpectedUsingParameterType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing an anonymous `using` parameter type did not advance the source.
-    AnonymousUsingParameterTypeNoProgress { found: TokenKind },
+    AnonymousUsingParameterTypeNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma in an anonymous `using` clause has no following type.
-    ExpectedUsingParameterTypeAfterComma { found: TokenKind },
+    ExpectedUsingParameterTypeAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A parameter has no valid name.
-    ExpectedParameterName { found: TokenKind },
+    ExpectedParameterName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named parameter is missing its type ascription.
-    ExpectedParameterColonAndType { found: TokenKind },
+    ExpectedParameterColonAndType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl ParameterIssue {
@@ -232,17 +315,35 @@ impl ParameterIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GivenIssue {
     /// A parameterized given type is followed directly by another definition.
-    ExpectedResultTypeAfterTypeParameters { found: TokenKind },
+    ExpectedResultTypeAfterTypeParameters {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named given signature is missing the colon before its result type.
-    ExpectedColonAfterNamedSignature { found: TokenKind },
+    ExpectedColonAfterNamedSignature {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A given type is not followed by its required alias equals.
-    ExpectedEqualsAfterType { found: TokenKind },
+    ExpectedEqualsAfterType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A parent separator is not followed by another parent type.
-    ExpectedParentAfterSeparator { found: TokenKind },
+    ExpectedParentAfterSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An empty later parameter clause has no context parameter.
-    ExpectedParameterAfterEmptyClause { found: TokenKind },
+    ExpectedParameterAfterEmptyClause {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A given context-parameter clause is missing its arrow.
-    ExpectedArrowInSignature { found: TokenKind },
+    ExpectedArrowInSignature {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl GivenIssue {
@@ -282,15 +383,30 @@ impl GivenIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtensionIssue {
     /// An extension header is missing its receiver parameter clause.
-    ExpectedReceiverParameter { found: TokenKind },
+    ExpectedReceiverParameter {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extension receiver clause has a count other than one.
-    ReceiverMustHaveExactlyOneParameter { found_count: usize },
+    ReceiverMustHaveExactlyOneParameter {
+        /// Number of entries actually present in the input.
+        found_count: usize,
+    },
     /// Only `using` clauses may follow the extension receiver.
-    OnlyUsingClausesMayFollowReceiver { found: TokenKind },
+    OnlyUsingClausesMayFollowReceiver {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A colon appears between an extension header and its methods.
-    UnexpectedColonAfterHeader { found: TokenKind },
+    UnexpectedColonAfterHeader {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extension header is not followed by any method or export.
-    ExpectedMethodsAfterHeader { found: TokenKind },
+    ExpectedMethodsAfterHeader {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extension body contains a member other than a method or export.
     OnlyMethodsAndExportsAllowed,
 }
@@ -341,23 +457,47 @@ pub enum ImportIssue {
     /// The name before `as` is not a simple importable identifier.
     AsRequiresSimpleName,
     /// An import path is missing the dot before its selector.
-    ExpectedDotBeforeImportedName { found: TokenKind },
+    ExpectedDotBeforeImportedName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A dot in an import path is not followed by a name.
-    ExpectedImportedNameAfterDot { found: TokenKind },
+    ExpectedImportedNameAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma in a braced selector list is not followed by a selector.
-    ExpectedSelectorAfterComma { found: TokenKind },
+    ExpectedSelectorAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A selector is not followed by a comma or the closing brace.
-    ExpectedSelectorSeparator { found: TokenKind },
+    ExpectedSelectorSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named selector follows a wildcard or `given` selector.
     NamedSelectorAfterWildcardOrGiven,
     /// An import/export selector was expected.
-    ExpectedSelector { found: TokenKind },
+    ExpectedSelector {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A braced selector list is missing its closing brace.
-    ExpectedRightBraceAfterSelectors { found: TokenKind },
+    ExpectedRightBraceAfterSelectors {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An `as`/arrow rename is not followed by a target name.
-    ExpectedRenameTarget { found: TokenKind },
+    ExpectedRenameTarget {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An import/export clause is missing its initial qualifier.
-    ExpectedQualifier { found: TokenKind },
+    ExpectedQualifier {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl ImportIssue {
@@ -407,16 +547,30 @@ impl ImportIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PackageIssue {
     /// A package object appears outside a top-level or package-body location.
-    PackageObjectNotAllowedHere { location: Location },
+    PackageObjectNotAllowedHere {
+        /// Location or structural position of the reported item.
+        location: Location,
+    },
     /// A package clause is missing its name.
-    ExpectedName { found: TokenKind },
+    ExpectedName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A dot in a package name is not followed by another name.
-    ExpectedNameAfterDot { found: TokenKind },
+    ExpectedNameAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A package clause requires a braced or indented body at this position.
-    ExpectedBodyStart { found: TokenKind },
+    ExpectedBodyStart {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A delimited package body is missing its closing token.
     ExpectedBodyEnd {
+        /// Token required at this grammar position.
         expected: TokenKind,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
 }
@@ -447,7 +601,9 @@ impl PackageIssue {
 /// Statement-sequence context relevant to layout and separator diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatementSequenceContext {
+    /// Top-level statements of a source compilation unit.
     CompilationUnit,
+    /// Statements inside an expression block.
     Block,
 }
 
@@ -455,11 +611,20 @@ pub enum StatementSequenceContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatementIssue {
     /// Modifiers or annotations are not followed by a definition.
-    ExpectedDefinitionAfterModifiers { found: TokenKind },
+    ExpectedDefinitionAfterModifiers {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A compilation unit begins with an expression rather than a definition.
-    TopLevelExpressionUnsupported { found: TokenKind },
+    TopLevelExpressionUnsupported {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The current syntax form has not been implemented by this parser.
-    UnsupportedSyntaxStart { found: TokenKind },
+    UnsupportedSyntaxStart {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An enum case syntax form is not supported in this context.
     UnsupportedEnumCase,
 }
@@ -494,20 +659,33 @@ impl StatementIssue {
 pub enum LayoutIssue {
     /// A statement sequence parser failed to advance.
     StatementSequenceNoProgress {
+        /// Grammar context in which the parser encountered this form.
         context: StatementSequenceContext,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// A statement is not followed by a separator in its sequence.
     ExpectedStatementSeparator {
+        /// Grammar context in which the parser encountered this form.
         context: StatementSequenceContext,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// A top-level sequence parser failed to advance.
-    TopLevelSequenceNoProgress { found: TokenKind },
+    TopLevelSequenceNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A top-level statement is not followed by a separator.
-    ExpectedTopLevelSeparator { found: TokenKind },
+    ExpectedTopLevelSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An `end` marker is not followed by a target name.
-    ExpectedEndMarkerName { found: TokenKind },
+    ExpectedEndMarkerName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An `end` marker duplicates a marker already consumed by its owner.
     DuplicateEndMarker,
     /// An `end` marker names an enclosing construct other than the active owner.
@@ -557,19 +735,36 @@ impl LayoutIssue {
 pub enum TemplateIssue {
     /// A template body is missing its closing delimiter.
     ExpectedBodyEnd {
+        /// Token required at this grammar position.
         expected: TokenKind,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// Parsing a template body did not advance the token source.
-    BodyNoProgress { found: TokenKind },
+    BodyNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A template member is not followed by a separator.
-    ExpectedMemberSeparator { found: TokenKind },
+    ExpectedMemberSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `this` self type is missing its colon.
-    ExpectedSelfTypeColon { found: TokenKind },
+    ExpectedSelfTypeColon {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Compound self-type syntax is not supported by this parser increment.
-    CompoundSelfTypeUnsupported { found: TokenKind },
+    CompoundSelfTypeUnsupported {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A self type is missing its `=>` separator.
-    ExpectedSelfTypeArrow { found: TokenKind },
+    ExpectedSelfTypeArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl TemplateIssue {
@@ -604,33 +799,69 @@ impl TemplateIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeParamIssue {
     /// A type-parameter clause is empty.
-    EmptyParameterClause { found: TokenKind },
+    EmptyParameterClause {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma is not followed by a type parameter.
-    ExpectedParameterAfterComma { found: TokenKind },
+    ExpectedParameterAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type parameter has no valid name.
-    ExpectedParameterName { found: TokenKind },
+    ExpectedParameterName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type-parameter clause is missing a comma or closing bracket.
-    ExpectedParameterSeparator { found: TokenKind },
+    ExpectedParameterSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing a type parameter did not advance the token source.
-    ParameterNoProgress { found: TokenKind },
+    ParameterNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Variance is not permitted on a polymorphic function type parameter.
     VarianceNotAllowedForPolyFunctionParameter,
     /// Context bounds are not supported for this parameter owner.
-    ContextBoundsNotAllowedForOwner { owner: Option<ParamOwner> },
+    ContextBoundsNotAllowedForOwner {
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: Option<ParamOwner>,
+    },
     /// Context bounds are not supported on polymorphic function type parameters.
     ContextBoundsNotAllowedForPolyFunctionParameter,
     /// An empty braced context-bound list needs a type.
-    EmptyBracedContextBoundList { found: TokenKind },
+    EmptyBracedContextBoundList {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A braced context-bound list begins with a comma instead of a type.
-    ExpectedContextBoundAtListStart { found: TokenKind },
+    ExpectedContextBoundAtListStart {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing a context bound did not advance the token source.
-    ContextBoundNoProgress { found: TokenKind },
+    ContextBoundNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A comma is not followed by another context-bound type.
-    ExpectedContextBoundAfterComma { found: TokenKind },
+    ExpectedContextBoundAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type parameter's context bound has no type.
-    ExpectedContextBoundType { found: TokenKind },
+    ExpectedContextBoundType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A context-bound `as` clause is missing its alias name.
-    ExpectedContextBoundAlias { found: TokenKind },
+    ExpectedContextBoundAlias {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl TypeParamIssue {
@@ -699,17 +930,35 @@ impl TypeParamIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeDefinitionIssue {
     /// A `type` definition has no valid name.
-    ExpectedName { found: TokenKind },
+    ExpectedName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type alias is missing the type after `=`.
-    ExpectedAliasType { found: TokenKind },
+    ExpectedAliasType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A match type alias cannot have a lower bound.
-    LowerBoundNotAllowedOnMatchTypeAlias { found: TokenKind },
+    LowerBoundNotAllowedOnMatchTypeAlias {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Only match type aliases can combine a bound with an alias.
-    BoundedAliasMustBeMatchType { found: TokenKind },
+    BoundedAliasMustBeMatchType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An opaque type definition without bounds is missing `=`.
-    ExpectedEqualsAfterOpaqueDefinition { found: TokenKind },
+    ExpectedEqualsAfterOpaqueDefinition {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An opaque type bound is missing its required `=`.
-    ExpectedEqualsAfterOpaqueBound { found: TokenKind },
+    ExpectedEqualsAfterOpaqueBound {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl TypeDefinitionIssue {
@@ -750,41 +999,95 @@ impl TypeDefinitionIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassDefinitionIssue {
     /// An enum case with type parameters is missing its constructor parameter clause.
-    ExpectedEnumCaseConstructorParameters { found: TokenKind },
+    ExpectedEnumCaseConstructorParameters {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An enum-case parent list contains a non-identifier after a comma.
-    ExpectedEnumCaseParentAfterComma { found: TokenKind },
+    ExpectedEnumCaseParentAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A source enum case is followed by a disallowed template body.
-    EnumCaseTemplateBodyNotAllowed { found: TokenKind },
+    EnumCaseTemplateBodyNotAllowed {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A modifier is not allowed on an enum case.
-    ModifierNotAllowedOnEnumCase { modifier: Modifier },
+    ModifierNotAllowedOnEnumCase {
+        /// Source modifier that cannot be accepted in this position.
+        modifier: Modifier,
+    },
     /// An enum case is missing its name.
-    ExpectedEnumCaseName { found: TokenKind },
+    ExpectedEnumCaseName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The parser encountered an enum-case form outside its supported syntax.
-    UnsupportedEnumCaseSyntax { found: TokenKind },
+    UnsupportedEnumCaseSyntax {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A modifier is not allowed on an enum definition.
-    ModifierNotAllowedOnEnum { modifier: Modifier },
+    ModifierNotAllowedOnEnum {
+        /// Source modifier that cannot be accepted in this position.
+        modifier: Modifier,
+    },
     /// An enum header is not followed by its required body.
-    ExpectedEnumBody { found: TokenKind },
+    ExpectedEnumBody {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type application appears in a `derives` clause.
-    TypeApplicationNotAllowedInDerives { found: TokenKind },
+    TypeApplicationNotAllowedInDerives {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An infix type appears in a `derives` clause.
-    InfixTypeNotAllowedInDerives { found: TokenKind },
+    InfixTypeNotAllowedInDerives {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `uses` clause is not followed by a capture reference.
-    ExpectedCaptureReference { found: TokenKind },
+    ExpectedCaptureReference {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A capture-reference selection is not followed by a name.
-    ExpectedCaptureReferenceNameAfterDot { found: TokenKind },
+    ExpectedCaptureReferenceNameAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `with` clause is not followed by a template body.
-    ExpectedTemplateBodyAfterWith { found: TokenKind },
+    ExpectedTemplateBodyAfterWith {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A colon-introduced template body is not indented.
-    ExpectedIndentedTemplateBodyAfterColon { found: TokenKind },
+    ExpectedIndentedTemplateBodyAfterColon {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extends clause mixes comma and `with` parent separators.
-    MixedExtendsSeparators { found: TokenKind },
+    MixedExtendsSeparators {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extends-clause separator is not followed by a parent type.
-    ExpectedParentAfterExtendsSeparator { found: TokenKind },
+    ExpectedParentAfterExtendsSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A class or trait definition is missing its type name.
-    ExpectedClassOrTraitName { found: TokenKind },
+    ExpectedClassOrTraitName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An object definition is missing its name.
-    ExpectedObjectName { found: TokenKind },
+    ExpectedObjectName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl ClassDefinitionIssue {
@@ -872,17 +1175,35 @@ impl ClassDefinitionIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModifierIssue {
     /// An annotation appears after a definition modifier or visibility clause.
-    AnnotationAfterModifier { found: TokenKind },
+    AnnotationAfterModifier {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A deferred contextual modifier is recognized but not supported here.
-    UnsupportedContextualModifier { name: Name },
+    UnsupportedContextualModifier {
+        /// Interned text identity and term/type namespace of the declaration or reference.
+        name: Name,
+    },
     /// A definition prefix repeats a modifier.
-    DuplicateModifier { modifier: Modifier },
+    DuplicateModifier {
+        /// Source modifier that cannot be accepted in this position.
+        modifier: Modifier,
+    },
     /// A definition prefix repeats its visibility clause.
-    DuplicateVisibility { found: TokenKind },
+    DuplicateVisibility {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A visibility qualifier is not a valid name or `this`.
-    ExpectedVisibilityQualifier { found: TokenKind },
+    ExpectedVisibilityQualifier {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An annotation marker is not followed by a type.
-    ExpectedAnnotationType { found: TokenKind },
+    ExpectedAnnotationType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl ModifierIssue {
@@ -918,151 +1239,358 @@ impl ModifierIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpressionIssue {
     /// A `using` application has no argument.
-    MissingUsingArgument { found: TokenKind },
+    MissingUsingArgument {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An application argument is missing.
-    MissingArgument { found: TokenKind },
+    MissingArgument {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A spread argument appears before the final argument.
     NonFinalArgumentSpread,
     /// Parsing a postfix operator did not advance the token source.
-    PostfixOperatorNoProgress { found: TokenKind },
+    PostfixOperatorNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing an infix expression did not advance the token source.
-    InfixExpressionNoProgress { found: TokenKind },
+    InfixExpressionNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Equal-precedence infix operators use conflicting associativities.
-    MixedAssociativityOperators { left: Name, right: Name },
+    MixedAssociativityOperators {
+        /// Left operand of the enclosing relation or syntax node.
+        left: Name,
+        /// Right operand of the enclosing relation or syntax node.
+        right: Name,
+    },
     /// A prefix operator is not followed by its operand on the same line.
-    PrefixOperandMustShareLine { found: TokenKind },
+    PrefixOperandMustShareLine {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// `inline` is not followed by an inline `if` or `match` form.
-    ExpectedInlineIfOrMatch { found: TokenKind },
+    ExpectedInlineIfOrMatch {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An assignment operator has no right-hand expression.
-    MissingAssignmentRhs { found: TokenKind },
+    MissingAssignmentRhs {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An assignment left-hand tree is not assignable.
-    UnassignableAssignmentTarget { found: TokenKind },
+    UnassignableAssignmentTarget {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The legacy `_*` splice is not the final application argument.
-    LegacyWildcardSpliceNotFinal { found: TokenKind },
+    LegacyWildcardSpliceNotFinal {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A quoted expression is missing its closing brace.
-    ExpectedQuotedExpressionCloseBrace { found: TokenKind },
+    ExpectedQuotedExpressionCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A quoted type is missing its closing bracket.
-    ExpectedQuotedTypeCloseBracket { found: TokenKind },
+    ExpectedQuotedTypeCloseBracket {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A quote marker is not followed by a quoted expression or type.
-    ExpectedQuoteBodyStart { found: TokenKind },
+    ExpectedQuoteBodyStart {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Consecutive quoted type definitions are missing a separator.
-    ExpectedQuotedTypeDefinitionSeparator { found: TokenKind },
+    ExpectedQuotedTypeDefinitionSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern splice is missing its closing brace.
-    ExpectedPatternSpliceCloseBrace { found: TokenKind },
+    ExpectedPatternSpliceCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An expression splice is missing its closing brace.
-    ExpectedExpressionSpliceCloseBrace { found: TokenKind },
+    ExpectedExpressionSpliceCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A braced case-lambda is missing its closing brace.
-    ExpectedCaseLambdaCloseBrace { found: TokenKind },
+    ExpectedCaseLambdaCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A brace block is missing its closing brace.
-    ExpectedBlockCloseBrace { found: TokenKind },
+    ExpectedBlockCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `super[...]` qualifier is missing a type name.
-    ExpectedSuperTypeQualifier { found: TokenKind },
+    ExpectedSuperTypeQualifier {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `super` expression is missing a selector.
-    ExpectedSelectorAfterSuper { found: TokenKind },
+    ExpectedSelectorAfterSuper {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `super.` expression is missing its selector.
-    ExpectedSelectorAfterSuperDot { found: TokenKind },
+    ExpectedSelectorAfterSuperDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A selection dot is not followed by a selector.
-    ExpectedSelectorAfterDot { found: TokenKind },
+    ExpectedSelectorAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A suffix attempts to call an expression that is not callable in this syntax.
     InvalidApplicationTarget {
+        /// Binding or control-flow destination selected by this node.
         target: ExpressionApplicationTarget,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// Parsing a simple-expression suffix did not advance the token source.
-    ExpressionSuffixNoProgress { found: TokenKind },
+    ExpressionSuffixNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// No expression can start at the current token.
-    ExpectedExpressionAtCurrentToken { found: TokenKind },
+    ExpectedExpressionAtCurrentToken {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A guard's `if` is not followed by its condition expression.
-    ExpectedGuardExpression { found: TokenKind },
+    ExpectedGuardExpression {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An `if` condition is not followed by `then`.
-    ExpectedIfThen { found: TokenKind },
+    ExpectedIfThen {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `while` condition is not followed by `do`.
-    ExpectedWhileDo { found: TokenKind },
+    ExpectedWhileDo {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A legacy `do` loop has no body expression.
-    MissingDoWhileBody { found: TokenKind },
+    MissingDoWhileBody {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A legacy `do` loop body is not followed by `while`.
-    ExpectedDoWhileWhile { found: TokenKind },
+    ExpectedDoWhileWhile {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A legacy `do ... while` loop has no condition.
-    MissingDoWhileCondition { found: TokenKind },
+    MissingDoWhileCondition {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A catch handler has no body.
-    EmptyCatchHandler { found: TokenKind },
+    EmptyCatchHandler {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A control-flow construct is missing its branch/body expression.
-    ExpectedControlFlowBranch { found: TokenKind },
+    ExpectedControlFlowBranch {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A layout-introduced expression is missing its body.
     ExpectedLayoutExpression {
+        /// Grammar context in which the parser encountered this form.
         context: LayoutExpressionContext,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// An indented expression is not closed by an outdent.
-    ExpectedIndentedExpressionOutdent { found: TokenKind },
+    ExpectedIndentedExpressionOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A catch handler is missing a `case` clause.
-    ExpectedCatchCase { found: TokenKind },
+    ExpectedCatchCase {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Braced catch clauses are missing their closing brace.
-    ExpectedCatchCloseBrace { found: TokenKind },
+    ExpectedCatchCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Indented catch clauses are missing their closing outdent.
-    ExpectedCatchOutdent { found: TokenKind },
+    ExpectedCatchOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Consuming control-flow newlines did not advance the token source.
-    ControlFlowNewlineNoProgress { found: TokenKind },
+    ControlFlowNewlineNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented case-lambda is missing its closing outdent.
-    ExpectedCaseLambdaOutdent { found: TokenKind },
+    ExpectedCaseLambdaOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented block is missing its closing outdent.
-    ExpectedIndentedBlockOutdent { found: TokenKind },
+    ExpectedIndentedBlockOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented for-enumerator region is missing its closing outdent.
-    ExpectedForEnumeratorOutdent { found: TokenKind },
+    ExpectedForEnumeratorOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for-comprehension is missing `yield` or `do` after its enumerators.
-    ExpectedForBodyKeyword { found: TokenKind },
+    ExpectedForBodyKeyword {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for guard appears before any generator.
-    ForGuardMissingGenerator { found: TokenKind },
+    ForGuardMissingGenerator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing for enumerators did not advance the token source.
-    ForEnumeratorsNoProgress { found: TokenKind },
+    ForEnumeratorsNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for-comprehension contains no generator.
-    ForMissingGenerator { found: TokenKind },
+    ForMissingGenerator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for pattern is not followed by `<-` or `=`.
-    ExpectedForEnumeratorOperator { found: TokenKind },
+    ExpectedForEnumeratorOperator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A case-generator pattern is not followed by `<-`.
-    ExpectedCaseGeneratorOperator { found: TokenKind },
+    ExpectedCaseGeneratorOperator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for enumerator operator has no right-hand expression.
-    ExpectedForEnumeratorExpression { found: TokenKind },
+    ExpectedForEnumeratorExpression {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A for body delimiter is not followed by an expression.
-    ExpectedForBodyExpression { found: TokenKind },
+    ExpectedForBodyExpression {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented colon-introduced match clause is missing its outdent.
-    ExpectedMatchColonOutdent { found: TokenKind },
+    ExpectedMatchColonOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Braced match cases are missing their closing brace.
-    ExpectedMatchCloseBrace { found: TokenKind },
+    ExpectedMatchCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Indented match cases are missing their closing outdent.
-    ExpectedMatchOutdent { found: TokenKind },
+    ExpectedMatchOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A `match` expression is not followed by a braced or indented case region.
-    ExpectedMatchCaseRegion { found: TokenKind },
+    ExpectedMatchCaseRegion {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A match expression has no case clauses.
-    ExpectedMatchCase { found: TokenKind },
+    ExpectedMatchCase {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A legacy implicit lambda parameter is not followed by `=>`.
-    ExpectedLegacyLambdaArrow { found: TokenKind },
+    ExpectedLegacyLambdaArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A context-function literal has no formal parameters.
-    ContextFunctionRequiresParameter { found: TokenKind },
+    ContextFunctionRequiresParameter {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Lambda parameters are not followed by `=>`.
-    ExpectedLambdaArrow { found: TokenKind },
+    ExpectedLambdaArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A lambda parameter list contains a missing parameter.
-    ExpectedLambdaParameter { found: TokenKind },
+    ExpectedLambdaParameter {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Lambda parameters are not followed by `)` before the arrow.
-    ExpectedLambdaParameterCloseParen { found: TokenKind },
+    ExpectedLambdaParameterCloseParen {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A lambda parameter is not followed by `,` or `)`.
-    ExpectedLambdaParameterSeparator { found: TokenKind },
+    ExpectedLambdaParameterSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A lambda parameter does not begin with an identifier or `_`.
-    ExpectedLambdaParameterName { found: TokenKind },
+    ExpectedLambdaParameterName {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A lambda arrow is not followed by a body expression.
-    ExpectedLambdaBody { found: TokenKind },
+    ExpectedLambdaBody {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Polymorphic function type parameters are not followed by `=>`.
-    ExpectedPolyFunctionArrow { found: TokenKind },
+    ExpectedPolyFunctionArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A polymorphic function body is not a value-parameter function.
-    InvalidPolyFunctionBody { found: TokenKind },
+    InvalidPolyFunctionBody {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An interpolated identifier is not followed by a string part.
-    ExpectedInterpolatedStringPart { found: TokenKind },
+    ExpectedInterpolatedStringPart {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The numeric token cannot be represented at its required precision.
-    InvalidNumericLiteral { found: TokenKind },
+    InvalidNumericLiteral {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A simple interpolation needs an identifier, `this`, or a pattern wildcard.
-    InvalidSimpleInterpolationSplice { found: TokenKind },
+    InvalidSimpleInterpolationSplice {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An interpolated pattern splice is missing its closing brace.
-    ExpectedInterpolatedPatternSpliceCloseBrace { found: TokenKind },
+    ExpectedInterpolatedPatternSpliceCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 /// Layout-delimited expression positions which may need a recovery node.
@@ -1339,117 +1867,259 @@ pub enum TypeIssue {
     /// A type-argument clause contains no type arguments.
     EmptyTypeArgumentList,
     /// A comma in a type-argument clause is followed by its closing bracket.
-    MissingTypeArgumentAfterComma { found: TokenKind },
+    MissingTypeArgumentAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The source token used as a repeated-parameter marker is invalid.
-    InvalidRepeatedParameterMarker { found: TokenKind },
+    InvalidRepeatedParameterMarker {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A repeated parameter is followed by another parameter.
-    RepeatedParameterMustBeLast { found: TokenKind },
+    RepeatedParameterMustBeLast {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A context function type has an empty parameter list.
     EmptyContextFunctionParameterList,
     /// A wildcard type appears where the grammar does not permit it.
     WildcardTypeNotAllowed,
     /// A match type is missing its braced or indented case region.
-    ExpectedMatchTypeCaseRegion { found: TokenKind },
+    ExpectedMatchTypeCaseRegion {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented match-type case region did not close with an outdent.
-    ExpectedMatchTypeOutdent { found: TokenKind },
+    ExpectedMatchTypeOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A braced match-type case region did not close with `}`.
-    ExpectedMatchTypeRightBrace { found: TokenKind },
+    ExpectedMatchTypeRightBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A match type contains no case clauses.
     MissingMatchTypeCase,
     /// Parsing a match-type case did not advance the token source.
-    MatchTypeCaseNoProgress { found: TokenKind },
+    MatchTypeCaseNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A match-type case pattern is not followed by `=>`.
-    ExpectedMatchTypeCaseArrow { found: TokenKind },
+    ExpectedMatchTypeCaseArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented match-type result did not close with an outdent.
-    ExpectedMatchTypeResultOutdent { found: TokenKind },
+    ExpectedMatchTypeResultOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The wildcard in a match-type case is not a valid type name.
-    InvalidMatchTypeWildcard { found: TokenKind },
+    InvalidMatchTypeWildcard {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type lambda has no type parameters.
     EmptyTypeLambdaParameterList,
     /// Polymorphic function type parameters are not followed by `=>`.
-    ExpectedPolymorphicFunctionTypeArrow { found: TokenKind },
+    ExpectedPolymorphicFunctionTypeArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A polymorphic function type lacks parameters or a function-type body.
     InvalidPolymorphicFunctionTypeShape {
+        /// Whether the declaration has an explicit type parameter clause.
         has_type_parameters: bool,
+        /// Whether a function body was present in this syntax form.
         has_function_body: bool,
     },
     /// A function-type parameter list has a comma without a following parameter.
-    MissingFunctionTypeParameterAfterComma { named: bool, found: TokenKind },
+    MissingFunctionTypeParameterAfterComma {
+        /// Whether this source argument uses a name.
+        named: bool,
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A function-type parameter is not followed by a comma or closing parenthesis.
-    ExpectedFunctionTypeParameterSeparator { named: bool, found: TokenKind },
+    ExpectedFunctionTypeParameterSeparator {
+        /// Whether this source argument uses a name.
+        named: bool,
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An unnamed erased function type must start with an erased parameter.
-    ExpectedLeadingErasedFunctionTypeParameter { found: TokenKind },
+    ExpectedLeadingErasedFunctionTypeParameter {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An erased parameter occurs after the permitted leading unnamed parameter.
-    OnlyLeadingUnnamedFunctionTypeParameterMayBeErased { found: TokenKind },
+    OnlyLeadingUnnamedFunctionTypeParameterMayBeErased {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named function-type parameter list is missing its closing parenthesis.
-    ExpectedNamedFunctionTypeCloseParen { found: TokenKind },
+    ExpectedNamedFunctionTypeCloseParen {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named function-type parameter is missing its identifier.
-    ExpectedNamedFunctionTypeParameter { found: TokenKind },
+    ExpectedNamedFunctionTypeParameter {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named function-type parameter identifier is not followed by `:`.
-    ExpectedNamedFunctionTypeParameterColon { found: TokenKind },
+    ExpectedNamedFunctionTypeParameterColon {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A parsed function-type parameter list is not followed by its required arrow.
     ExpectedFunctionTypeArrow {
+        /// Arrow syntax used by the function type.
         arrow: TypeFunctionArrow,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// An infix type reduction loop failed to advance its token source.
-    InfixTypeNoProgress { found: TokenKind },
+    InfixTypeNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Equal-precedence infix type operators use conflicting associativities.
-    MixedAssociativityTypeOperators { left: Name, right: Name },
+    MixedAssociativityTypeOperators {
+        /// Left operand of the enclosing relation or syntax node.
+        left: Name,
+        /// Right operand of the enclosing relation or syntax node.
+        right: Name,
+    },
     /// A legacy `with` type operator has no following type operand.
-    ExpectedTypeAfterLegacyWith { found: TokenKind },
+    ExpectedTypeAfterLegacyWith {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A colon-introduced refinement is missing its indentation region.
-    ExpectedIndentedRefinementBody { found: TokenKind },
+    ExpectedIndentedRefinementBody {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A refinement-member loop failed to advance its token source.
-    RefinementNoProgress { found: TokenKind },
+    RefinementNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A class-like declaration is not allowed as a refinement member.
-    ClassLikeRefinementMemberNotAllowed { found: TokenKind },
+    ClassLikeRefinementMemberNotAllowed {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A modifier or annotation is not allowed on a refinement member.
-    ModifiedRefinementMemberNotAllowed { found: TokenKind },
+    ModifiedRefinementMemberNotAllowed {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A refinement member has an unsupported declaration shape.
-    UnsupportedRefinementMember { found: TokenKind },
+    UnsupportedRefinementMember {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A refinement method parameter has a default argument.
     RefinementMethodDefaultArgumentNotAllowed,
     /// A refinement value or method has a right-hand side.
     RefinementMemberRightHandSideNotAllowed,
     /// A capture set contains a token that cannot start a capture reference.
-    ExpectedCaptureReference { found: TokenKind },
+    ExpectedCaptureReference {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A capture-set comma is not followed by a capture reference.
-    ExpectedCaptureReferenceAfterComma { found: TokenKind },
+    ExpectedCaptureReferenceAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A capture reference is followed by neither a comma nor `}`.
-    ExpectedCaptureSetSeparator { found: TokenKind },
+    ExpectedCaptureSetSeparator {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A selected capture reference is missing its member name.
-    ExpectedCaptureReferenceMember { found: TokenKind },
+    ExpectedCaptureReferenceMember {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The unsupported read-only `.rd` capture suffix was encountered.
     ReadOnlyCaptureSuffixUnsupported,
     /// A capture filter is missing its qualified type.
-    ExpectedCaptureFilterType { found: TokenKind },
+    ExpectedCaptureFilterType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A capture reference started where no simple reference is valid.
-    InvalidCaptureReference { found: TokenKind },
+    InvalidCaptureReference {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// No type operand starts at the current type-expression position.
-    ExpectedTypeOperand { found: TokenKind },
+    ExpectedTypeOperand {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A singleton type expected a literal token.
-    ExpectedLiteralType { found: TokenKind },
+    ExpectedLiteralType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An empty parenthesized type is not followed by a function arrow.
-    EmptyParenthesizedType { found: TokenKind },
+    EmptyParenthesizedType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A tuple type comma is not followed by another type.
-    ExpectedTypeAfterTupleComma { found: TokenKind },
+    ExpectedTypeAfterTupleComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named tuple type is missing an element name.
-    ExpectedNamedTupleElement { found: TokenKind },
+    ExpectedNamedTupleElement {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named tuple element name is not followed by a colon.
-    ExpectedNamedTupleElementColon { found: TokenKind },
+    ExpectedNamedTupleElementColon {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A named tuple comma is not followed by another element.
-    ExpectedNamedTupleElementAfterComma { found: TokenKind },
+    ExpectedNamedTupleElementAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type projection `#` is missing its member name.
-    ExpectedTypeProjectionMember { found: TokenKind },
+    ExpectedTypeProjectionMember {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A singleton type has no path before `.type`.
-    ExpectedPathBeforeSingletonType { found: TokenKind },
+    ExpectedPathBeforeSingletonType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A simple type reference is missing its initial name.
-    ExpectedSimpleType { found: TokenKind },
+    ExpectedSimpleType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A qualified type reference is missing a name after `.`.
-    ExpectedTypeNameAfterDot { found: TokenKind },
+    ExpectedTypeNameAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A braced legacy type splice is missing its closing brace.
-    ExpectedLegacyTypeSpliceCloseBrace { found: TokenKind },
+    ExpectedLegacyTypeSpliceCloseBrace {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type splice appears in a quoted type, where Scala 3.9 rejects it.
     LegacyTypeSpliceUnsupported,
 }
@@ -1678,27 +2348,62 @@ impl TypeIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatternIssue {
     /// The pattern fragment contains tokens after the pattern.
-    TrailingInput { found: TokenKind },
+    TrailingInput {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An alternative operator is not followed by a pattern.
-    ExpectedPatternAfterAlternative { found: TokenKind },
+    ExpectedPatternAfterAlternative {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A binder marker is not preceded by an identifier pattern.
-    ExpectedIdentifierBeforeBinder { found: TokenKind },
+    ExpectedIdentifierBeforeBinder {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Sequence-pattern syntax is only supported in extractor arguments.
-    SequencePatternOutsideExtractorArguments { found: TokenKind },
+    SequencePatternOutsideExtractorArguments {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A sequence wildcard in extractor arguments is not preceded by a variable pattern.
-    SequencePatternRequiresVariable { found: TokenKind },
+    SequencePatternRequiresVariable {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Equal-precedence pattern operators use conflicting associativities.
-    MixedAssociativityOperators { left: Name, right: Name },
+    MixedAssociativityOperators {
+        /// Left operand of the enclosing relation or syntax node.
+        left: Name,
+        /// Right operand of the enclosing relation or syntax node.
+        right: Name,
+    },
     /// Parsing an infix pattern did not advance the token source.
-    InfixPatternNoProgress { found: TokenKind },
+    InfixPatternNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern selection dot is not followed by a selector.
-    ExpectedSelectorAfterDot { found: TokenKind },
+    ExpectedSelectorAfterDot {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An extractor argument comma is not followed by a pattern.
-    ExpectedPatternAfterComma { found: TokenKind },
+    ExpectedPatternAfterComma {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern was required at the current token.
-    ExpectedPattern { found: TokenKind },
+    ExpectedPattern {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The current pattern form is not implemented.
-    UnsupportedPattern { found: TokenKind },
+    UnsupportedPattern {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl PatternIssue {
@@ -1748,13 +2453,25 @@ impl PatternIssue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaseIssue {
     /// A case clause does not begin with the `case` keyword.
-    ExpectedCaseKeyword { found: TokenKind },
+    ExpectedCaseKeyword {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A case pattern and optional guard are not followed by `=>`.
-    ExpectedCaseArrow { found: TokenKind },
+    ExpectedCaseArrow {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// Parsing a case list did not advance the token source.
-    CaseListNoProgress { found: TokenKind },
+    CaseListNoProgress {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// An indented case body is not closed by an outdent.
-    ExpectedCaseBodyOutdent { found: TokenKind },
+    ExpectedCaseBodyOutdent {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
 }
 
 impl CaseIssue {
@@ -1783,24 +2500,43 @@ impl CaseIssue {
 pub enum ParseIssue {
     /// Nested grammar entries exhausted the parser's tree nesting budget.
     NestingLimitExceeded {
+        /// Structural or semantic category of the item.
         kind: crate::ParseKind,
+        /// Configured upper bound that the operation exceeded.
         limit: usize,
     },
     /// A required parser-facing token was absent.
     ExpectedToken {
+        /// Token required at this grammar position.
         expected: TokenKind,
+        /// Token at the parser cursor when this grammar rule failed.
         found: TokenKind,
     },
     /// An expression was required at the current token.
-    ExpectedExpression { found: TokenKind },
+    ExpectedExpression {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A type was required at the current token.
-    ExpectedType { found: TokenKind },
+    ExpectedType {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A pattern was required at the current token.
-    ExpectedPattern { found: TokenKind },
+    ExpectedPattern {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A token is not valid in the current parser position.
-    UnexpectedToken { found: TokenKind },
+    UnexpectedToken {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// The expression fragment contains tokens after its expression.
-    TrailingInput { found: TokenKind },
+    TrailingInput {
+        /// Token at the parser cursor when this grammar rule failed.
+        found: TokenKind,
+    },
     /// A placeholder parameter escaped the expression that owns it.
     UnboundPlaceholderParameter,
     /// A structured failure emitted by the Scala type grammar.

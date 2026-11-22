@@ -31,21 +31,37 @@
 //! checks do not replace verification by an external JVM. This crate does not
 //! parse or type Scala source; source-to-JVM lowering belongs to `dotty-jvm`.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
+/// Class, field, and method access-flag bits with context-specific query wrappers.
 pub mod access_flags;
+/// Borrowed and structured class-file attributes, annotations, and module metadata.
 pub mod attribute;
 pub mod bytecode;
+/// Whole class-file decoding, encoding, and module-descriptor validation.
 pub mod class_file;
 pub mod class_file_builder;
+/// Tagged constants, typed pool indices, and checked symbolic reference queries.
 pub mod constant_pool;
 pub mod constant_pool_builder;
+/// JVM field and method descriptor parsing and pool-backed resolution.
 pub mod descriptor;
+/// Typed failures returned by class-file encoding and length validation.
 pub mod encode_error;
+/// Class-file field records with attributes and descriptor resolution.
 pub mod field;
+/// Class-file method records with attributes and descriptor resolution.
 pub mod method;
+/// Decoding and encoding of the JVM modified UTF-8 representation.
 pub mod modified_utf8;
+/// Bounded big-endian readers for untrusted class-file bytes.
 pub mod reader;
+/// Bounded parsing of JVM generic class, field, and method signatures.
 pub mod signature;
+/// Opt-in Scala TASTY UUID links carried by class-file attributes.
 pub mod tasty_link;
+/// Checked big-endian writers for class-file encoding.
 pub mod writer;
 
 /// JVM class file binary and structural APIs.

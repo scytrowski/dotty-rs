@@ -12,6 +12,9 @@
 //! transaction; retain the original AST, source identity, packages, and store
 //! together for subsequent phases.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod diagnostics;
 mod naming;
 

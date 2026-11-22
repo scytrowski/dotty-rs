@@ -5,19 +5,33 @@
 /// into this enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
+    /// Package identity shared by qualified declarations.
     Package,
+    /// Ordinary class declaration.
     Class,
+    /// Trait declaration.
     Trait,
+    /// Module value, distinct from its module class.
     Object,
+    /// Class implementing an object or module value.
     ModuleClass,
+    /// Method declaration.
     Method,
+    /// Class constructor declaration.
     Constructor,
+    /// Class or module storage member.
     Field,
+    /// Immutable value declaration.
     Value,
+    /// Mutable variable declaration.
     Variable,
+    /// Value parameter declaration.
     Parameter,
+    /// Type parameter declaration.
     TypeParameter,
+    /// Named type alias declaration.
     TypeAlias,
+    /// Local declaration identity in an expression scope.
     Local,
 }
 

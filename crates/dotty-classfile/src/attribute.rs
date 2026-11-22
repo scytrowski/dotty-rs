@@ -11,15 +11,20 @@ use std::fmt;
 /// recognized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawAttribute<'a> {
+    /// Constant-pool UTF-8 entry containing the name.
     pub name_index: ConstantPoolIndex,
+    /// Borrowed attribute payload bytes, excluding its name index and length prefix.
     pub bytes: &'a [u8],
 }
 
 /// One entry of the `InnerClasses` attribute (JVMS §4.7.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InnerClassEntry {
+    /// Constant-pool class entry for the nested class.
     pub inner_class_info_index: ConstantPoolIndex,
+    /// Enclosing class entry, absent for a local or anonymous class.
     pub outer_class_info_index: Option<ConstantPoolIndex>,
+    /// Optional constant-pool UTF-8 entry containing the inner simple name.
     pub inner_name_index: Option<ConstantPoolIndex>,
     /// Source-level modifiers of the inner class; may differ from the
     /// inner class's own `access_flags` as compiled.
@@ -30,16 +35,22 @@ pub struct InnerClassEntry {
 /// as `field_info`/`method_info`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordComponentInfo<'a> {
+    /// Constant-pool UTF-8 entry containing the name.
     pub name_index: ConstantPoolIndex,
+    /// Constant-pool UTF-8 entry containing the JVM descriptor.
     pub descriptor_index: ConstantPoolIndex,
+    /// Attributes in their original class-file order, including opaque payloads.
     pub attributes: Vec<Attribute<'a>>,
 }
 
 /// One entry of a `Code` attribute's exception table (JVMS §4.7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExceptionTableEntry {
+    /// Inclusive protected-range start in bytecode bytes.
     pub start_pc: u16,
+    /// Exclusive protected-range end in bytecode bytes.
     pub end_pc: u16,
+    /// Byte offset of the handler entry instruction.
     pub handler_pc: u16,
     /// `None` matches any exception (used for `finally` blocks).
     pub catch_type: Option<ConstantPoolIndex>,
@@ -51,17 +62,24 @@ pub struct ExceptionTableEntry {
 /// surface as [`Attribute::Other`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeAttribute<'a> {
+    /// Declared maximum operand stack size in JVM slots.
     pub max_stack: u16,
+    /// Declared local-variable array size in JVM slots.
     pub max_locals: u16,
+    /// Borrowed JVM instruction bytes; this field alone does not verify them.
     pub code: &'a [u8],
+    /// Exception handlers in class-file priority order.
     pub exception_table: Vec<ExceptionTableEntry>,
+    /// Attributes in their original class-file order, including opaque payloads.
     pub attributes: Vec<Attribute<'a>>,
 }
 
 /// One entry of the `BootstrapMethods` attribute (JVMS §4.7.23).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapMethodEntry {
+    /// Constant-pool method handle for the bootstrap invocation.
     pub method_ref: ConstantPoolIndex,
+    /// Constant-pool entries supplying bootstrap arguments, in invocation order.
     pub arguments: Vec<ConstantPoolIndex>,
 }
 
@@ -70,13 +88,16 @@ pub struct BootstrapMethodEntry {
 pub struct MethodParameterEntry {
     /// `None` means the parameter has no name (`name_index == 0`).
     pub name_index: Option<ConstantPoolIndex>,
+    /// Raw parameter flags: final, synthetic, and mandated as permitted by the class-file format.
     pub access_flags: u16,
 }
 
 /// One entry of a `Module` attribute's `requires` table (JVMS §4.7.25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModuleRequire {
+    /// Constant-pool module entry naming the required module.
     pub requires_index: ConstantPoolIndex,
+    /// Raw flags on this requires directive.
     pub requires_flags: u16,
     /// `None` represents the on-wire zero index (no version recorded).
     pub requires_version_index: Option<ConstantPoolIndex>,
@@ -85,7 +106,9 @@ pub struct ModuleRequire {
 /// One entry of a `Module` attribute's `exports` table (JVMS §4.7.25).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleExport {
+    /// Constant-pool package entry exported by this directive.
     pub exports_index: ConstantPoolIndex,
+    /// Raw flags on this exports directive.
     pub exports_flags: u16,
     /// Empty for an unqualified export; otherwise ordered module indices.
     pub exports_to: Vec<ConstantPoolIndex>,
@@ -94,7 +117,9 @@ pub struct ModuleExport {
 /// One entry of a `Module` attribute's `opens` table (JVMS §4.7.25).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleOpen {
+    /// Constant-pool package entry opened by this directive.
     pub opens_index: ConstantPoolIndex,
+    /// Raw flags on this opens directive.
     pub opens_flags: u16,
     /// Empty for an unqualified open; otherwise ordered module indices.
     pub opens_to: Vec<ConstantPoolIndex>,
@@ -103,6 +128,7 @@ pub struct ModuleOpen {
 /// One entry of a `Module` attribute's `provides` table (JVMS §4.7.25).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleProvide {
+    /// Constant-pool class entry naming the provided service.
     pub provides_index: ConstantPoolIndex,
     /// JVMS requires at least one provider. Order is preserved as encoded.
     pub provides_with: Vec<ConstantPoolIndex>,
@@ -114,13 +140,21 @@ pub struct ModuleProvide {
 /// version indices use `None` for the on-wire zero value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleAttribute {
+    /// Constant-pool module entry containing the module name.
     pub module_name_index: ConstantPoolIndex,
+    /// Raw module access-flag bits from the class file.
     pub module_flags: u16,
+    /// Optional UTF-8 entry recording the module version.
     pub module_version_index: Option<ConstantPoolIndex>,
+    /// Module dependency directives in class-file order.
     pub requires: Vec<ModuleRequire>,
+    /// Module exports directives in class-file order.
     pub exports: Vec<ModuleExport>,
+    /// Module opens directives in class-file order.
     pub opens: Vec<ModuleOpen>,
+    /// Use-clause entries or service references in declaration order.
     pub uses: Vec<ConstantPoolIndex>,
+    /// Module service-provision directives in class-file order.
     pub provides: Vec<ModuleProvide>,
 }
 
@@ -130,15 +164,20 @@ pub struct ModuleAttribute {
 /// distinct from a present attribute with an empty package table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModulePackagesAttribute {
+    /// Constant-pool package entries listed in the module attribute.
     pub package_indices: Vec<ConstantPoolIndex>,
 }
 
 /// Module attribute flag bits (JVMS §4.7.25). These have field-specific
 /// meanings; a bit valid in one table is not necessarily valid in another.
 pub const MODULE_ACC_OPEN: u16 = 0x0020;
+/// Module requires directive makes the dependency readable to downstream modules.
 pub const MODULE_ACC_TRANSITIVE: u16 = 0x0020;
+/// Module requires directive is mandatory at compile time and optional at runtime.
 pub const MODULE_ACC_STATIC_PHASE: u16 = 0x0040;
+/// Module directive was compiler-generated.
 pub const MODULE_ACC_SYNTHETIC: u16 = 0x1000;
+/// Module directive was implicitly mandated by the language or platform.
 pub const MODULE_ACC_MANDATED: u16 = 0x8000;
 
 /// An `annotation` structure (JVMS §4.7.16).
@@ -147,6 +186,7 @@ pub struct Annotation {
     /// A `Utf8` entry holding the annotation interface's field descriptor
     /// (e.g. `Ljava/lang/Deprecated;`).
     pub type_index: ConstantPoolIndex,
+    /// Annotation element names and values in encoded order.
     pub element_value_pairs: Vec<(ConstantPoolIndex, ElementValue)>,
 }
 
@@ -157,25 +197,38 @@ pub struct Annotation {
 /// than a `CONSTANT_String`/`CONSTANT_Class` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElementValue {
+    /// Annotation signed 8-bit integer value referenced through the constant pool.
     Byte(ConstantPoolIndex),
+    /// Annotation UTF-16 code-unit character value referenced through the constant pool.
     Char(ConstantPoolIndex),
+    /// Annotation double-precision floating-point value referenced through the constant pool.
     Double(ConstantPoolIndex),
+    /// Annotation single-precision floating-point value referenced through the constant pool.
     Float(ConstantPoolIndex),
+    /// Annotation signed 32-bit integer value referenced through the constant pool.
     Int(ConstantPoolIndex),
+    /// Annotation signed 64-bit integer value referenced through the constant pool.
     Long(ConstantPoolIndex),
+    /// Annotation signed 16-bit integer value referenced through the constant pool.
     Short(ConstantPoolIndex),
+    /// Annotation Boolean value referenced through the constant pool.
     Boolean(ConstantPoolIndex),
     /// Points at a `Utf8` entry directly (JVMS §4.7.16.1), not a
     /// `CONSTANT_String`.
     String(ConstantPoolIndex),
+    /// Enumeration constant identified by its type and constant name.
     Enum {
+        /// UTF-8 constant-pool entry containing the annotation or enum type descriptor.
         type_name_index: ConstantPoolIndex,
+        /// Constant-pool UTF-8 entry containing the enum constant name.
         const_name_index: ConstantPoolIndex,
     },
     /// Points at a `Utf8` entry holding a return descriptor (JVMS
     /// §4.7.16.1), not a `CONSTANT_Class`.
     Class(ConstantPoolIndex),
+    /// Nested annotation value.
     Annotation(Box<Annotation>),
+    /// Ordered array of annotation element values.
     Array(Vec<ElementValue>),
 }
 
@@ -200,52 +253,78 @@ pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
 /// [`crate::class_file::ClassFile::validate_module_descriptor`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<'a> {
+    /// Constant-pool value used to initialize a constant field.
     ConstantValue(ConstantPoolIndex),
     /// Raw index into a `Utf8` entry holding the signature grammar
     /// (`crate::signature`); parsing that string is decoder work.
     Signature(ConstantPoolIndex),
+    /// Checked exception class references declared by a method.
     Exceptions(Vec<ConstantPoolIndex>),
+    /// Nested-class relationship table.
     InnerClasses(Vec<InnerClassEntry>),
+    /// Enclosing class and optional method for a local or anonymous class.
     EnclosingMethod {
+        /// Constant-pool class entry.
         class_index: ConstantPoolIndex,
+        /// Enclosing name-and-type entry, absent when not enclosed by a method.
         method_index: Option<ConstantPoolIndex>,
     },
+    /// UTF-8 pool entry naming the original source file.
     SourceFile(ConstantPoolIndex),
+    /// Class-file deprecated marker.
     Deprecated,
+    /// Class-file synthetic marker.
     Synthetic,
+    /// Class reference naming the JVM nest host.
     NestHost(ConstantPoolIndex),
+    /// Class references naming members of the JVM nest.
     NestMembers(Vec<ConstantPoolIndex>),
+    /// Ordered record components and their attributes.
     Record(Vec<RecordComponentInfo<'a>>),
+    /// Class references permitted to extend a sealed class.
     PermittedSubclasses(Vec<ConstantPoolIndex>),
+    /// Method bytecode, declared frame sizes, handlers, and nested attributes.
     Code(CodeAttribute<'a>),
+    /// Bootstrap method handles and ordered static arguments.
     BootstrapMethods(Vec<BootstrapMethodEntry>),
+    /// Method parameter names and flags in descriptor order.
     MethodParameters(Vec<MethodParameterEntry>),
+    /// Structured JPMS module directives.
     Module(ModuleAttribute),
+    /// Packages recorded in a module descriptor.
     ModulePackages(ModulePackagesAttribute),
     /// The `main_class_index` payload of `ModuleMainClass` (JVMS §4.7.27).
     ModuleMainClass(ConstantPoolIndex),
+    /// Declaration annotations retained for runtime reflection.
     RuntimeVisibleAnnotations(Vec<Annotation>),
+    /// Declaration annotations not retained for runtime reflection.
     RuntimeInvisibleAnnotations(Vec<Annotation>),
     /// An attribute name not (yet) modeled above, kept as raw bytes.
     Other(RawAttribute<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Malformed or unsupported structure encountered while decoding a class-file attribute.
 pub enum AttributeError {
+    /// An attribute payload could not be read within its declared bounds.
     Read(ReadError),
     /// `attribute_name_index` didn't resolve to a `Utf8` constant pool entry.
     InvalidNameIndex {
+        /// Constant-pool UTF-8 entry containing the name.
         name_index: ConstantPoolIndex,
     },
     /// A recognized attribute's fields didn't consume the whole
     /// `attribute_length`-bounded payload.
     TrailingBytes {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Number of bytes left unconsumed in the bounded payload.
         unread: usize,
     },
     /// An `element_value`'s `tag` byte (JVMS §4.7.16.1) wasn't one of the
     /// twelve recognized tags.
     UnknownElementValueTag {
+        /// Wire-format tag identifying the decoded entry or node kind.
         tag: u8,
     },
     /// An `element_value` nested (via `annotation`/`array`) past
@@ -255,7 +334,9 @@ pub enum AttributeError {
     TooDeeplyNestedAttribute,
     /// A Module attribute field contains flag bits reserved by JVMS §4.7.25.
     InvalidModuleFlags {
+        /// Name of the field or metadata property that failed validation.
         field: &'static str,
+        /// Recorded flags on the declaration being inspected.
         flags: u16,
     },
     /// A `provides` entry has no provider, contrary to JVMS §4.7.25.
@@ -1305,7 +1386,9 @@ fn validate_attributes_at_depth(
 /// §9.6.4.6), which the legacy `Deprecated` attribute can't express.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeprecationInfo {
+    /// Optional version string from deprecation metadata.
     pub since: Option<String>,
+    /// Whether the declaration is deprecated for removal.
     pub for_removal: bool,
 }
 

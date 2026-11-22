@@ -188,26 +188,47 @@ impl JvmDirectSuperConstructorPlan {
 /// Why an explicit primary constructor cannot be projected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmConstructorIssue {
+    /// The constructor does not match its canonical source declaration.
     SourceIdentity,
+    /// The source constructor syntax is outside the supported shape.
     SourceShape,
+    /// A constructor parameter differs from its canonical source binding.
     ParameterIdentity,
+    /// A constructor parameter's signature is inconsistent or unsupported.
     ParameterSignature,
+    /// A parameter accessor does not match its canonical backing field.
     AccessorFieldIdentity,
+    /// Parameter-accessor flags, ownership, or provenance are inconsistent.
     AccessorFieldMetadata,
+    /// The accessor field type disagrees with the constructor parameter.
     AccessorFieldSignature,
+    /// The constructor or its parameters are not in the required declaration scope.
     DeclarationScope,
+    /// Secondary constructors are outside this constructor plan.
     SecondaryConstructor,
+    /// The constructor result is not the required canonical class type.
     ResultType,
+    /// The constructor visibility is outside the supported contract.
     Visibility,
+    /// The constructor carries unsupported symbol flags.
     Flags,
+    /// The original superclass constructor syntax has an unsupported shape.
     ParentConstructorSourceShape,
+    /// The typed superclass constructor application has an unsupported shape.
     ParentConstructorTypedShape,
+    /// The superclass constructor target is not the validated canonical constructor.
     ParentConstructorIdentity,
+    /// A superclass argument differs from its original source-to-typed binding.
     ParentConstructorArgumentIdentity,
+    /// A reference formal's original source syntax is inconsistent.
     OrderedReferenceFormalSource,
+    /// A reference formal does not match its ordered constructor binding.
     OrderedReferenceFormalIdentity,
+    /// A reference formal has an unsupported or inconsistent semantic type.
     OrderedReferenceFormalType,
+    /// A reference formal belongs to the wrong constructor scope.
     OrderedReferenceFormalScope,
+    /// The reference formal's JVM class metadata is absent or inconsistent.
     OrderedReferenceFormalJvmMetadata,
 }
 

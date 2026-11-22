@@ -100,6 +100,7 @@ pub struct TastySemanticIndex {
 }
 
 impl TastySemanticIndex {
+    /// Creates an empty address-to-semantic-identity index for one TASTy unit.
     pub fn new() -> Self {
         Self::default()
     }

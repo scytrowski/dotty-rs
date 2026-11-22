@@ -277,3 +277,5 @@ also apply, including wire depth and AST bytes. Assembly failures return no
 partial artifact and leave all borrowed semantic stores and arenas unchanged.
 Rust codec round trips and frozen structural/body comparisons are covered here;
 the opt-in Scala oracle checks only the explicitly supported fixture cases.
+
+See the [API usage guide](src/guide.md) for runnable examples and caller contracts.

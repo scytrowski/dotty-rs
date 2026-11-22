@@ -7,18 +7,21 @@ use crate::types::{AnnotationArena, TypeArena};
 /// Every arena `dotty-core` owns, aggregated into one value.
 ///
 /// This is intentionally "dumb storage," not a typing context — it has no
-/// notion of a current owner, lexical scope, or expected type. Once the
-/// typer exists, it defines its own, separate `TypingContext` wrapping a
-/// `&mut SemanticStore` plus that dynamic state, which is why this type is
-/// named `SemanticStore` rather than `SemanticContext` (a name Dotty itself
-/// uses for the dynamic typing context). See `docs/dotty-core-design.md`
-/// §10, `[MAJOR 5]`.
+/// notion of a current owner, lexical scope, or expected type. The source typer
+/// owns dynamic typing state separately while borrowing this store. Binary
+/// adapters use the same canonical tables through their own loading sessions.
+/// This separation keeps the shared model independent of a particular phase.
 #[derive(Debug, Default)]
 pub struct SemanticStore {
+    /// Canonical text interner shared by names throughout this session.
     pub names: NameInterner,
+    /// Canonical symbol table for this compilation session.
     pub symbols: SymbolTable,
+    /// Canonical type arena for this compilation session.
     pub types: TypeArena,
+    /// Canonical lookup-scope arena for this compilation session.
     pub scopes: ScopeArena,
+    /// Canonical annotation arena for this compilation session.
     pub annotations: AnnotationArena,
     /// Mints origin IDs for `SymbolOrigin::Classfile`/`SymbolOrigin::Tasty`
     /// — see [`OriginTable`].
@@ -45,6 +48,8 @@ impl StoreCheckpoint {
 }
 
 impl SemanticStore {
+    /// Creates empty canonical semantic arenas and tables. Bootstrap Definitions once in this
+    /// store before using builtin-dependent compiler phases.
     pub fn new() -> Self {
         Self::default()
     }

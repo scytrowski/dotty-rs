@@ -15,7 +15,7 @@ fn next_arena_id() -> u64 {
 
 /// Owns every [`Type`] value for one compilation session.
 ///
-/// No interning in the foundation PR: two structurally equal `Poly`/
+/// Allocation does not structurally intern types: two structurally equal `Poly`/
 /// `TypeLambda` values are only truly interchangeable if their binders are
 /// alpha-equivalent, which plain structural equality does not establish —
 /// see `docs/dotty-core-design.md` §8.
@@ -43,10 +43,17 @@ impl Default for TypeArena {
 }
 
 impl TypeArena {
+    /// Creates an empty type arena with a fresh reservation identity.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a filled semantic type and returns its arena-local identity. Referenced types and
+    /// binders must belong to this arena; this does not intern or validate the graph.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn alloc(&mut self, ty: Type) -> TypeId {
         let id = TypeId::new(checked_index(self.types.len()));
         self.types.push(ty);
@@ -68,7 +75,8 @@ impl TypeArena {
     /// Whether the slot `id` holds a real value, as opposed to a `reserve`-d
     /// slot that has not been `fill`-ed yet (which [`TypeArena::get`] refuses).
     ///
-    /// Panics if `id` was not allocated by this arena.
+    /// Panics if the index is outside this arena. A same-slot ID from another
+    /// arena cannot be detected; the caller must preserve session provenance.
     pub fn is_filled(&self, id: TypeId) -> bool {
         self.filled[id.index() as usize]
     }
@@ -91,8 +99,9 @@ impl TypeArena {
         }
     }
 
-    /// Panics if `id` was not allocated by this arena, or was `reserve`-d but
-    /// never `fill`-ed.
+    /// Panics if the index is outside this arena or the slot was reserved but
+    /// never filled. A same-slot ID from another arena cannot be detected;
+    /// the caller must preserve session provenance.
     pub fn get(&self, id: TypeId) -> &Type {
         let index = id.index() as usize;
         assert!(

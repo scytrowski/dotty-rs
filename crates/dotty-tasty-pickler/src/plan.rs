@@ -34,6 +34,7 @@ use crate::{
 /// SourceId, not the filename or source-text length; those remain producer facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceMetadata {
+    /// Identity of this source, type, or annotation in its owning session table.
     pub id: SourceId,
     /// Normalized source-relative path using `/`, without `.`/`..` segments.
     pub name: String,
@@ -45,6 +46,9 @@ pub struct SourceMetadata {
 /// session and remain consistent during validation. This is producer evidence,
 /// not a way to authenticate arbitrary arena-relative numeric IDs.
 pub trait SourceTypedBindings {
+    /// Returns the exact typed root recorded for this source tree in the same canonical frontend
+    /// session, or None when no binding exists. Do not synthesize bindings from names or arena
+    /// allocation order.
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>>;
 
     /// The frontend's receipt for a generated method or parameter declaration.
@@ -234,18 +238,31 @@ pub trait SourceTypedBindings {
 /// proof for one `new Inner(formal)` used as another constructor's argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NestedConstructorCallBinding {
+    /// Exact source application root in the canonical session arena.
     pub source_apply: TreeId<Untyped>,
+    /// Exact typed application root in the canonical session arena.
     pub typed_apply: TreeId<Typed>,
+    /// Exact source member selection root in the canonical session arena.
     pub source_select: TreeId<Untyped>,
+    /// Exact source construction root in the canonical session arena.
     pub source_new: TreeId<Untyped>,
+    /// Exact source argument root in the canonical session arena.
     pub source_argument: TreeId<Untyped>,
+    /// Exact typed member selection root in the canonical session arena.
     pub typed_select: TreeId<Typed>,
+    /// Exact typed construction root in the canonical session arena.
     pub typed_new: TreeId<Typed>,
+    /// Exact typed argument root in the canonical session arena.
     pub typed_argument: TreeId<Typed>,
+    /// Class declaration identity being inspected in the supplied session.
     pub class: SymbolId,
+    /// Constructor declaration identity being inspected in the supplied session.
     pub constructor: SymbolId,
+    /// Formal parameter identity; this is not inferred from its name.
     pub formal: SymbolId,
+    /// Semantic type of the canonical formal parameter.
     pub formal_type: TypeId,
+    /// Semantic result type in the canonical type arena.
     pub result_type: TypeId,
 }
 
@@ -254,7 +271,9 @@ pub struct NestedConstructorCallBinding {
 /// `NestedConstructorCallBinding` preserves its existing singleton contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NestedConstructorCallPairBinding {
+    /// Nested constructor calls in source argument order.
     pub calls: [NestedConstructorCallBinding; 2],
+    /// Formal identities in constructor argument order.
     pub argument_formals: [SymbolId; 2],
 }
 
@@ -263,10 +282,16 @@ pub struct NestedConstructorCallPairBinding {
 /// cross-class receipt; the pickler rechecks them against its original trees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectFormalConstructorCallPairBinding {
+    /// Exact source method parameter declarations roots in original source order; retain their
+    /// paired bindings.
     pub source_method_formals: [TreeId<Untyped>; 2],
+    /// Original method formals in source declaration order.
     pub method_formals: [SymbolId; 2],
+    /// Exact source arguments roots in original source order; retain their paired bindings.
     pub source_arguments: [TreeId<Untyped>; 2],
+    /// Exact typed arguments roots in original source order; retain their paired bindings.
     pub typed_arguments: [TreeId<Typed>; 2],
+    /// Formal identities in constructor argument order.
     pub argument_formals: [SymbolId; 2],
 }
 
@@ -275,41 +300,64 @@ pub struct DirectFormalConstructorCallPairBinding {
 pub enum OrderedConstructorCallArgumentOrigin {
     /// An original method formal passed directly to the outer constructor.
     Formal {
+        /// Formal parameter identity; this is not inferred from its name.
         formal: SymbolId,
+        /// Semantic type of the canonical formal parameter.
         formal_type: TypeId,
+        /// Semantic result type in the canonical type arena.
         result_type: TypeId,
     },
     /// An original one-level `new Counter(seed)` expression.
     NestedNew {
+        /// Validated identities of the nested constructor call.
         call: NestedConstructorCallBinding,
+        /// Original formal supplying this constructor or method argument.
         argument_formal: SymbolId,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Exact source and typed argument roots with their canonical formal or immutable-local origin.
 pub struct FormalLocalConstructorCallArgumentBinding {
+    /// Exact source argument root in the canonical session arena.
     pub source_argument: TreeId<Untyped>,
+    /// Exact typed argument root in the canonical session arena.
     pub typed_argument: TreeId<Typed>,
+    /// Provenance of this declaration, artifact, or argument binding.
     pub origin: FormalLocalConstructorCallArgumentOrigin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Canonical source binding supplying one argument in the supported formal/local constructor pair.
 pub enum FormalLocalConstructorCallArgumentOrigin {
+    /// Original method formal passed directly to the constructor.
     Formal {
+        /// Formal parameter identity; this is not inferred from its name.
         formal: SymbolId,
+        /// Semantic type of the canonical formal parameter.
         formal_type: TypeId,
+        /// Semantic result type in the canonical type arena.
         result_type: TypeId,
     },
+    /// Original immutable local value passed to the constructor.
     LocalValue {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Semantic result type in the canonical type arena.
         result_type: TypeId,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Original method formals and two argument bindings in constructor argument order.
+/// All identities must come from the same canonical frontend session.
 pub struct FormalLocalConstructorCallPairBinding {
+    /// Exact source method parameter declarations roots in original source order; retain their
+    /// paired bindings.
     pub source_method_formals: [TreeId<Untyped>; 2],
+    /// Original method formals in source declaration order.
     pub method_formals: [SymbolId; 2],
+    /// Argument values or validated bindings in original argument order.
     pub arguments: [FormalLocalConstructorCallArgumentBinding; 2],
 }
 
@@ -317,17 +365,29 @@ pub struct FormalLocalConstructorCallPairBinding {
 /// `first.set(secondSeed): Unit` in the bounded two-local Pair factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalReceiverUnitCallBinding {
+    /// Exact source application root in the canonical session arena.
     pub source_apply: TreeId<Untyped>,
+    /// Exact typed application root in the canonical session arena.
     pub typed_apply: TreeId<Typed>,
+    /// Exact source member selection root in the canonical session arena.
     pub source_select: TreeId<Untyped>,
+    /// Exact typed member selection root in the canonical session arena.
     pub typed_select: TreeId<Typed>,
+    /// Exact source receiver root in the canonical session arena.
     pub source_receiver: TreeId<Untyped>,
+    /// Exact typed receiver root in the canonical session arena.
     pub typed_receiver: TreeId<Typed>,
+    /// Exact source argument root in the canonical session arena.
     pub source_argument: TreeId<Untyped>,
+    /// Exact typed argument root in the canonical session arena.
     pub typed_argument: TreeId<Typed>,
+    /// Canonical symbol used as the call receiver.
     pub receiver: SymbolId,
+    /// Lookup scope in which the original receiver binding was entered.
     pub receiver_scope: dotty_core::ScopeId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Original formal supplying this constructor or method argument.
     pub argument_formal: SymbolId,
 }
 
@@ -335,18 +395,31 @@ pub struct LocalReceiverUnitCallBinding {
 /// initializer authorized by the cross-class immutable-local proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalCounterInitializerBinding {
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
+    /// Exact source declaration root in the canonical session arena.
     pub source_declaration: TreeId<Untyped>,
+    /// Exact typed declaration root in the canonical session arena.
     pub typed_declaration: TreeId<Typed>,
+    /// Exact source initializer root in the canonical session arena.
     pub source_initializer: TreeId<Untyped>,
+    /// Exact typed initializer root in the canonical session arena.
     pub typed_initializer: TreeId<Typed>,
+    /// Exact source type syntax root in the canonical session arena.
     pub source_type_tree: TreeId<Untyped>,
+    /// Exact typed type syntax root in the canonical session arena.
     pub typed_type_tree: TreeId<Typed>,
+    /// Local binding identity in the canonical session symbol table.
     pub local: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
+    /// Original formal supplying this constructor or method argument.
     pub argument_formal: SymbolId,
+    /// Validated identities of the nested constructor call.
     pub call: NestedConstructorCallBinding,
 }
 
@@ -354,19 +427,33 @@ pub struct LocalCounterInitializerBinding {
 /// local of the same reference type in the same method scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalReferenceAliasBinding {
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
+    /// Exact source declaration root in the canonical session arena.
     pub source_declaration: TreeId<Untyped>,
+    /// Exact typed declaration root in the canonical session arena.
     pub typed_declaration: TreeId<Typed>,
+    /// Exact source initializer root in the canonical session arena.
     pub source_initializer: TreeId<Untyped>,
+    /// Exact typed initializer root in the canonical session arena.
     pub typed_initializer: TreeId<Typed>,
+    /// Exact source type syntax root in the canonical session arena.
     pub source_type_tree: TreeId<Untyped>,
+    /// Exact typed type syntax root in the canonical session arena.
     pub typed_type_tree: TreeId<Typed>,
+    /// Exact source call target root in the canonical session arena.
     pub source_target: TreeId<Untyped>,
+    /// Exact typed call target root in the canonical session arena.
     pub typed_target: TreeId<Typed>,
+    /// Local binding identity in the canonical session symbol table.
     pub local: SymbolId,
+    /// Binding or control-flow destination selected by this node.
     pub target: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
 }
 
@@ -374,22 +461,37 @@ pub struct LocalReferenceAliasBinding {
 /// This is evidence for a separately incomplete declaration fragment only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutableCounterLocalInitializerBinding {
+    /// Identity of the source buffer in the current compilation session.
     pub source_id: SourceId,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
     /// The two original local declarations in their real source order.
     pub prefix_source_declarations: [TreeId<Untyped>; 2],
+    /// Exact typed prefix declarations in original statement order.
     pub prefix_typed_declarations: [TreeId<Typed>; 2],
+    /// Local identities in the original block statement order.
     pub prefix_locals: [SymbolId; 2],
+    /// Exact source declaration root in the canonical session arena.
     pub source_declaration: TreeId<Untyped>,
+    /// Exact typed declaration root in the canonical session arena.
     pub typed_declaration: TreeId<Typed>,
+    /// Exact source initializer root in the canonical session arena.
     pub source_initializer: TreeId<Untyped>,
+    /// Exact typed initializer root in the canonical session arena.
     pub typed_initializer: TreeId<Typed>,
+    /// Local binding identity in the canonical session symbol table.
     pub local: SymbolId,
+    /// Binding or control-flow destination selected by this node.
     pub target: SymbolId,
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
 }
 
@@ -397,21 +499,37 @@ pub struct MutableCounterLocalInitializerBinding {
 /// assignment borrowed from the #2299 reassignment proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutableCounterReferenceAssignmentBinding {
+    /// Identity of the source buffer in the current compilation session.
     pub source_id: SourceId,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
+    /// Exact source assignment root in the canonical session arena.
     pub source_assignment: TreeId<Untyped>,
+    /// Exact typed assignment root in the canonical session arena.
     pub typed_assignment: TreeId<Typed>,
+    /// Exact source assignment target root in the canonical session arena.
     pub source_lhs: TreeId<Untyped>,
+    /// Exact typed assignment target root in the canonical session arena.
     pub typed_lhs: TreeId<Typed>,
+    /// Exact source right-hand side root in the canonical session arena.
     pub source_rhs: TreeId<Untyped>,
+    /// Exact typed right-hand side root in the canonical session arena.
     pub typed_rhs: TreeId<Typed>,
+    /// Local binding identity in the canonical session symbol table.
     pub local: SymbolId,
+    /// Local binding referenced by the assignment value.
     pub rhs_local: SymbolId,
+    /// Second local binding in the ordered construction proof.
     pub second_local: SymbolId,
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
 }
 
@@ -429,23 +547,41 @@ struct FragmentPredecessorInitializer {
 /// The binding is provenance only and never authorizes serialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConditionalLocalReferenceSelectionBinding {
+    /// Identity of the source buffer in the current compilation session.
     pub source_id: SourceId,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
+    /// Exact source declaration root in the canonical session arena.
     pub source_declaration: TreeId<Untyped>,
+    /// Exact typed declaration root in the canonical session arena.
     pub typed_declaration: TreeId<Typed>,
+    /// Exact source conditional root in the canonical session arena.
     pub source_if: TreeId<Untyped>,
+    /// Exact typed conditional root in the canonical session arena.
     pub typed_if: TreeId<Typed>,
+    /// Exact source condition root in the canonical session arena.
     pub source_condition: TreeId<Untyped>,
+    /// Exact typed condition root in the canonical session arena.
     pub typed_condition: TreeId<Typed>,
+    /// Exact source branches roots in original source order; retain their paired bindings.
     pub source_arms: [TreeId<Untyped>; 2],
+    /// Exact typed branches roots in original source order; retain their paired bindings.
     pub typed_arms: [TreeId<Typed>; 2],
+    /// Original Boolean formal used as the branch condition.
     pub condition_formal: SymbolId,
+    /// Target declaration identities in source branch order.
     pub targets: [SymbolId; 2],
+    /// Declaration selected by the recorded binding.
     pub selected: SymbolId,
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
 }
 
@@ -454,27 +590,47 @@ pub struct ConditionalLocalReferenceSelectionBinding {
 /// provenance only and does not authorize serialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConditionalMutableReferenceAssignmentBinding {
+    /// Identity of the source buffer in the current compilation session.
     pub source_id: SourceId,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
+    /// Exact source block root in the canonical session arena.
     pub source_block: TreeId<Untyped>,
+    /// Exact typed block root in the canonical session arena.
     pub typed_block: TreeId<Typed>,
+    /// Exact source conditional root in the canonical session arena.
     pub source_if: TreeId<Untyped>,
+    /// Exact typed conditional root in the canonical session arena.
     pub typed_if: TreeId<Typed>,
+    /// Exact source condition root in the canonical session arena.
     pub source_condition: TreeId<Untyped>,
+    /// Exact typed condition root in the canonical session arena.
     pub typed_condition: TreeId<Typed>,
     /// THEN assignment followed by ELSE assignment.
     pub source_assignments: [TreeId<Untyped>; 2],
+    /// Exact typed assignments roots in original source order; retain their paired bindings.
     pub typed_assignments: [TreeId<Typed>; 2],
+    /// Exact source assignment targets roots in original source order; retain their paired
+    /// bindings.
     pub source_lhss: [TreeId<Untyped>; 2],
+    /// Exact typed assignment targets roots in original source order; retain their paired
+    /// bindings.
     pub typed_lhss: [TreeId<Typed>; 2],
+    /// Exact source right-hand sides roots in original source order; retain their paired bindings.
     pub source_rhss: [TreeId<Untyped>; 2],
+    /// Exact typed right-hand sides roots in original source order; retain their paired bindings.
     pub typed_rhss: [TreeId<Typed>; 2],
+    /// Original Boolean formal used as the branch condition.
     pub condition_formal: SymbolId,
+    /// Local binding identity in the canonical session symbol table.
     pub local: SymbolId,
     /// THEN RHS followed by ELSE RHS, retaining semantic identity order.
     pub rhs_locals: [SymbolId; 2],
+    /// Type of the local binding in the canonical type arena.
     pub local_type: TypeId,
 }
 
@@ -482,8 +638,11 @@ pub struct ConditionalMutableReferenceAssignmentBinding {
 /// constructor argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrderedConstructorCallArgumentBinding {
+    /// Exact source argument root in the canonical session arena.
     pub source_argument: TreeId<Untyped>,
+    /// Exact typed argument root in the canonical session arena.
     pub typed_argument: TreeId<Typed>,
+    /// Provenance of this declaration, artifact, or argument binding.
     pub origin: OrderedConstructorCallArgumentOrigin,
 }
 
@@ -491,8 +650,12 @@ pub struct OrderedConstructorCallArgumentBinding {
 /// origins for one mixed constructor application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrderedConstructorCallArgumentPairBinding {
+    /// Exact source method parameter declarations roots in original source order; retain their
+    /// paired bindings.
     pub source_method_formals: [TreeId<Untyped>; 2],
+    /// Original method formals in source declaration order.
     pub method_formals: [SymbolId; 2],
+    /// Argument values or validated bindings in original argument order.
     pub arguments: [OrderedConstructorCallArgumentBinding; 2],
 }
 
@@ -500,22 +663,39 @@ pub struct OrderedConstructorCallArgumentPairBinding {
 /// receipt. Every tree is an original source-session node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannedCallBinding {
+    /// Exact source application root in the canonical session arena.
     pub source_apply: TreeId<Untyped>,
+    /// Exact typed application root in the canonical session arena.
     pub typed_apply: TreeId<Typed>,
+    /// Exact source function root in the canonical session arena.
     pub source_function: TreeId<Untyped>,
+    /// Exact typed function root in the canonical session arena.
     pub typed_function: TreeId<Typed>,
+    /// Exact source argument root in the canonical session arena.
     pub source_argument: TreeId<Untyped>,
+    /// Exact typed argument root in the canonical session arena.
     pub typed_argument: TreeId<Typed>,
+    /// Exact source receiver root in the canonical session arena.
     pub source_receiver: Option<TreeId<Untyped>>,
+    /// Exact typed receiver root in the canonical session arena.
     pub typed_receiver: Option<TreeId<Typed>>,
+    /// Exact source tree root in the canonical session arena.
     pub helper_source_tree: TreeId<Untyped>,
+    /// Exact source right-hand side root in the canonical session arena.
     pub helper_source_rhs: TreeId<Untyped>,
+    /// Exact typed right-hand side root in the canonical session arena.
     pub helper_typed_rhs: TreeId<Typed>,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: SymbolId,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Original method parameter supplying the argument.
     pub caller_formal: SymbolId,
+    /// Original helper method parameter supplying the result.
     pub helper_formal: SymbolId,
+    /// Semantic type of the canonical formal parameter.
     pub formal_type: TypeId,
+    /// Semantic result type in the canonical type arena.
     pub result_type: TypeId,
 }
 
@@ -540,7 +720,9 @@ where
 /// Exact source declaration for the existing canonical default constructor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefaultConstructorPlan {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Exact source tree root in the canonical session arena.
     pub source_tree: TreeId<Untyped>,
     /// Explicit source clauses, not the normalized semantic empty clause.
     pub parameter_clauses: Vec<Vec<SymbolId>>,
@@ -549,7 +731,9 @@ pub struct DefaultConstructorPlan {
 /// A canonical method and its real typed RHS, in source declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodPicklePlan {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Exact source tree root in the canonical session arena.
     pub source_tree: TreeId<Untyped>,
     /// Preserve clause boundaries: `[]` and `[[]]` are distinct.
     pub parameter_clauses: Vec<Vec<SymbolId>>,
@@ -563,26 +747,42 @@ pub struct MethodPicklePlan {
 /// the pickler never reconstructs local identity from names or allocation order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalValueBinding {
+    /// Exact source tree root in the canonical session arena.
     pub source_tree: TreeId<Untyped>,
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Exact typed declaration root in the canonical session arena.
     pub typed_declaration: TreeId<Typed>,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: dotty_core::ScopeId,
 }
 
 /// Borrowed, unvalidated input. No semantic records or typed trees are cloned.
 /// The explicit source root prevents silently omitting extra top-level forms.
 pub struct PicklePlan<'a> {
+    /// Borrowed canonical semantic store; all plan identities must belong to it.
     pub store: &'a SemanticStore,
+    /// Builtin identities bootstrapped in the same semantic store.
     pub definitions: &'a Definitions,
+    /// Typed arena paired with the original source arena.
     pub typed_ast: &'a AstArena<Typed>,
+    /// Original untyped arena for the exact source compilation session.
     pub source_ast: &'a AstArena<Untyped>,
+    /// Canonical naming index for these source trees and symbols.
     pub source_index: &'a SourceSemanticIndex,
+    /// Source-to-typed binding evidence from the same frontend session.
     pub typed_bindings: &'a dyn SourceTypedBindings,
+    /// Source buffer identity and normalized relative path supplied by the producer.
     pub source: SourceMetadata,
+    /// Exact source root root in the canonical session arena.
     pub source_root: TreeId<Untyped>,
+    /// Class declaration identity being inspected in the supplied session.
     pub class: SymbolId,
+    /// Original source class declaration root in the session arena.
     pub class_tree: TreeId<Untyped>,
+    /// Canonical no-argument constructor identity and its original source tree.
     pub constructor: DefaultConstructorPlan,
+    /// Declared methods in source or class-file order.
     pub methods: &'a [MethodPicklePlan],
     /// Canonical bindings for supported method-local value declarations across methods.
     pub local_values: &'a [LocalValueBinding],
@@ -592,9 +792,13 @@ pub struct PicklePlan<'a> {
 /// Expression recursion is capped at 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidationLimits {
+    /// Maximum owner-chain depth accepted by validation.
     pub max_owner_depth: usize,
+    /// Maximum recursive expression depth accepted by validation.
     pub max_expression_depth: usize,
+    /// Maximum number of items processed by the bounded operation.
     pub max_items: usize,
+    /// Maximum byte length accepted for a name.
     pub max_name_bytes: usize,
 }
 
@@ -643,6 +847,7 @@ pub struct ValidatedMutableCounterReferenceAssignmentFragment<'p, 'a> {
 }
 
 impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
+    /// Borrows the original plan retained by this validation receipt.
     pub fn plan(&self) -> &'p PicklePlan<'a> {
         self.plan
     }
@@ -659,6 +864,9 @@ impl<'a> PicklePlan<'a> {
         self.validate_with_limits(ValidationLimits::default())
     }
 
+    /// Validates canonical identities, source-to-typed bindings, supported shapes, and explicit
+    /// work limits without mutating stores or arenas. Returns a borrowing receipt on success or a
+    /// typed PickleError on rejection.
     pub fn validate_with_limits(
         &self,
         limits: ValidationLimits,

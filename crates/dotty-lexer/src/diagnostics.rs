@@ -16,7 +16,10 @@ pub enum LexerIssue {
     /// A failure while scanning XML syntax or recovering XML state.
     Xml(XmlIssue),
     /// The lexer does not currently support this source character.
-    UnsupportedSourceCharacter { character: char },
+    UnsupportedSourceCharacter {
+        /// Unicode scalar encountered in the invalid source form.
+        character: char,
+    },
     /// A block comment reached end of input before it was closed.
     UnterminatedBlockComment,
     /// A backquoted identifier reached end of input before its closing quote.
@@ -144,15 +147,26 @@ impl XmlIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericIssue {
     /// A base prefix, fractional part, or exponent had no digits.
-    MissingDigits { component: NumericComponent },
+    MissingDigits {
+        /// Part of the numeric literal containing the error.
+        component: NumericComponent,
+    },
     /// A digit was not valid for the selected non-decimal base.
-    InvalidDigitForBase { digit: char, base: u32 },
+    InvalidDigitForBase {
+        /// Character that is not valid for the required numeric base.
+        digit: char,
+        /// Radix used to interpret the numeric literal.
+        base: u32,
+    },
     /// A separator occurred before any digit or directly after another one.
     MisplacedSeparator,
     /// A numeric component ended in a separator.
     TrailingSeparator,
     /// The `L` suffix was applied to a decimal or exponent literal.
-    LongSuffixOnNonInteger { literal_kind: NonIntegerLiteralKind },
+    LongSuffixOnNonInteger {
+        /// Source literal category involved in the rejection.
+        literal_kind: NonIntegerLiteralKind,
+    },
     /// The numeric portion was followed by an invalid identifier character.
     InvalidNumber,
 }
@@ -161,7 +175,10 @@ pub enum NumericIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericComponent {
     /// Digits after a `0x` or `0b` prefix.
-    BasePrefix { base: u32 },
+    BasePrefix {
+        /// Radix used to interpret the numeric literal.
+        base: u32,
+    },
     /// Digits after the decimal point.
     FractionalPart,
     /// Digits after the exponent marker and optional sign.
@@ -187,26 +204,41 @@ pub enum LiteralIssue {
     /// A character literal contained no character.
     EmptyCharacter,
     /// The source character occupies more than one JVM UTF-16 code unit.
-    CharacterOutsideUtf16CodeUnit { character: char },
+    CharacterOutsideUtf16CodeUnit {
+        /// Unicode scalar encountered in the invalid source form.
+        character: char,
+    },
     /// A character literal contained multiple characters.
     MultipleCharacters,
     /// An ordinary or multiline string did not reach its closing delimiter.
-    UnclosedString { multiline: bool },
+    UnclosedString {
+        /// Whether the literal uses multiline delimiter syntax.
+        multiline: bool,
+    },
 }
 
 /// Structured failures produced while scanning escapes in literals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EscapeIssue {
     /// An escape used a character not supported by Scala string syntax.
-    InvalidEscapeCharacter { character: char },
+    InvalidEscapeCharacter {
+        /// Unicode scalar encountered in the invalid source form.
+        character: char,
+    },
     /// A backslash occurred at end of input without an escape character.
     UnterminatedEscape,
     /// A Unicode escape contained a non-hexadecimal character.
-    InvalidUnicodeEscapeCharacter { character: char },
+    InvalidUnicodeEscapeCharacter {
+        /// Unicode scalar encountered in the invalid source form.
+        character: char,
+    },
     /// A Unicode escape ended before all four hexadecimal digits were read.
     IncompleteUnicodeEscape,
     /// Legacy octal escapes are recognized but unsupported.
-    UnsupportedOctalEscape { digits: String },
+    UnsupportedOctalEscape {
+        /// Digit spelling involved in the numeric-literal check.
+        digits: String,
+    },
 }
 
 /// Structured failures produced while scanning interpolation syntax.
@@ -215,9 +247,15 @@ pub enum InterpolationIssue {
     /// A braced interpolation expression reached end of input before `}`.
     UnterminatedExpression,
     /// An interpolated string reached its end without a closing delimiter.
-    UnclosedString { multiline: bool },
+    UnclosedString {
+        /// Whether the literal uses multiline delimiter syntax.
+        multiline: bool,
+    },
     /// A `$` was not followed by a valid simple or braced splice.
-    InvalidSplice { following_character: Option<char> },
+    InvalidSplice {
+        /// Next Unicode scalar, or no value at end of input.
+        following_character: Option<char>,
+    },
     /// A simple `$` splice was not followed by an identifier.
     IdentifierExpectedAfterDollar,
 }
@@ -252,9 +290,17 @@ pub enum XmlIssue {
     /// An XML closing tag began without a name.
     ClosingTagNameExpected,
     /// A closing tag name did not match the corresponding opening tag.
-    MismatchedClosingTag { expected: String, found: String },
+    MismatchedClosingTag {
+        /// Required textual value used by this validation rule.
+        expected: String,
+        /// Observed textual value used by this validation rule.
+        found: String,
+    },
     /// A closing tag had no matching opening tag.
-    ClosingTagWithoutOpeningTag { found: Option<String> },
+    ClosingTagWithoutOpeningTag {
+        /// Observed textual value used by this validation rule.
+        found: Option<String>,
+    },
     /// An XML comment contained the forbidden `--` sequence.
     InvalidCommentDoubleHyphen,
     /// An `=` token occurred where no attribute assignment was expected.

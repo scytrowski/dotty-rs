@@ -38,15 +38,27 @@ impl TastyLinkId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TastyLinkError {
     /// The raw attribute name index does not resolve to a constant-pool UTF-8 entry.
-    InvalidNameIndex { name_index: ConstantPoolIndex },
+    InvalidNameIndex {
+        /// Constant-pool UTF-8 entry containing the name.
+        name_index: ConstantPoolIndex,
+    },
     /// The attribute payload is not exactly 16 bytes.
-    InvalidPayloadLength { length: usize },
+    InvalidPayloadLength {
+        /// Requested payload length in bytes.
+        length: usize,
+    },
     /// A class has more than one class-level `TASTY` attribute.
     DuplicateClassAttribute,
     /// A nested attribute tree exceeds the classfile decoder's traversal bound.
-    TooDeeplyNestedAttribute { depth: usize },
+    TooDeeplyNestedAttribute {
+        /// Traversal depth at which the operation was rejected.
+        depth: usize,
+    },
     /// `TASTY` appears on a field, method, or nested attribute instead of the class.
-    MisplacedAttribute { location: TastyLinkLocation },
+    MisplacedAttribute {
+        /// Location or structural position of the reported item.
+        location: TastyLinkLocation,
+    },
 }
 
 /// The non-class location where a `TASTY` attribute was found.

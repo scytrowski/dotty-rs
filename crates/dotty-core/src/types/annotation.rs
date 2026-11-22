@@ -24,8 +24,11 @@ use crate::types::ty::Type;
 /// distinction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Annotation {
+    /// Semantic type identity in the same session type arena.
     pub ty: TypeId,
+    /// Argument values or validated bindings in original argument order.
     pub arguments: AnnotationArguments,
+    /// Typed tree identity in its original session arena.
     pub tree: Option<TreeId<Typed>>,
 }
 
@@ -81,6 +84,7 @@ pub struct AnnotationArgument {
     /// The parameter name of a named argument (`name = value`), `None` for a
     /// positional one.
     pub name: Option<TermName>,
+    /// Literal, token, or annotation payload represented by this node.
     pub value: AnnotationValue,
 }
 
@@ -172,10 +176,17 @@ pub struct AnnotationArena {
 }
 
 impl AnnotationArena {
+    /// Creates an empty annotation arena for one semantic session.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends an annotation and returns its session-local identity. Referenced symbols and types
+    /// must belong to the same session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn alloc(&mut self, annotation: Annotation) -> AnnotationId {
         let id = AnnotationId::new(checked_index(self.annotations.len()));
         self.annotations.push(annotation);
@@ -192,8 +203,12 @@ impl AnnotationArena {
         self.annotations.truncate(len);
     }
 
-    /// Panics if `id` was not allocated by this arena — see
-    /// `docs/dotty-core-design.md`, "Error handling policy."
+    /// Returns the annotation for an ID from this session.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an out-of-range index. IDs from another arena with the same
+    /// index cannot be detected and violate the caller’s session contract.
     pub fn get(&self, id: AnnotationId) -> &Annotation {
         &self.annotations[id.index() as usize]
     }

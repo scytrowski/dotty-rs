@@ -19,6 +19,8 @@ use crate::names::Name;
 /// edge case.
 #[derive(Default)]
 pub struct Scope {
+    /// Owner of this lookup environment; entering foreign-owned members does not change their
+    /// semantic owner.
     pub owner: Option<SymbolId>,
     entries: HashMap<Name, Vec<SymbolId>>,
 }
@@ -37,6 +39,8 @@ impl fmt::Debug for Scope {
 }
 
 impl Scope {
+    /// Creates an empty lookup scope or scope arena. A scope owner identifies the semantic
+    /// environment; entering a name does not change symbol ownership.
     pub fn new(owner: Option<SymbolId>) -> Self {
         Self {
             owner,
@@ -85,10 +89,17 @@ pub struct ScopeArena {
 }
 
 impl ScopeArena {
+    /// Creates an empty lookup scope or scope arena. A scope owner identifies the semantic
+    /// environment; entering a name does not change symbol ownership.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a lookup scope and returns an ID local to this session arena.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn alloc(&mut self, scope: Scope) -> ScopeId {
         let id = ScopeId::new(checked_index(self.scopes.len()));
         self.scopes.push(scope);
@@ -105,8 +116,12 @@ impl ScopeArena {
         self.scopes.truncate(len);
     }
 
-    /// Panics if `id` was not allocated by this arena — see
-    /// `docs/dotty-core-design.md`, "Error handling policy."
+    /// Returns the scope for an ID from this session.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an out-of-range index. IDs from another arena with the same
+    /// index cannot be detected and violate the caller’s session contract.
     pub fn get(&self, id: ScopeId) -> &Scope {
         &self.scopes[id.index() as usize]
     }
@@ -116,6 +131,12 @@ impl ScopeArena {
         (id.index() as usize) < self.scopes.len()
     }
 
+    /// Borrows a scope for in-place updates.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an index outside this arena. A same-slot ID from another session cannot be
+    /// detected.
     pub fn get_mut(&mut self, id: ScopeId) -> &mut Scope {
         &mut self.scopes[id.index() as usize]
     }

@@ -23,18 +23,31 @@ use crate::ids::{NameId, TypeId};
 /// until a later layer chooses how to encode or diagnose it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
+    /// Scala Unit constant.
     Unit,
+    /// Null reference constant.
     Null,
+    /// Boolean constant.
     Boolean(bool),
+    /// Signed 8-bit constant.
     Byte(i8),
+    /// Signed 16-bit constant.
     Short(i16),
+    /// UTF-16 code-unit character constant.
     Char(u16),
+    /// Signed 32-bit constant.
     Int(i32),
+    /// Signed 64-bit constant.
     Long(i64),
+    /// IEEE-754 single-precision constant preserved as raw bits.
     FloatBits(u32),
+    /// IEEE-754 double-precision constant preserved as raw bits.
     DoubleBits(u64),
+    /// Interned UTF-8-representable string constant.
     String(NameId),
+    /// String constant preserved as UTF-16 code units, including unpaired surrogates.
     StringUtf16(Vec<u16>),
+    /// Class literal represented by its semantic type.
     Class(TypeId),
 }
 

@@ -13,8 +13,11 @@ use crate::names::Name;
 use crate::source::SourceSpan;
 use crate::types::{Constant, Type, TypeArena};
 
+/// A shared syntax tree whose phase payload is a canonical semantic type identity.
 pub type TypedTree = Tree<Typed>;
+/// Arena-relative identity of a tree in the typed phase.
 pub type TypedTreeId = TreeId<Typed>;
+/// Arena owning all typed trees for one compilation session.
 pub type TypedAst = AstArena<Typed>;
 
 /// Builds `Tree<Typed>` nodes. Every constructor takes a `TypeId` argument,
@@ -27,6 +30,8 @@ pub struct TypedAstBuilder<'a> {
 }
 
 impl<'a> TypedAstBuilder<'a> {
+    /// Borrows the session's typed arena and type arena for construction. Callers supply
+    /// already-determined types; this builder does not perform type checking.
     pub fn new(arena: &'a mut AstArena<Typed>, types: &'a TypeArena) -> Self {
         Self { arena, types }
     }
@@ -47,6 +52,8 @@ impl<'a> TypedAstBuilder<'a> {
         tree
     }
 
+    /// Allocates an identifier without source backquotes, using the caller-supplied semantic type.
+    /// The name and type must belong to the same session.
     pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
         self.ident_with_backquoted(name, false, ty, position)
     }
@@ -191,6 +198,9 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates an ordinary value application with arguments in evaluation order. The callee,
+    /// arguments, and result type must belong to this session; no overload resolution or
+    /// conformance checking is performed.
     pub fn apply(
         &mut self,
         function: TreeId<Typed>,

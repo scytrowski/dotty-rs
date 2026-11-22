@@ -7,6 +7,9 @@
 //! Positions are UTF-8 byte offsets. This crate performs no source naming,
 //! type checking, classpath loading, or JVM emission.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod cursor;
 mod diagnostics;
 mod lexer;

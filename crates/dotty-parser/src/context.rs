@@ -1,35 +1,55 @@
 /// Syntactic location that affects parser interpretation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Location {
+    /// Grammar position inside parentheses.
     InParens,
+    /// Grammar position inside a value argument list.
     InArgs,
+    /// Grammar position inside a colon argument body.
     InColonArg,
+    /// Grammar position inside a pattern.
     InPattern,
+    /// Grammar position inside a case guard.
     InGuard,
+    /// Grammar position inside extractor pattern arguments.
     InPatternArgs,
+    /// Grammar position inside a block statement sequence.
     InBlock,
+    /// Grammar position inside a package body.
     InPackageBody,
+    /// Grammar position without one of the specialized enclosing contexts.
     Elsewhere,
 }
 
 /// Owner of a parameter clause currently being parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamOwner {
+    /// Primary-constructor parameters of an ordinary class.
     Class,
+    /// Primary-constructor parameters of a case class.
     CaseClass,
+    /// Method parameter clauses.
     Def,
+    /// Type-definition parameter clause.
     Type,
+    /// Higher-kinded type parameter clause.
     Hk,
+    /// Given-definition parameter clauses.
     Given,
+    /// Receiver or prefix clauses of an extension group.
     ExtensionPrefix,
+    /// Parameter clauses following an extension receiver.
     ExtensionFollow,
 }
 
 /// Grammar category currently being parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseKind {
+    /// Parse using expression grammar.
     Expr,
+    /// Parse using type grammar.
     Type,
+    /// Parse using pattern grammar.
     Pattern,
 }
 
@@ -60,9 +80,13 @@ pub struct ParserFeatures {
 /// Explicit parser context carried through nested grammar calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseContext {
+    /// Location or structural position of the reported item.
     pub location: Location,
+    /// Expression, type, or pattern grammar selected for this parse.
     pub parse_kind: ParseKind,
+    /// Grammar owner used to interpret this parameter list.
     pub param_owner: Option<ParamOwner>,
+    /// Feature switches controlling accepted parser syntax.
     pub features: ParserFeatures,
     /// The delimiter owned by the expression block currently being parsed.
     ///

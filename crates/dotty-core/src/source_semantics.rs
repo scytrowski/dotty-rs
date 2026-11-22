@@ -14,49 +14,92 @@ use crate::symbols::{SymbolKind, SymbolOrigin};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceSemanticIndexError {
     /// A source tree was assigned more than one canonical semantic symbol.
-    DuplicateSourceTreeSymbol { source: SourceId, tree_index: u32 },
+    DuplicateSourceTreeSymbol {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
+        tree_index: u32,
+    },
     /// A source tree was assigned more than one derived symbol for one owner.
     DuplicateDerivedSourceTreeSymbol {
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Source buffer identity in the current compilation session.
         source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
     },
     /// A case-class generated method role was already assigned to a symbol.
     DuplicateGeneratedCaseClassMethodRole {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Role of this item in the source or semantic validation contract.
         role: GeneratedCaseClassMethodRole,
     },
     /// A symbol was already assigned a generated case-class method role.
-    DuplicateGeneratedCaseClassMethodSymbol { symbol: SymbolId },
+    DuplicateGeneratedCaseClassMethodSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A generated method was not derived from its canonical source class.
     GeneratedCaseClassMethodClassMismatch {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Source buffer identity in the current compilation session.
         source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         actual: Option<SymbolId>,
     },
     /// A semantic symbol was assigned conflicting canonical/derived source definitions.
     ConflictingSourceProvenance {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Previously recorded value retained by the failed operation.
         existing: SourceDefinition,
+        /// New value rejected because it conflicts with the existing entry.
         attempted: SourceDefinition,
     },
     /// A semantic owner was assigned more than one declaration scope.
-    DuplicateDeclarationScope { symbol: SymbolId },
+    DuplicateDeclarationScope {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The file and package disagree with an existing wrapper registration.
-    ConflictingSourcePackageWrapper { source: SourceId, package: SymbolId },
+    ConflictingSourcePackageWrapper {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Package identity or path associated with this declaration.
+        package: SymbolId,
+    },
     /// A declaration symbol was assigned two different source contexts.
     DuplicateDeclarationContext {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Previously recorded value retained by the failed operation.
         existing: SourceContextId,
+        /// New value rejected because it conflicts with the existing entry.
         attempted: SourceContextId,
     },
     /// A source field was assigned more than one initializer context.
-    DuplicateFieldInitializerContext { field: SymbolId },
+    DuplicateFieldInitializerContext {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// An extension method was assigned prefix-clause metadata more than once.
-    DuplicateExtensionPrefixClauses { method: SymbolId },
+    DuplicateExtensionPrefixClauses {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// An export source tree was registered more than once.
-    DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
+    DuplicateSourceExportSite {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
+        tree_index: u32,
+    },
 }
 
 impl fmt::Display for SourceSemanticIndexError {

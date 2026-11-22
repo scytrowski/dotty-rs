@@ -2,8 +2,11 @@
 use super::{LineIndex, SourceTextError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Unit used to count columns when converting source byte offsets to editor positions.
 pub enum PositionEncoding {
+    /// Columns count UTF-8 bytes.
     Utf8,
+    /// Columns count UTF-16 code units, as used by common editor protocols.
     Utf16,
 }
 
@@ -15,11 +18,14 @@ pub struct DocumentText {
 }
 
 impl DocumentText {
+    /// Owns a UTF-8 buffer and builds its line index. Returns SourceTextError if the text exceeds
+    /// the supported 32-bit offset range.
     pub fn new(text: String) -> Result<Self, SourceTextError> {
         let lines = LineIndex::build(&text, |_| false)?;
         Ok(Self { text, lines })
     }
 
+    /// Borrows the unchanged UTF-8 document contents, including original line endings.
     pub fn as_str(&self) -> &str {
         &self.text
     }

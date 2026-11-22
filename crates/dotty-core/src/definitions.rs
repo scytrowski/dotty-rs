@@ -23,15 +23,25 @@ use crate::types::{ClassInfo, MethodKind, MethodParam, MethodType, Type};
 /// `dotty-typer` or inferring an intrinsic from an operator's spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntPrimitiveOperatorSymbols {
+    /// Canonical `+` method identity registered for this builtin owner.
     pub plus: SymbolId,
+    /// Canonical `-` method identity registered for this builtin owner.
     pub minus: SymbolId,
+    /// Canonical `*` method identity registered for this builtin owner.
     pub multiply: SymbolId,
+    /// Canonical `/` method identity registered for this builtin owner.
     pub divide: SymbolId,
+    /// Canonical `%` method identity registered for this builtin owner.
     pub remainder: SymbolId,
+    /// Canonical `&` method identity registered for this builtin owner.
     pub bitwise_and: SymbolId,
+    /// Canonical `<` method identity registered for this builtin owner.
     pub less_than: SymbolId,
+    /// Canonical `<=` method identity registered for this builtin owner.
     pub less_or_equal: SymbolId,
+    /// Canonical `>` method identity registered for this builtin owner.
     pub greater_than: SymbolId,
+    /// Canonical `>=` method identity registered for this builtin owner.
     pub greater_or_equal: SymbolId,
 }
 
@@ -73,13 +83,21 @@ impl IntPrimitiveOperatorSymbols {
 /// The canonical source member identities for Boolean primitive operators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BooleanPrimitiveOperatorSymbols {
+    /// Canonical `unary_!` method identity registered for this builtin owner.
     pub unary_not: SymbolId,
+    /// Canonical `&&` method identity registered for this builtin owner.
     pub and_then: SymbolId,
+    /// Canonical `||` method identity registered for this builtin owner.
     pub or_else: SymbolId,
+    /// Canonical `&` method identity registered for this builtin owner.
     pub eager_and: SymbolId,
+    /// Canonical `|` method identity registered for this builtin owner.
     pub eager_or: SymbolId,
+    /// Canonical `^` method identity registered for this builtin owner.
     pub xor: SymbolId,
+    /// Canonical `==` method identity registered for this builtin owner.
     pub equal: SymbolId,
+    /// Canonical `!=` method identity registered for this builtin owner.
     pub not_equal: SymbolId,
 }
 
@@ -105,7 +123,9 @@ impl BooleanPrimitiveOperatorSymbols {
 /// `java.lang.Object` methods.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnyRefIdentityOperatorSymbols {
+    /// Canonical `eq` method identity registered for this builtin owner.
     pub eq: SymbolId,
+    /// Canonical `ne` method identity registered for this builtin owner.
     pub ne: SymbolId,
 }
 
@@ -119,7 +139,9 @@ impl AnyRefIdentityOperatorSymbols {
 /// The canonical source identities for Scala's universal equality operators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnyEqualityOperatorSymbols {
+    /// Canonical `==` method identity registered for this builtin owner.
     pub equal: SymbolId,
+    /// Canonical `!=` method identity registered for this builtin owner.
     pub not_equal: SymbolId,
 }
 
@@ -182,73 +204,124 @@ impl std::error::Error for AnyRefIdentityOperatorRegistrationError {}
 /// canonical primitive operators.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntPrimitiveOperatorRegistrationError {
+    /// The builtin Int class has no completed class-info signature.
     ClassInfoUnavailable {
+        /// Completion state observed when a completed signature was required.
         state: IntPrimitiveOperatorInfoState,
     },
+    /// The Int class-info type ID is outside the current arena or unfilled.
     InvalidClassInfoType {
+        /// Recorded signature or completion state of the canonical declaration.
         info: TypeId,
     },
+    /// The completed Int signature is not a class-info type.
     ClassInfoNotClassInfo {
+        /// Recorded signature or completion state of the canonical declaration.
         info: TypeId,
     },
+    /// The class-info payload identifies a different class.
     MalformedClassInfoIdentity {
+        /// Class identity actually recorded in the class-info type.
         recorded_class: SymbolId,
     },
+    /// The Int class-info structure fails its invariants.
     MalformedClassInfo {
+        /// Recorded signature or completion state of the canonical declaration.
         info: TypeId,
     },
+    /// The Int declaration scope is absent from the session.
     InvalidDeclarationScope {
+        /// Lookup-scope identity in the canonical session scope arena.
         scope: ScopeId,
     },
+    /// The declaration scope belongs to a different owner.
     DeclarationScopeOwnerMismatch {
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         actual: Option<SymbolId>,
     },
+    /// An operator registry entry refers to an absent symbol.
     UnknownMemberSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The expected operator name resolves to a non-method declaration.
     OperatorNameIsNotMethod {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The registered method has a different operator name.
     OperatorMethodNameMismatch {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Observed namespace-aware declaration name.
         actual: Name,
     },
+    /// The registered method is not owned by canonical Int.
     OperatorMethodOwnerMismatch {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: Option<SymbolId>,
     },
+    /// The registered operator is not publicly accessible.
     OperatorMethodNotPublic {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The operator carries flags outside the supported builtin contract.
     IncompatibleOperatorFlags {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Recorded flags on the declaration being inspected.
         flags: SymbolFlags,
     },
+    /// The registered method has no completed signature.
     OperatorMethodInfoUnavailable {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The registered method signature fails type-graph invariants.
     OperatorMethodInfoMalformed {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// Multiple entries claim the same operator signature.
     DuplicateOperatorSignature {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
     },
+    /// The registry repeats the same method symbol.
     DuplicateOperatorSymbol {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The method signature differs from the required primitive signature.
     IncompatibleOperatorSignature {
+        /// Operator spelling or canonical name used by the operation.
         operator: &'static str,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// The supplied Int type is not the session's canonical builtin type.
     IntTypeIsNotCanonical,
+    /// The supplied Boolean type is not the session's canonical builtin type.
     BooleanTypeIsNotCanonical,
 }
 
@@ -259,7 +332,9 @@ pub type BooleanPrimitiveOperatorRegistrationError = IntPrimitiveOperatorRegistr
 /// The completion state reported for the canonical `Int` class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntPrimitiveOperatorInfoState {
+    /// Signature completion has not yet run.
     Deferred,
+    /// Signature completion recorded an error.
     Error,
 }
 
@@ -319,13 +394,21 @@ pub struct Definitions {
     /// structure to compare, so allocating more than one per session only
     /// creates spurious `TypeId` distinctions.
     pub no_prefix: TypeId,
+    /// Canonical Scala `Byte` type in this session.
     pub byte: TypeId,
+    /// Canonical Scala `Char` type in this session.
     pub char: TypeId,
+    /// Canonical Scala `Double` type in this session.
     pub double: TypeId,
+    /// Canonical Scala `Float` type in this session.
     pub float: TypeId,
+    /// Canonical Scala `Int` type in this session.
     pub int: TypeId,
+    /// Canonical Scala `Long` type in this session.
     pub long: TypeId,
+    /// Canonical Scala `Short` type in this session.
     pub short: TypeId,
+    /// Canonical Scala `Boolean` type in this session.
     pub boolean: TypeId,
     /// What a JVM `void` return type / Scala `Unit` lowers to.
     pub unit: TypeId,

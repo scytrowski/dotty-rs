@@ -14,3 +14,6 @@ readme = "README.md"
 documentation = "https://docs.rs/dotty-classfile"
 
 [dependencies]
+
+[lints]
+workspace = true

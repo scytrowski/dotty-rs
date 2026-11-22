@@ -18,6 +18,9 @@
 //! that a Scala compiler can consume a newly produced file. Semantic unpickling
 //! and pickling are separate adapter crates.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 /// Raw and structured AST nodes, tags, references, and AST indexes.
 pub mod ast;
 /// Fresh wire AST construction with symbolic address labels.

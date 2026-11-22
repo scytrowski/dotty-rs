@@ -68,15 +68,28 @@ pub enum ClassHierarchyError {
     InvalidClassName(String),
     /// The same direct edge was supplied more than once.
     DuplicateEdge {
+        /// Binary name of the subclass involved in this relationship.
         subclass: String,
+        /// Direct superclass recorded by the class signature or relationship.
         superclass: String,
     },
     /// One class was assigned two different direct superclasses.
-    ConflictingSuperclass { subclass: String },
+    ConflictingSuperclass {
+        /// Binary name of the subclass involved in this relationship.
+        subclass: String,
+    },
     /// The supplied graph contains a superclass cycle.
-    Cycle { class: String },
+    Cycle {
+        /// Binary class name involved in the failed relationship.
+        class: String,
+    },
     /// A proof path exceeds the supported depth.
-    DepthExceeded { class: String, depth: usize },
+    DepthExceeded {
+        /// Binary class name involved in the failed relationship.
+        class: String,
+        /// Traversal depth at which the operation was rejected.
+        depth: usize,
+    },
 }
 
 impl fmt::Display for ClassHierarchyError {
