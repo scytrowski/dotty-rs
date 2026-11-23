@@ -936,11 +936,32 @@ impl SourceTyper<'_> {
                 && let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned()
             {
                 for (ordinal, (slot, param)) in slots.iter().zip(&method.params).enumerate() {
-                    if slot.is_some() || constraints.iter().all(Option::is_some) {
+                    if !constraints.contains(&None) {
+                        break;
+                    }
+                    if slot.is_some() || self.has_omitted_default(function, ordinal, param.ty) {
                         continue;
                     }
-                    if let Some(witness) = self.infer_omitted_witness(
+                    let expected = self.partially_inferred_formal(
+                        &inference,
+                        ordinal,
                         param.ty,
+                        &constraints,
+                    )?;
+                    if !self.type_contains_param_ref(expected, callable)? {
+                        let parameter = dotty_core::MethodParam {
+                            ty: expected,
+                            ..*param
+                        };
+                        let witness = self.search_contextual_argument(
+                            &parameter,
+                            context,
+                            tree_index,
+                            info_journal,
+                        )?;
+                        inferred_witnesses.insert(ordinal, witness);
+                    } else if let Some(witness) = self.infer_omitted_witness(
+                        expected,
                         &inference,
                         &mut constraints,
                         context,

@@ -337,6 +337,44 @@ impl SourceTyper<'_> {
         Ok(inferred)
     }
 
+    /// Keep unbound call parameters as references to the original binder while
+    /// substituting the constraints already established by earlier arguments.
+    pub(super) fn partially_inferred_formal(
+        &mut self,
+        call: &PolyApplicationInference<'_>,
+        ordinal: usize,
+        formal: TypeId,
+        inferred: &[Option<TypeId>],
+    ) -> Result<TypeId, TyperError> {
+        if inferred.iter().all(Option::is_none)
+            || !self.type_contains_param_ref(formal, call.binder)?
+        {
+            return Ok(formal);
+        }
+        let arguments: Vec<_> = inferred
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                arg.unwrap_or_else(|| {
+                    self.store.types.alloc(Type::ParamRef {
+                        binder: call.binder,
+                        index: index as u32,
+                    })
+                })
+            })
+            .collect();
+        let instance = dotty_core::types::instantiate_poly(self.store, call.binder, &arguments)
+            .map_err(TyperError::PolyInstantiation)?;
+        match self.store.types.get(instance.result) {
+            Type::Method(m) => Ok(m.params[ordinal].ty),
+            _ => Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index: call.tree_index,
+                binder: call.binder,
+            }),
+        }
+    }
+
     pub(super) fn finish_application_inference(
         &self,
         request: &PolyApplicationInference<'_>,
