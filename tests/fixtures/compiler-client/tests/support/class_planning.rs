@@ -2139,17 +2139,18 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } else {
             assert!(blocked.is_empty());
         }
-        let super::SignatureError::Typing(error) = error else {
+        let super::SignatureError::Header(dotty::ClassHeaderError::Typing(report)) = error else {
             panic!("expected a header typing error, got {error:?}")
         };
+        assert_eq!(report.class(), Some(child.symbol));
+        let error = report.error();
         assert!(
             matches!(error, TyperError::ApplicationArgumentTypeMismatch {
-            argument_index: 0, actual, expected, ..
-        } if actual == defs.boolean && expected == defs.int),
+                argument_index: 0, actual, expected, ..
+            } if *actual == defs.boolean && *expected == defs.int),
             "{error:?}"
         );
-        let diagnostic =
-            dotty::TypingDiagnostic::from_typer(&error, |id| sources.file(id).map(|u| u.ast()));
+        let diagnostic = report.render();
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic
@@ -2162,7 +2163,7 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             dotty::core::TextRange::new(start, start + 5).unwrap()
         );
         for ast in [Some(units[parent_index].ast()), None] {
-            let unlocated = dotty::TypingDiagnostic::from_typer(&error, |_| ast);
+            let unlocated = dotty::TypingDiagnostic::from_typer(error, |_| ast);
             assert_eq!(unlocated.location, None);
             assert_eq!(unlocated.message, diagnostic.message);
         }
@@ -2241,8 +2242,9 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     let good_root = headers.bindings.get(good.source(), good_parent).unwrap();
     let bad = &units[2];
     let class = &bad.classes()[0];
-    bad.typer(&mut store, defs, &packages)
-        .complete_symbol(class.constructor)
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    sources
+        .complete_constructor_signature(class.symbol, &mut store, defs, &packages)
         .unwrap();
     let parent = class.parents[0];
     let TreeKind::Apply(call) = &bad.ast().get(parent).kind else {
@@ -2250,18 +2252,19 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     };
     let argument = call.args[0];
     let before = headers.arena.checkpoint();
-    let error = dotty::try_complete_class_header(
-        class.symbol,
-        bad.ast(),
-        bad.index(),
-        &mut store,
-        defs,
-        &packages,
-        &mut headers.arena,
-        &mut headers.bindings,
-        |_| true,
-    )
-    .unwrap_err();
+    let error = sources
+        .try_complete_class_header_reported(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+            &mut headers.bindings,
+        )
+        .unwrap_err();
+    let dotty::ClassHeaderError::Typing(report) = error else {
+        panic!("expected a typed rejection")
+    };
     let dotty::typer::TyperError::ApplicationArgumentTypeMismatch {
         source,
         tree_index,
@@ -2269,14 +2272,14 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         actual,
         expected,
         ..
-    } = error
+    } = report.error()
     else {
-        panic!("unexpected error for Bad: {error:?}")
+        panic!("unexpected error for Bad: {report:?}")
     };
-    assert_eq!(source, bad.source());
-    assert_eq!(tree_index, parent.index());
-    assert_eq!(argument_index, 0);
-    assert_eq!((actual, expected), (defs.boolean, defs.int));
+    assert_eq!(*source, bad.source());
+    assert_eq!(*tree_index, parent.index());
+    assert_eq!(*argument_index, 0);
+    assert_eq!((*actual, *expected), (defs.boolean, defs.int));
     assert_eq!(
         store.symbols.info(class.symbol),
         &dotty::core::SymbolInfo::Missing
