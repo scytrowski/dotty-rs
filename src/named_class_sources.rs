@@ -206,6 +206,31 @@ impl<'a> NamedClassSources<'a> {
         )
     }
 
+    /// Attempts the header under the same contract as [`Self::try_complete_class_header`],
+    /// capturing any typer failure before the source session ends. The report
+    /// identifies the requested class and carries the actual failure's optional
+    /// byte span, including for a recursively checked parent. No member is
+    /// attributed to a header attempt. An ineligible symbol yields
+    /// [`ClassHeaderError::InvalidClass`] without changing the session.
+    pub fn try_complete_class_header_reported(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        bindings: &mut ClassHeaderBindings,
+    ) -> Result<SignatureCompletion, ClassHeaderError> {
+        self.try_complete_class_header(class, store, definitions, packages, arena, bindings)
+            .map_err(|error| {
+                if self.class(class).is_some() {
+                    self.header_error(class, None, error)
+                } else {
+                    ClassHeaderError::InvalidClass(class)
+                }
+            })
+    }
+
     /// Attempts one field or method signature after header completion. The
     /// collection supplies the declaring AST and naming index. An unresolved
     /// dependency in these files can yield `BlockedOn`. An unavailable external
@@ -453,6 +478,93 @@ mod tests {
             store.symbols.info(omitted.classes()[0].constructor),
             &SymbolInfo::Missing
         );
+    }
+
+    #[test]
+    fn constructor_and_header_failures_retain_their_distinct_context_after_analysis() {
+        let broken_text = "class Broken(start: Missing)";
+        let bad_text = "class Bad(start: Boolean) extends Base(start)";
+        let (ctor, header) = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let broken = named(7, broken_text, &mut store, &mut packages);
+            let bad = named(21, bad_text, &mut store, &mut packages);
+            let base = named(42, "class Base(start: Int)", &mut store, &mut packages);
+            let sources = NamedClassSources::new([&broken, &bad, &base], &store).unwrap();
+            let class = &broken.classes()[0];
+            let before = store.checkpoint();
+            let Err(ClassHeaderError::Typing(ctor)) =
+                sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)
+            else {
+                panic!("expected an unknown constructor type")
+            };
+            assert_eq!(store.checkpoint(), before);
+            assert_eq!(
+                (ctor.class(), ctor.member()),
+                (Some(class.symbol), Some(class.constructor))
+            );
+
+            let mut arena = AstArena::new();
+            let mut bindings = ClassHeaderBindings::default();
+            for file in [&base, &bad] {
+                sources
+                    .complete_constructor_signature(
+                        file.classes()[0].symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                    )
+                    .unwrap();
+            }
+            let before = (store.checkpoint(), arena.checkpoint());
+            assert!(
+                matches!(sources.try_complete_class_header_reported(class.constructor, &mut store, defs, &packages, &mut arena, &mut bindings), Err(ClassHeaderError::InvalidClass(s)) if s == class.constructor)
+            );
+            assert_eq!((store.checkpoint(), arena.checkpoint()), before);
+            assert!(matches!(
+                sources.try_complete_class_header_reported(
+                    base.classes()[0].symbol,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut arena,
+                    &mut bindings
+                ),
+                Ok(SignatureCompletion::Complete(_))
+            ));
+            let bad_symbol = bad.classes()[0].symbol;
+            let Err(ClassHeaderError::Typing(header)) = sources.try_complete_class_header_reported(
+                bad_symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                &mut bindings,
+            ) else {
+                panic!("expected a parent argument error")
+            };
+            assert_eq!((header.class(), header.member()), (Some(bad_symbol), None));
+            (ctor, header)
+        };
+        assert!(matches!(ctor.error(), TyperError::TypeNameNotFound { .. }));
+        assert!(matches!(
+            header.error(),
+            TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 0,
+                ..
+            }
+        ));
+        for (report, id, text, token) in [
+            (ctor, 7, broken_text, "Missing"),
+            (header, 21, bad_text, "start"),
+        ] {
+            let span = report.location().unwrap();
+            assert_eq!(span.source(), SourceId::from_index(id));
+            let range = span.span().range();
+            assert_eq!(range.start() as usize, text.rfind(token).unwrap());
+            assert_eq!(range.len() as usize, token.len());
+        }
     }
 
     fn prepare_constructors(
