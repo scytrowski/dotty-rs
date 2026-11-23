@@ -8,6 +8,7 @@ use super::*;
 pub(super) mod constructors;
 pub use constructors::ConstructorCandidate;
 mod inference;
+mod named;
 pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::{InferenceLocation, PolyApplicationInference};
 
@@ -1010,6 +1011,20 @@ impl SourceTyper<'_> {
                 method_kind: method.kind,
             });
         }
+        let named =
+            self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
+        if let Some(slots) = &named
+            && slots
+                .iter()
+                .take(argument_trees.len())
+                .enumerate()
+                .any(|(i, a)| a.as_ref().is_none_or(|arg| arg.written != i))
+        {
+            return Err(TyperError::UsingApplicationDeferred {
+                source: self.source,
+                tree_index,
+            });
+        }
         let mut shared = Vec::new();
         let partial_using = application_kind == ApplyKind::Using
             && !argument_trees.is_empty()
@@ -1075,6 +1090,10 @@ impl SourceTyper<'_> {
         for (argument_index, (argument_tree, parameter)) in
             argument_trees.iter().zip(&method.params).enumerate()
         {
+            let argument_tree = named
+                .as_ref()
+                .and_then(|s| s[argument_index].as_ref())
+                .map_or(argument_tree, |a| &a.value);
             let formal_ty = if method.kind == MethodKind::Plain {
                 parameter.ty
             } else {
@@ -1199,6 +1218,11 @@ impl SourceTyper<'_> {
                         error: Box::new(error),
                     });
                 }
+            }
+            if let Some(slot) = named.as_ref().and_then(|s| s[argument_index].as_ref())
+                && slot.value != argument_trees[slot.written]
+            {
+                self.record_typed_child(argument_trees[slot.written], argument, new_mappings)?;
             }
             arguments.push(argument);
         }

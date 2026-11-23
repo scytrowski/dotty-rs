@@ -1775,6 +1775,24 @@ pub enum TyperError {
         /// Observed argument or parameter count.
         actual: usize,
     },
+    /// The selected clause has no parameter with this name.
+    UnknownNamedArgument {
+        /// Source file containing the explicit argument.
+        source: SourceId,
+        /// Index of the offending argument in the source tree.
+        tree_index: u32,
+        /// Parameter name written at the call site.
+        name: Name,
+    },
+    /// A parameter already has a positional or named argument.
+    DuplicateNamedArgument {
+        /// Source file containing the explicit argument.
+        source: SourceId,
+        /// Index of the offending argument in the source tree.
+        tree_index: u32,
+        /// Parameter name written at the call site.
+        name: Name,
+    },
     /// An erased parameter cannot be supplied by ordinary expression typing.
     ErasedApplicationParameterDeferred {
         /// Source buffer identity in the current compilation session.
