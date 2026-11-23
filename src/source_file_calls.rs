@@ -221,12 +221,27 @@ impl SourceFileCalls {
         bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
         file: impl FnOnce(SourceId) -> Option<&'a SourceFileCalls>,
     ) -> Option<SourceMethodTarget> {
+        let (source, method) = self.source_method_at(offset, ast, typed_ast, store, bindings)?;
+        file(source)?.target(source, method)
+    }
+
+    fn source_method_at<'a>(
+        &self,
+        offset: u32,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
+    ) -> Option<(SourceId, SymbolId)> {
         let method = self.method_at_with_bindings(offset, ast, typed_ast, store, bindings)?;
         let SymbolOrigin::Source(source) = store.symbols.get(method).origin else {
             return None;
         };
-        file(source)?
-            .targets
+        Some((source, method))
+    }
+
+    fn target(&self, source: SourceId, method: SymbolId) -> Option<SourceMethodTarget> {
+        self.targets
             .get(&method)
             .copied()
             .filter(|target| target.source == source)
@@ -246,6 +261,40 @@ impl SourceFileCalls {
     ) -> Option<SymbolId> {
         let body = bodies.get(self.class_at(offset)?).ok()?;
         body.selected_method_at(offset, self.call_names(), ast, typed_ast, store)
+    }
+}
+
+impl crate::NamedClassSources<'_> {
+    /// Resolves a direct parenthesized method call in a committed body member.
+    /// Supply a UTF-8 byte offset inside the callee name and the bodies, typed
+    /// arena and store of this naming session. The returned ranges belong to
+    /// the defining file in the same revision. Either file's navigation index
+    /// can return [`DeclarationError`]. Missing files, absent bindings, and
+    /// positions outside a supported call (including the token end) yield `Ok(None)`.
+    pub fn definition_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+        bodies: &crate::CheckedClassBodies,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Result<Option<SourceMethodTarget>, DeclarationError> {
+        let Some(caller) = self.file(source) else {
+            return Ok(None);
+        };
+        let Some((source, method)) = caller.navigation()?.source_method_at(
+            offset,
+            caller.ast(),
+            typed_ast,
+            store,
+            |owner| bodies.bindings(owner),
+        ) else {
+            return Ok(None);
+        };
+        let Some(provider) = self.file(source) else {
+            return Ok(None);
+        };
+        Ok(provider.navigation()?.target(source, method))
     }
 }
 

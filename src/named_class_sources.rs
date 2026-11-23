@@ -644,6 +644,71 @@ mod tests {
     }
 
     #[test]
+    fn definition_query_uses_checked_call_bindings_and_target_overload_ranges() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let target_text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";
+        let text =
+            "class B { def yes(a: A): Int = a.take(false); def skipped(a: A): Int = a.take(1) }";
+        let target = named(42, target_text, &mut store, &mut packages);
+        let caller = named(8, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&caller, &target], &store).unwrap();
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        let mut phase = crate::ClassHeaderPhase::prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        );
+        for (_, c) in sources.classes() {
+            let _ = phase.attempt(c.symbol).unwrap();
+        }
+        let selection = sources
+            .member_signatures(phase.finish().ready, &store)
+            .unwrap();
+        let mut phase = crate::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+        let owner = &caller.classes()[0];
+        for d in target.classes()[0].methods().chain(owner.methods().take(1)) {
+            let _ = phase.attempt(d.symbol).unwrap();
+        }
+        let (_, work) = phase.finish_with_body_work();
+        let (body, report) = work.check(
+            owner.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        );
+        assert!(report.errors.is_empty());
+        assert!(matches!(body, crate::CheckedClassBody::Partial(_)));
+        let mut bodies = crate::CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let lookup = |file, byte| {
+            sources
+                .definition_at(file, byte, &bodies, &arena, &store)
+                .unwrap()
+        };
+        let byte = text.find("take").unwrap() as u32;
+        let hit = lookup(caller.source(), byte + 1).unwrap();
+        assert_eq!(hit.source, target.source());
+        let slice = |r: crate::core::TextRange| &target_text[r.start() as usize..r.end() as usize];
+        assert_eq!(slice(hit.name), "take");
+        assert_eq!(
+            hit.name.start() as usize,
+            target_text.rfind("take").unwrap()
+        );
+        assert_eq!(slice(hit.declaration), "def take(b: Boolean): Int = 7");
+        assert!(lookup(caller.source(), byte + 4).is_none());
+        assert!(lookup(caller.source(), text.rfind("take").unwrap() as u32).is_none());
+        assert!(lookup(SourceId::from_index(900), byte).is_none());
+    }
+
+    #[test]
     fn projected_classes_navigate_past_an_omitted_owner() {
         use crate::core::{NoResolver, TreeKind};
         let mut store = SemanticStore::new();
