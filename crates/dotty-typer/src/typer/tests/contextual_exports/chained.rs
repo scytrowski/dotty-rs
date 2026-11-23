@@ -116,3 +116,54 @@ fn competing_import_reports_the_public_reexport_at_the_call() {
     names.sort();
     assert_eq!(names, [("Public", "first"), ("Rival", "other")]);
 }
+
+#[test]
+fn second_selector_filters_the_visible_name_type_and_contextual_flag() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(CHAIN);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (method, outer, middle, name, flag) in [
+        ("bound", "Filtered", "Middle", "first", SymbolFlags::GIVEN),
+        (
+            "legacy",
+            "OldPublic",
+            "OldMiddle",
+            "old",
+            SymbolFlags::IMPLICIT,
+        ),
+        (
+            "retained",
+            "WithoutFirst",
+            "Middle",
+            "flags",
+            SymbolFlags::GIVEN,
+        ),
+    ] {
+        let call = client_result(&mut typer, &parsed, method).unwrap();
+        let id = reference(&typer, evidence(&typer, call));
+        assert_eq!(qualified_name(&typer, id), (outer, name));
+        let to = stable_delegate(&mut typer, id);
+        assert_eq!(qualified_name(&typer, to), (middle, name));
+        for symbol in [id, to] {
+            assert_eq!(
+                typer.store.symbols.get(symbol).flags
+                    & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT),
+                flag
+            );
+        }
+    }
+}
+
+#[test]
+fn hidden_omitted_and_nonmatching_evidence_is_missing_at_the_original_call() {
+    let (parsed, mut store, packages, defs, index, source) = errors_unit();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for method in ["excluded", "modernStar", "hidden", "omitted"] {
+        assert!(
+            matches!(
+                rejected_call(&mut typer, &parsed, method),
+                TyperError::MissingContextualArgument { .. }
+            ),
+            "{method}"
+        );
+    }
+}
