@@ -259,3 +259,115 @@ fn exported_dependent_parameters_forward_their_own_value_and_type_symbols() {
         assert_eq!(qualified_name(&typer, leaf), ("Makers", name));
     }
 }
+
+#[test]
+fn reexported_and_legacy_witnesses_keep_their_immediate_delegate() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, owner, name, flags) in [
+        ("viaAlias", "Again", "derived", SymbolFlags::GIVEN),
+        ("oldExport", "Old", "old", SymbolFlags::IMPLICIT),
+    ] {
+        let root = client_result(&mut typer, &parsed, site).unwrap();
+        let call = evidence(&typer, root);
+        assert_arguments(&typer, call, site, &["p", "v"]);
+        let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+            panic!()
+        };
+        let method = reference(&typer, app.function);
+        assert_eq!(qualified_name(&typer, method), (owner, name));
+        assert_eq!(
+            typer.store.symbols.get(method).flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT),
+            flags
+        );
+        let target = dependent_delegate(&mut typer, method);
+        if site == "viaAlias" {
+            assert_eq!(qualified_name(&typer, target), ("Api", "product"));
+            let leaf = dependent_delegate(&mut typer, target);
+            assert_eq!(qualified_name(&typer, leaf), ("Makers", "product"));
+        } else {
+            assert_eq!(qualified_name(&typer, target), ("Legacy", "old"));
+        }
+    }
+}
+
+#[test]
+fn unsuccessful_dependent_export_search_can_be_retried_before_and_after_completion() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let scopes: Vec<_> = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| index.export_site_at(source, tree))
+        .map(|site| index.scope_of(site.owner).unwrap())
+        .collect();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for warm in [false, true] {
+        if warm {
+            let root = client_result(&mut typer, &parsed, "viaAlias").unwrap();
+            assert_arguments(&typer, evidence(&typer, root), "viaAlias", &["p", "v"]);
+        }
+        let before = typer.store.checkpoint();
+        let count = typer.typed_ast().iter().count();
+        let members = |t: &SourceTyper<'_>| {
+            scopes
+                .iter()
+                .map(|&scope| {
+                    t.store
+                        .scopes
+                        .get(scope)
+                        .entered_symbols()
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let scopes_before = members(&typer);
+        for site in ["noFirst", "noSecond", "ambiguous"] {
+            for _ in 0..2 {
+                match rejected_call(&mut typer, &parsed, site) {
+                    TyperError::MissingContextualArgument { .. } if site != "ambiguous" => {}
+                    TyperError::AmbiguousContextualArgument {
+                        candidate_names, ..
+                    } if site == "ambiguous" => {
+                        let mut names: Vec<_> = candidate_names
+                            .iter()
+                            .map(|(owner, n)| {
+                                (
+                                    typer.store.names.resolve(owner.unwrap().text()),
+                                    typer.store.names.resolve(n.text()),
+                                )
+                            })
+                            .collect();
+                        names.sort();
+                        assert_eq!(names, [(site, "a"), (site, "b")]);
+                    }
+                    error => panic!("{site}: {error:?}"),
+                }
+                assert_eq!(typer.store.checkpoint(), before);
+                assert_eq!(members(&typer), scopes_before);
+                assert_eq!(typer.typed_ast().iter().count(), count);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_required_path_cannot_be_invented_for_an_unstable_argument() {
+    let text = "trait Family { type Out }
+class C {
+  def get(f: Family): Family = f
+  def read(using f: Family, v: f.Out): f.Out = v
+  def bad(p: Family)(v: p.Out): p.Out = read(using get(p), v)
+}";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let (_, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "bad");
+    let before = typer.store.checkpoint();
+    for _ in 0..2 {
+        let error = client_result(&mut typer, &parsed, "bad").unwrap_err();
+        assert!(
+            matches!(error,TyperError::DependentMethodApplicationDeferred{tree_index,..} if tree_index==rhs.index()),
+            "{error:?}"
+        );
+        assert_eq!(typer.store.checkpoint(), before);
+    }
+}

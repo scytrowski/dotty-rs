@@ -8,10 +8,14 @@ object Makers:
   given lifted[A](using f: Family, v: f.Out, tag: TC[A]): Built[A] = new Built[A]
 object Api:
   export Makers.product
+object Again:
+  export Api.{product as derived}
 object Generic:
   export Makers.lifted
 object Legacy:
   implicit def old(implicit f: Family, v: f.Out): Product = new Product
+object Old:
+  export Legacy.*
 class Client:
   def read(using f: Family, v: f.Out): f.Out = v
   def curried(using f: Family)(using v: f.Out): f.Out = v
@@ -21,7 +25,9 @@ class Client:
   def inferred(using p: Family, v: p.Out): p.Out = read
   def original(using p: Family, v: p.Out): Product = { import Makers.product; need }
   def viaApi(using p: Family, v: p.Out): Product = { import Api.given; need }
+  def viaAlias(using p: Family, v: p.Out): Product = { import Again.given; need }
   def named(using p: Family, v: p.Out): Product = Api.product(using p, v)
   def partial(using p: Family, v: p.Out): p.Out = read(using p)
   def oldDirect(using p: Family, v: p.Out): Product = { import Legacy.*; need }
+  def oldExport(using p: Family, v: p.Out): Product = { import Old.*; need }
   def generic(using p: Family, v: p.Out, tag: TC[Int]): Built[Int] = Generic.lifted[Int](using p, v, tag)
