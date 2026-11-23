@@ -454,7 +454,7 @@ impl SourceTyper<'_> {
         Ok(true)
     }
 
-    fn share_default_operand(
+    pub(in crate::typer) fn share_default_operand(
         &mut self,
         tree: TreeId<Typed>,
         stats: &mut Vec<TreeId<Typed>>,

@@ -1014,11 +1014,7 @@ impl SourceTyper<'_> {
         let named =
             self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
         if let Some(slots) = &named
-            && slots
-                .iter()
-                .take(argument_trees.len())
-                .enumerate()
-                .any(|(i, a)| a.as_ref().is_none_or(|arg| arg.written != i))
+            && slots.iter().take(argument_trees.len()).any(Option::is_none)
         {
             return Err(TyperError::UsingApplicationDeferred {
                 source: self.source,
@@ -1225,6 +1221,24 @@ impl SourceTyper<'_> {
                 self.record_typed_child(argument_trees[slot.written], argument, new_mappings)?;
             }
             arguments.push(argument);
+        }
+        if let Some(slots) = &named
+            && slots
+                .iter()
+                .flatten()
+                .enumerate()
+                .any(|(i, a)| i != a.written)
+        {
+            function = self.order_named_operands(
+                function,
+                slots,
+                &method,
+                &mut arguments,
+                &mut shared,
+                context,
+                tree_index,
+                info_journal,
+            )?;
         }
         arguments.extend(defaults);
         if application_kind == ApplyKind::Regular

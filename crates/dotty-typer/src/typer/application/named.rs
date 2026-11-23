@@ -68,3 +68,144 @@ impl SourceTyper<'_> {
         Ok(Some(slots))
     }
 }
+
+impl SourceTyper<'_> {
+    // Types (including dependent formals) are checked in declaration order. Strict
+    // operand initializers that must move are emitted in the original source order.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn order_named_operands(
+        &mut self,
+        function: TreeId<Typed>,
+        slots: &[Option<NamedArgument>],
+        method: &MethodType,
+        arguments: &mut [TreeId<Typed>],
+        shared: &mut Vec<TreeId<Typed>>,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let mut written: Vec<_> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, a)| a.as_ref().map(|a| (a.written, ordinal)))
+            .collect();
+        written.sort_unstable();
+        let mut initializers = Vec::new();
+        for (_, ordinal) in written {
+            if !matches!(
+                self.store.types.get(method.params[ordinal].ty),
+                Type::ByName { .. }
+            ) {
+                arguments[ordinal] = self.share_default_operand(
+                    arguments[ordinal],
+                    &mut initializers,
+                    context,
+                    journal,
+                )?;
+            }
+        }
+        if initializers.is_empty() {
+            return Ok(function);
+        }
+        let target = self.lift_named_callee(function, shared, context, tree_index, 0, journal)?;
+        shared.extend(initializers);
+        Ok(target)
+    }
+
+    // The receiver and already-applied strict clauses execute before this clause.
+    fn lift_named_callee(
+        &mut self,
+        tree: TreeId<Typed>,
+        stats: &mut Vec<TreeId<Typed>>,
+        context: ExpressionContext,
+        tree_index: u32,
+        depth: usize,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let deferred = TyperError::UsingApplicationDeferred {
+            source: self.source,
+            tree_index,
+        };
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(deferred);
+        }
+        let node = self.typed_arena.get(tree).clone();
+        let kind = match node.kind {
+            TreeKind::Ident(_) => return Ok(tree),
+            TreeKind::Select(mut s) => {
+                let receiver = self.share_default_operand(s.qualifier, stats, context, journal)?;
+                if receiver == s.qualifier {
+                    return Ok(tree);
+                }
+                let sym = self
+                    .store
+                    .types
+                    .get(node.ty)
+                    .reference_symbol()
+                    .ok_or(deferred)?;
+                s.qualifier = receiver;
+                let ty = self
+                    .store
+                    .types
+                    .alloc(Type::term_ref(self.typed_arena.get(receiver).ty, sym));
+                return Ok(self.typed_arena.alloc(Tree {
+                    kind: TreeKind::Select(s),
+                    ty,
+                    ..node
+                }));
+            }
+            TreeKind::TypeApply(mut a) => {
+                a.function = self.lift_named_callee(
+                    a.function,
+                    stats,
+                    context,
+                    tree_index,
+                    depth + 1,
+                    journal,
+                )?;
+                TreeKind::TypeApply(a)
+            }
+            TreeKind::Apply(mut a) => {
+                let applied = self.widen_expression_type_journaled(
+                    self.typed_arena.get(a.function).ty,
+                    journal,
+                    0,
+                )?;
+                let Some(Type::Method(previous)) = self.store.types.try_get(applied).cloned()
+                else {
+                    return Err(deferred);
+                };
+                if previous.params.len() != a.args.len() {
+                    return Err(deferred);
+                }
+                a.function = self.lift_named_callee(
+                    a.function,
+                    stats,
+                    context,
+                    tree_index,
+                    depth + 1,
+                    journal,
+                )?;
+                for (arg, p) in a.args.iter_mut().zip(previous.params) {
+                    if !matches!(self.store.types.get(p.ty), Type::ByName { .. }) {
+                        *arg = self.share_default_operand(*arg, stats, context, journal)?;
+                    }
+                }
+                TreeKind::Apply(a)
+            }
+            TreeKind::Block(b) => {
+                stats.extend(b.stats);
+                return self.lift_named_callee(
+                    b.expr,
+                    stats,
+                    context,
+                    tree_index,
+                    depth + 1,
+                    journal,
+                );
+            }
+            _ => return Err(deferred),
+        };
+        Ok(self.typed_arena.alloc(Tree { kind, ..node }))
+    }
+}

@@ -50,3 +50,80 @@ fn binds_written_names_and_rejects_invalid_names_at_the_argument() {
         }
     }
 }
+
+#[test]
+fn reordered_strict_arguments_run_once_in_written_order() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let tree = client_result(&mut t, &parsed, "reverse").unwrap();
+    let names: Vec<_> = args(&t, tree)
+        .iter()
+        .map(|&a| qualified_name(&t, reference(&t, a)).1)
+        .collect();
+    assert_eq!(names, ["i", "b", "t"]);
+    client_result(&mut t, &parsed, "effects").unwrap();
+    let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, "effects");
+    let tree = t.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Block(block) = &t.typed_ast().get(tree).kind else {
+        panic!("missing lifted arguments")
+    };
+    let [flag, n] = block.stats[..] else {
+        panic!("two strict operands")
+    };
+    for (stat, name) in [(flag, "tickBool"), (n, "tickInt")] {
+        let TreeKind::ValDef(v) = &t.typed_ast().get(stat).kind else {
+            panic!()
+        };
+        let TreeKind::Apply(a) = &t.typed_ast().get(v.rhs.unwrap()).kind else {
+            panic!()
+        };
+        assert_eq!(qualified_name(&t, reference(&t, a.function)).1, name);
+    }
+    for (&arg, stat) in args(&t, block.expr).iter().zip([n, flag]) {
+        assert_eq!(
+            Some(reference(&t, arg)),
+            t.typed_index.synthetic_definition_symbol(stat)
+        );
+    }
+}
+
+#[test]
+fn reordering_keeps_prior_strict_clauses_first_and_by_name_operands_lazy() {
+    let code = "class C {
+        def next(): Int = 1
+        def consume(first: Int)(using n: Int, delayed: => Int): Int = n
+        def run(): Int = consume(next())(using delayed = next(), n = next())
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(code);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    client_result(&mut t, &parsed, "run").unwrap();
+    let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, "run");
+    let TreeKind::Block(b) = &t
+        .typed_ast()
+        .get(t.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    let [first, n] = b.stats[..] else {
+        panic!("only strict arguments are bound")
+    };
+    let TreeKind::Apply(call) = &t.typed_ast().get(b.expr).kind else {
+        panic!()
+    };
+    let TreeKind::Apply(prior) = &t.typed_ast().get(call.function).kind else {
+        panic!()
+    };
+    assert_eq!(
+        Some(reference(&t, prior.args[0])),
+        t.typed_index.synthetic_definition_symbol(first)
+    );
+    assert_eq!(
+        Some(reference(&t, call.args[0])),
+        t.typed_index.synthetic_definition_symbol(n)
+    );
+    assert!(matches!(
+        &t.typed_ast().get(call.args[1]).kind,
+        TreeKind::Apply(_)
+    ));
+}
