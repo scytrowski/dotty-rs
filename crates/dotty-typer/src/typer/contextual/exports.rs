@@ -250,21 +250,24 @@ impl SourceTyper<'_> {
         signature: TypeId,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
-        let body = match self.store.types.get(signature) {
+        let mut body = match self.store.types.get(signature) {
             Type::Poly(poly) if !poly.params.is_empty() => poly.result,
             _ => signature,
         };
-        if !matches!(self.store.types.get(body), Type::Method(m) if m.kind == MethodKind::Contextual
-            && !m.params.is_empty() && m.params.iter().all(|p| !p.erased && !p.varargs)
-            && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_)))
-        {
-            return Err(TyperError::UnsupportedExpression {
-                source: self.source,
-                tree_index,
-                expression_kind: "unsupported contextual export parameter clauses",
-            });
-        }
-        if let Type::Method(clause) = self.store.types.get(body) {
+        let unsupported = || TyperError::UnsupportedExpression {
+            source: self.source,
+            tree_index,
+            expression_kind: "unsupported contextual export parameter clauses",
+        };
+        let mut depth = 0;
+        while let Type::Method(clause) = self.store.types.get(body) {
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH
+                || clause.kind != MethodKind::Contextual
+                || clause.params.is_empty()
+                || clause.params.iter().any(|p| p.erased || p.varargs)
+            {
+                return Err(unsupported());
+            }
             for formal in &clause.params {
                 if self.type_contains_param_ref(formal.ty, body)? {
                     return Err(TyperError::UnsupportedExpression {
@@ -274,6 +277,11 @@ impl SourceTyper<'_> {
                     });
                 }
             }
+            depth += 1;
+            body = clause.result;
+        }
+        if depth == 0 || matches!(self.store.types.get(body), Type::Poly(_)) {
+            return Err(unsupported());
         }
         freshen_type_binders(self.store, signature).map_err(|error| TyperError::TypeRebinding {
             source: self.source,
@@ -459,7 +467,6 @@ impl SourceTyper<'_> {
         select: TreeId<Typed>,
     ) -> Result<ExportBody, TyperError> {
         let invalid = || TyperError::SourceProvenanceMissing { symbol: method };
-        let position = self.store.symbols.get(method).position;
         let SymbolInfo::Complete(signature) = *self.store.symbols.info(method) else {
             return Err(invalid());
         };
@@ -468,15 +475,32 @@ impl SourceTyper<'_> {
             type_params: Vec::new(),
             value_param_clauses: Vec::new(),
         };
-        let callable = self.export_type_application(method, &mut body, signature)?;
-        let Type::Method(clause) = self.store.types.get(callable) else {
+        let mut callable = self.export_type_application(method, &mut body, signature)?;
+        while let Type::Method(clause) = self.store.types.get(callable) {
+            if body.value_param_clauses.len() >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(invalid());
+            }
+            let clause = clause.clone();
+            callable = self.export_value_application(method, &mut body, callable, clause)?;
+        }
+        if body.value_param_clauses.is_empty() {
             return Err(invalid());
-        };
-        let formals = clause.params.clone();
+        }
+        Ok(body)
+    }
+
+    fn export_value_application(
+        &mut self,
+        method: SymbolId,
+        body: &mut ExportBody,
+        callable: TypeId,
+        clause: dotty_core::types::MethodType,
+    ) -> Result<TypeId, TyperError> {
+        let position = self.store.symbols.get(method).position;
         let mut params = Vec::new();
         let mut paths = Vec::new();
         let mut arguments = Vec::new();
-        for formal in formals {
+        for formal in clause.params {
             let witness = self.export_parameter(
                 method,
                 *formal.name.as_name(),
@@ -510,11 +534,15 @@ impl SourceTyper<'_> {
             paths.push(Some(path));
             arguments.push(ref_tree);
         }
-        let result =
-            instantiate_method_result(self.store, callable, &paths).map_err(|_| invalid())?;
+        let result = if self.type_contains_param_ref(clause.result, callable)? {
+            instantiate_method_result(self.store, callable, &paths)
+                .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?
+        } else {
+            clause.result
+        };
         body.rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .apply(body.rhs, arguments, result, position);
         body.value_param_clauses.push(params);
-        Ok(body)
+        Ok(result)
     }
 }

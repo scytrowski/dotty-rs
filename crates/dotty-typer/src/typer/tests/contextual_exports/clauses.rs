@@ -32,7 +32,12 @@ fn invocation(typer: &SourceTyper<'_>, mut tree: TreeId<Typed>) -> Invocation {
     }
 }
 
-fn delegate(typer: &mut SourceTyper<'_>, method: SymbolId) -> SymbolId {
+fn delegate(
+    typer: &mut SourceTyper<'_>,
+    method: SymbolId,
+    type_arity: usize,
+    clauses: &[&[&str]],
+) -> SymbolId {
     let tree = typer.type_export_forwarder_definition(method).unwrap();
     let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
         panic!("export definition")
@@ -49,12 +54,23 @@ fn delegate(typer: &mut SourceTyper<'_>, method: SymbolId) -> SymbolId {
         .iter()
         .map(|&ty| typer.store.types.get(ty).reference_symbol().unwrap())
         .collect();
+    assert_eq!(type_symbols.len(), type_arity);
     assert_eq!(type_symbols, type_args);
     let term_symbols: Vec<Vec<_>> = def
         .value_param_clauses
         .iter()
         .map(|clause| clause.iter().map(|&tree| param(tree)).collect())
         .collect();
+    let names: Vec<Vec<_>> = term_symbols
+        .iter()
+        .map(|params| {
+            params
+                .iter()
+                .map(|&symbol| qualified_name(typer, symbol).1)
+                .collect()
+        })
+        .collect();
+    assert_eq!(names, clauses);
     assert_eq!(term_symbols, body.clauses);
     assert_ne!(
         typer.store.symbols.info(method),
@@ -95,7 +111,15 @@ fn check_sites(
             .collect();
         assert_eq!(names, expected_clauses);
         if let Some(original) = leaf {
-            assert_eq!(delegate(&mut typer, selected.method), original);
+            assert_eq!(
+                delegate(
+                    &mut typer,
+                    selected.method,
+                    expected_types.len(),
+                    expected_clauses
+                ),
+                original
+            );
         } else {
             leaf = Some(selected.method);
         }
@@ -188,5 +212,68 @@ class Client {
     assert_eq!(
         typer.store.types.get(*high).reference_symbol(),
         Some(symbols[0])
+    );
+}
+
+#[test]
+fn successive_using_clauses_remain_separate_at_the_call_and_in_the_delegate() {
+    check_sites(
+        &[("directCurried", "Records"), ("viaCurried", "Curried")],
+        "curried",
+        &[|d| d.int, |d| d.boolean],
+        &[&["k"], &["t"]],
+    );
+}
+
+#[test]
+fn the_next_clause_sees_the_forwarders_own_stable_parameter() {
+    let input = "package multi
+trait Family { type Out }
+class Product
+object Records { given product(using f: Family)(using v: f.Out): Product = new Product }
+object Api { export Records.product }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(input);
+    let site = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| index.export_site_at(source, tree))
+        .unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer.complete_symbol(site.owner).unwrap();
+    let method = typer
+        .store
+        .scopes
+        .get(index.scope_of(site.owner).unwrap())
+        .entered_symbols()
+        .find(|&s| {
+            typer
+                .store
+                .symbols
+                .get(s)
+                .flags
+                .contains(SymbolFlags::EXPORTED)
+        })
+        .unwrap();
+    let tree = typer.type_export_forwarder_definition(method).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    let first = typer
+        .typed_index
+        .synthetic_definition_symbol(def.value_param_clauses[0][0])
+        .unwrap();
+    let second = typer
+        .typed_index
+        .synthetic_definition_symbol(def.value_param_clauses[1][0])
+        .unwrap();
+    let SymbolInfo::Complete(ty) = *typer.store.symbols.info(second) else {
+        panic!()
+    };
+    let Type::TypeRef { prefix, .. } = typer.store.types.get(ty) else {
+        panic!("dependent member type")
+    };
+    assert_eq!(
+        typer.store.types.get(*prefix).reference_symbol(),
+        Some(first)
     );
 }
