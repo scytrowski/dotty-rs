@@ -134,6 +134,7 @@ def main():
         check_within_clause(toolchain, output, client_output, classpath)
         check_named_using(toolchain, output, client_output, classpath)
         check_poly_named_using(toolchain, output, client_output, classpath)
+        check_omitted_witnesses(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -397,6 +398,49 @@ def check_poly_named_using(toolchain, output, client_output, classpath):
     ), classpath)
 
 
+def check_omitted_witnesses(toolchain, output, client_output, classpath):
+    positive = check_typer_output(toolchain, output, "OmittedWitness.scala", 0, (
+        "[E220]", "def shadow(using b: Box[Int], f: Fmt[Int])", "1 warning found",
+    ), toolchain.classpath)
+    getter = "this.fallback[Int](using b, this.fallback$default$2[Int], flag = true)"
+    calls = {
+        "explicit": "this.read[Int](using b, f, flag = true)",
+        "written": "this.read[Int](using b = b, f, flag = true)",
+        "single": "this.one[Int](using b, flag = true)",
+        "trailing": "this.last[Boolean](using flag = true, b)",
+        "both": "this.read[Int](using b, f, flag = true)",
+        "reverse": "this.flip[Int](using f, b, flag = true)",
+        "twoVars": "this.pair[Int, Boolean](using b, f, flag = true)",
+        "partial": "this.pair[Int, Boolean](using b = b, f, flag = true)",
+        "earlyFilter": "this.flip[Int](using f, a, flag = true)",
+        "boundOk": "this.bounded[omitted.Dog](using d, flag = true)",
+        "boundMix": "this.bounded[omitted.Dog](using d, flag = true)",
+        "imported": "omitted.Imports.imported this.one[Boolean](using b$1, flag = true)",
+        "companion": "omitted.Anchor.chosen this.anchor[Boolean](using a$1, flag = true)",
+        "exported": "omitted.Api.selected[Int](using b, f, flag = true)",
+        "legacy": "this.old[Int](using b, f, flag = true)",
+        "defaulted": getter, "shadow": getter,
+    }
+    methods = positive.split("\n    def ")
+    for site, expected in calls.items():
+        bodies = [body for body in methods if body.startswith(site + "(")]
+        if len(bodies) != 1 or expected not in " ".join(bodies[0].split()):
+            raise SystemExit(f"OmittedWitness.{site} expected {expected}\n{positive}")
+
+    rejected = check_typer_output(toolchain, client_output, "OmittedWitnessErrors.scala", 1,
+                                  ("7 errors found",), classpath)
+    errors = rejected.split("[[syntax trees", 1)[0].split("-- [E172]")[1:]
+    missing = "No given instance of type omitted."
+    ambiguous = "both parameter b and parameter a match type omitted.Box[A]"
+    for site, expected in {
+        "absent": missing + "Box[A]", "noSecond": missing + "Fmt[Int]",
+        "mismatch": missing + "Fmt[Int]", "ambSame": ambiguous, "ambDiff": ambiguous,
+        "lateFilter": ambiguous, "boundBad": missing + "Box[A]",
+    }.items():
+        if not any(f"def {site}(" in err and expected in err for err in errors):
+            raise SystemExit(f"OmittedWitnessErrors.{site} expected {expected}\n{rejected}")
+
+
 def check_typer_output(toolchain, output, source, code, required, classpath):
     result = subprocess.run(
         [toolchain.java, "-cp", toolchain.classpath, "dotty.tools.dotc.Main",
@@ -406,6 +450,7 @@ def check_typer_output(toolchain, output, source, code, required, classpath):
     )
     if result.returncode != code or any(item not in result.stdout for item in required):
         raise SystemExit(f"{source} disagrees with Scala 3.9 controls\n{result.stdout}")
+    return result.stdout
 
 
 def verify_rust_library(toolchain, candidate, client=None):

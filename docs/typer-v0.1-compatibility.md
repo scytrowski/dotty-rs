@@ -156,9 +156,20 @@ declared parameter. Given `choose[A](using value: Box[A], fmt: Fmt[A])` and a
 `b: Box[Int]`, `choose(using value = b)` infers `Int` and searches for
 `Fmt[Int]`, including in a context expecting `Any`. A default getter replays
 the inferred type arguments. The PolyNamed fixtures cover reordered operands,
-bounds, a generic given export and legacy implicit methods. Inferring a type
-parameter solely from omitted evidence and choosing overloads by argument name
-remain outside this subset.
+bounds, a generic given export and legacy implicit methods.
+
+An omitted witness can also constrain the selected method. For a source class
+or trait with one invariant parameter, an open goal such as `Box[A]` can infer
+`A` from a contextual value of type `Box[Int]`. The typer uses lexical and
+imported values before implicit scope, checks independent type parameter bounds
+before ranking candidates, and retains the selected witness. Written arguments
+constrain their formals first. Omitted witnesses are then resolved in declaration
+order: a later `Fmt[Int]` cannot break an earlier tie between `Box[Int]` and
+`Box[Boolean]`. Putting `Fmt[A]` first allows both searches to succeed.
+The OmittedWitness fixtures cover independent type parameters, exported and
+legacy callees, default getters and the first failing search. Expected-result
+inference for open goals, competing polymorphic or conditional providers, and
+overload selection by argument name remain outside this subset.
 
 Within a
 simple source opaque alias's defining owner, contextual search can use its

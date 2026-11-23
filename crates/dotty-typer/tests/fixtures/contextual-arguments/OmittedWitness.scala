@@ -37,3 +37,7 @@ class Client:
   def boundMix(using d: Box[Dog], i: Box[Int]): Any = bounded(using flag = true)
   def imported(): Any = { import Imports.given; one(using flag = true) }
   def companion(): Any = anchor(using flag = true)
+  def exported(using b: Box[Int], f: Fmt[Int]): Any = Api.selected(using flag = true)
+  def legacy(using b: Box[Int], f: Fmt[Int]): Any = old(using flag = true)
+  def defaulted(using b: Box[Int]): Any = fallback(using flag = true)
+  def shadow(using b: Box[Int], f: Fmt[Int]): Any = fallback(using flag = true)

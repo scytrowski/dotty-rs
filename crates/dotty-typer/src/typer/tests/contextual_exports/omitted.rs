@@ -200,3 +200,48 @@ class Factory:
     assert!(matches!(client_result(&mut t, &parsed, "unresolved"),
         Err(TyperError::UsingApplicationDeferred{tree_index,..}) if tree_index == rhs.index()));
 }
+
+#[test]
+fn exported_and_legacy_calls_and_default_getters_receive_the_inferred_argument() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, target) in [
+        ("exported", ("Api", "selected")),
+        ("legacy", ("Client", "old")),
+        ("defaulted", ("Client", "fallback")),
+        ("shadow", ("Client", "fallback")),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let TreeKind::Apply(a) = &t.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::TypeApply(ta) = &t.typed_ast().get(a.function).kind else {
+            panic!()
+        };
+        assert_eq!(qualified_name(&t, reference(&t, ta.function)), target);
+        assert_eq!(ta.args.len(), 1);
+        assert_eq!(t.typed_ast().get(ta.args[0]).ty, defs.int);
+        assert_eq!(qualified_name(&t, reference(&t, a.args[0])), (site, "b"));
+        if target.1 == "fallback" {
+            let TreeKind::TypeApply(getter) = &t.typed_ast().get(a.args[1]).kind else {
+                panic!()
+            };
+            assert_eq!(
+                qualified_name(&t, reference(&t, getter.function)),
+                ("Client", "fallback$default$2")
+            );
+            assert_eq!(getter.args, ta.args);
+        } else {
+            assert_eq!(qualified_name(&t, reference(&t, a.args[1])), (site, "f"));
+        }
+        let warnings = t.take_diagnostics();
+        if site == "shadow" {
+            let [warning] = &warnings[..] else { panic!() };
+            assert!(
+                matches!(warning.issue(), TyperWarning::DefaultShadowsGiven {name} if t.store.names.resolve(name.as_name().text())=="f")
+            );
+        } else {
+            assert!(warnings.is_empty());
+        }
+    }
+}
