@@ -45,6 +45,7 @@ pub struct NamedClassSources<'a> {
     declarations: SourceDeclarationIndex,
     files: Vec<&'a NamedClassSource>,
     by_source: HashMap<SourceId, &'a NamedClassSource>,
+    by_class: HashMap<SymbolId, (&'a NamedClassSource, &'a SourceClass)>,
 }
 
 impl<'a> NamedClassSources<'a> {
@@ -69,7 +70,16 @@ impl<'a> NamedClassSources<'a> {
         let declarations =
             SourceDeclarationIndex::from_classes(store, ordered.iter().flat_map(|f| f.classes()))
                 .map_err(NamedClassSourcesError::Declaration)?;
+        let by_class = ordered
+            .iter()
+            .flat_map(|&file| {
+                file.classes()
+                    .iter()
+                    .map(move |class| (class.symbol, (file, class)))
+            })
+            .collect();
         Ok(Self {
+            by_class,
             declarations,
             files: ordered,
             by_source,
@@ -87,6 +97,13 @@ impl<'a> NamedClassSources<'a> {
     ) -> impl DoubleEndedIterator<Item = (&'a NamedClassSource, &'a SourceClass)> + '_ {
         self.files()
             .flat_map(|file| file.classes().iter().map(move |class| (file, class)))
+    }
+
+    /// Finds the declaring file and canonical class view for a class symbol in
+    /// this collection. Members, constructors and classes from omitted files
+    /// have no entry. The symbol must belong to the same naming session.
+    pub fn class(&self, symbol: SymbolId) -> Option<(&'a NamedClassSource, &'a SourceClass)> {
+        self.by_class.get(&symbol).copied()
     }
 
     /// Returns the validated declaration index, including constructors and their fields.
@@ -257,6 +274,35 @@ mod tests {
         }
         assert!(sources.declaration(omitted.classes()[0].symbol).is_none());
     }
+    #[test]
+    fn class_lookup_returns_exact_borrowed_views_only_for_included_classes() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let ab = named(
+            42,
+            "class A; class B { def value() = 1 }",
+            &mut store,
+            &mut packages,
+        );
+        let c = named(7, "class C", &mut store, &mut packages);
+        let other = named(13, "class Other", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&c, &ab], &store).unwrap();
+        for f in [&ab, &c] {
+            for class in f.classes() {
+                let (file, view) = sources.class(class.symbol).unwrap();
+                assert!(std::ptr::eq(file, f));
+                assert!(std::ptr::eq(view, class));
+                assert!(sources.class(class.constructor).is_none());
+            }
+        }
+        assert!(
+            sources
+                .class(ab.classes()[1].methods().next().unwrap().symbol)
+                .is_none()
+        );
+        assert!(sources.class(other.classes()[0].symbol).is_none());
+    }
+
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,
         store: &mut SemanticStore,
