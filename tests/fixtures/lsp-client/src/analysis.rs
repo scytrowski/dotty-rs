@@ -9,11 +9,11 @@ use dotty::core::{
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{ClassMember, DeclarationError};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
+use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic};
 use dotty::{
-    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassSource, NamedClassSources,
-    NamedClassSourcesError, SignatureBlockage, SignatureCycle, SignatureDependencies,
-    SignaturePhase, SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic,
+    ClassBodyError, MemberSignatureError, NameSourceError, NamedClassSource, NamedClassSources,
+    NamedClassSourcesError, ReportedTyperError, SignatureBlockage, SignatureCycle,
+    SignatureDependencies, SignaturePhase, SourceDeclarationIndex, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -25,7 +25,9 @@ pub struct Document {
 pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
-    Call(CallDiagnostic),
+    Typing(ReportedTyperError),
+    MemberSignature(MemberSignatureError),
+    Body(ClassBodyError),
     Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
     Naming(NamerDiagnostic),
@@ -43,33 +45,17 @@ pub enum Problem {
         name: String,
         location: Option<SourceSpan>,
     },
-    Reported(SourceDiagnostic),
     TyperWarning {
         source: SourceId,
         diagnostic: TyperDiagnostic,
     },
 }
 
-impl From<SourceDiagnostic> for Problem {
-    fn from(diagnostic: SourceDiagnostic) -> Self {
-        Self::Reported(diagnostic)
-    }
-}
-
-fn typing_problem(owner_file: SourceId, diagnostic: SourceDiagnostic) -> (SourceId, Problem) {
-    let file = diagnostic.location.map_or(owner_file, |span| span.source());
-    (file, diagnostic.into())
-}
-
-fn call_problem<E>(
-    owner_file: SourceId,
-    result: Result<CallDiagnostic, E>,
-    fallback: impl FnOnce(E) -> SourceDiagnostic,
-) -> (SourceId, Problem) {
-    match result {
-        Ok(call) => (call.source(), Problem::Call(call)),
-        Err(error) => typing_problem(owner_file, fallback(error)),
-    }
+fn typing_problem(owner: SourceId, report: ReportedTyperError) -> (SourceId, Problem) {
+    (
+        report.location().map_or(owner, |span| span.source()),
+        Problem::Typing(report),
+    )
 }
 
 pub struct Link {
@@ -244,13 +230,6 @@ fn analyze_sources(
     let mut classes = Vec::new();
     let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
     let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
-    let typer_problem = |file, error: TyperError| {
-        call_problem(
-            file,
-            CallDiagnostic::from_typer(error, None, ast_for),
-            |error| SourceDiagnostic::from_typer(&error, ast_for),
-        )
-    };
     for u in sources.files() {
         let source = u.source();
         let mut typer = SourceTyper::new(u.ast(), u.source(), u.index(), store, defs, packages);
@@ -260,7 +239,10 @@ fn analyze_sources(
                 Err(e) => {
                     headers.record_failure(c.symbol);
                     unavailable.insert(c.symbol);
-                    let (file, problem) = typer_problem(source, e);
+                    let (file, problem) = typing_problem(
+                        source,
+                        ReportedTyperError::from_class(e, c.symbol, Some(c.constructor), ast_for),
+                    );
                     results.get_mut(&file).unwrap().problems.push(problem);
                 }
             }
@@ -282,7 +264,10 @@ fn analyze_sources(
         |symbol, error| {
             let source = sources.declarations().get(symbol).unwrap().source;
             unavailable.insert(symbol);
-            let (file, problem) = typer_problem(source, error);
+            let (file, problem) = typing_problem(
+                source,
+                ReportedTyperError::from_class(error, symbol, None, ast_for),
+            );
             results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
@@ -311,14 +296,15 @@ fn analyze_sources(
         |s| sources.try_complete_member_signature(s, store, defs, packages),
         |s, error| {
             let source = sources.declarations().get(s).unwrap().source;
-            let (file, problem) = call_problem(source, error.into_call_diagnostic(ast_for), |e| {
-                e.diagnostic(ast_for)
-            });
-            if let Problem::Call(call) = &problem
-                && let Some(key) = call.identity(&defs)
-            {
-                signature_calls.insert(key);
-            }
+            let (file, problem) = match error.into_reported_error(ast_for) {
+                Ok(report) => {
+                    if let Some(key) = report.call_identity(&defs) {
+                        signature_calls.insert(key);
+                    }
+                    typing_problem(source, report)
+                }
+                Err(invalid) => (source, Problem::MemberSignature(invalid)),
+            };
             results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
@@ -354,16 +340,18 @@ fn analyze_sources(
             {
                 continue;
             }
-            let (file, problem) = call_problem(source, error.into_call_diagnostic(ast_for), |e| {
-                e.diagnostic(ast_for)
-            });
-            if let Problem::Call(call) = &problem
-                && call
-                    .identity(&defs)
-                    .is_some_and(|key| signature_calls.contains(&key))
-            {
-                continue;
-            }
+            let (file, problem) = match error.into_reported_error(ast_for) {
+                Ok(report) => {
+                    if report
+                        .call_identity(&defs)
+                        .is_some_and(|key| signature_calls.contains(&key))
+                    {
+                        continue;
+                    }
+                    typing_problem(source, report)
+                }
+                Err(invalid) => (source, Problem::Body(invalid)),
+            };
             results.get_mut(&file).unwrap().problems.push(problem);
         }
         bodies.insert(c.symbol, body);
@@ -407,6 +395,7 @@ fn analyze_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty::typer::TyperError;
 
     #[test]
     fn naming_and_projection_rejections_remain_typed_until_publication() {
@@ -474,8 +463,10 @@ mod tests {
         };
         let cycle = check("class Provider(c: Consumer) { val seed = c.answer }");
         assert!(cycle["Leaf.scala"].problems.is_empty());
-        let [Problem::Cycle { cycle: a, .. }, Problem::Call(independent)] =
-            cycle["Consumer.scala"].problems.as_slice()
+        let [
+            Problem::Cycle { cycle: a, .. },
+            Problem::Typing(independent),
+        ] = cycle["Consumer.scala"].problems.as_slice()
         else {
             panic!("expected one participant and one independent call")
         };
@@ -484,15 +475,15 @@ mod tests {
         };
         assert!(Arc::ptr_eq(a, b));
         assert_eq!(a.code(), "signature.member_cycle");
-        assert_eq!(independent.code(), "typer.application_arity_mismatch");
+        assert_eq!(independent.code(), Some("typer.application_arity_mismatch"));
 
         let failed = check("class Provider { def value(): Int = 1; val seed = value(1) }");
         assert!(failed["Leaf.scala"].problems.is_empty());
         for file in ["Consumer.scala", "Provider.scala"] {
-            let [Problem::Call(call)] = failed[file].problems.as_slice() else {
+            let [Problem::Typing(call)] = failed[file].problems.as_slice() else {
                 panic!("expected only the original call in {file}")
             };
-            assert_eq!(call.code(), "typer.application_arity_mismatch");
+            assert_eq!(call.code(), Some("typer.application_arity_mismatch"));
         }
     }
 
@@ -554,11 +545,11 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
-        let [Problem::Reported(problem)] = files[uri].problems.as_slice() else {
+        let [Problem::Typing(problem)] = files[uri].problems.as_slice() else {
             panic!("expected one constructor diagnostic");
         };
         let range = problem
-            .location
+            .location()
             .expect("position of the unknown type")
             .span()
             .range();
@@ -566,7 +557,12 @@ mod tests {
             &text[range.start() as usize..range.end() as usize],
             "Missing"
         );
-        assert_eq!(problem.severity, dotty::core::DiagnosticSeverity::Error);
+        assert!(matches!(
+            problem.error(),
+            TyperError::TypeNameNotFound { .. }
+        ));
+        assert!(problem.class().is_some() && problem.member().is_some());
+        assert_eq!(problem.code(), Some("typer.type_name_not_found"));
     }
 
     #[test]
@@ -581,7 +577,7 @@ mod tests {
         let problems = &files[uri].problems;
         assert_eq!(problems.len(), 2);
         for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
-            let Problem::Call(problem) = problem else {
+            let Problem::Typing(problem) = problem else {
                 panic!("expected an error")
             };
             let range = problem.location().unwrap().span().range();
@@ -616,7 +612,7 @@ mod tests {
         let files = analyze(&docs);
         let caller = &files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
-        let Problem::Call(d) = &caller.problems[0] else {
+        let Problem::Typing(d) = &caller.problems[0] else {
             panic!("expected a type error")
         };
         let range = d.location().expect("argument position").span().range();

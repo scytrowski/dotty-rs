@@ -144,8 +144,9 @@ impl Workspace {
                 }
                 for problem in &file.problems {
                     let report = match problem {
-                        Problem::Reported(report) => report,
-                        Problem::Call(call) => &call.render(),
+                        Problem::Typing(error) => &error.render(),
+                        Problem::MemberSignature(error) => &unlocated_error(error),
+                        Problem::Body(error) => &unlocated_error(error),
                         Problem::Naming(d) => &SourceDiagnostic::from_namer(d),
                         Problem::Sources(error) => &unlocated_error(error),
                         Problem::Scan(error) => &unlocated_error(error),
@@ -396,12 +397,15 @@ mod tests {
         let open = json!({"textDocument":{"uri":uri,"version":1,"text":"class A {}"}});
         assert!(ws.changed("textDocument/didOpen", &open, enc));
         let file = FileResult {
-            problems: vec![Problem::Reported(SourceDiagnostic {
-                code: None,
-                location: None,
-                message: "Expected Int, found Boolean".into(),
-                severity: DiagnosticSeverity::Error,
-            })],
+            problems: vec![Problem::Typing(dotty::ReportedTyperError::from_typer(
+                dotty::typer::TyperError::ApplicationArityMismatch {
+                    source: dotty::core::SourceId::from_index(0),
+                    tree_index: 0,
+                    expected: 0,
+                    actual: 1,
+                },
+                |_| None,
+            ))],
             ..FileResult::default()
         };
         assert!(ws.accept((ws.revision, [(uri.into(), file)].into())));
@@ -420,7 +424,7 @@ mod tests {
         assert_eq!(
             notifications.remove("window/logMessage"),
             Some(json!({
-                "type": 1, "message":"file:///A.scala: Expected Int, found Boolean"
+                "type": 1, "message":"file:///A.scala: Expected 0 arguments, got 1"
             }))
         );
         assert_eq!(
