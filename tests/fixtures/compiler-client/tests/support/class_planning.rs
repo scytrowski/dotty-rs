@@ -22,15 +22,19 @@ pub(super) fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedU
     (store, defs, packages, units.pop().unwrap())
 }
 
-fn body_units(b_source: &str) -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
-    let files = [
+fn body_files(b_source: &str) -> [(SourceId, &str, &str); 2] {
+    [
         (
             SourceId::from_index(0),
             "A.scala",
             "package demo\nclass A { private val seed: Int = 40; def value(): Int = { val n = seed; n } }",
         ),
         (SourceId::from_index(1), "B.scala", b_source),
-    ];
+    ]
+}
+
+fn body_units(b_source: &str) -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
+    let files = body_files(b_source);
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
@@ -305,75 +309,82 @@ fn field_and_local_value_errors_locate_the_initializer() {
 #[test]
 fn method_error_keeps_a_executable_and_b_unpublished() {
     let text = "package demo\nclass B { private val seed: Int = 7; def value(): Int = true }";
-    let (mut store, defs, packages, units) = body_units(text);
-    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (mut output, mut bodies) = type_bodies(
-        &dotty::NamedClassSources::new(&units[..1], &store).unwrap(),
-        &mut store,
-        defs,
-        &packages,
-        headers,
-    );
-    let unit = &units[1];
-    let b = &unit.classes()[0];
-    let method = b.methods().next().unwrap();
-    let sources = NamedClassSources::new(&units, &store).unwrap();
-    let error = sources
-        .type_class_body(
-            b.symbol,
-            &mut store,
-            defs,
-            &packages,
-            &mut output.arena,
-            dotty::core::NoResolver,
-        )
-        .map(|body| bodies.record(body).unwrap())
-        .unwrap_err();
-    let dotty::ClassBodyError::Member {
-        class,
-        member,
-        error,
-    } = error
-    else {
-        panic!("unexpected error for B.value: {error:?}")
-    };
-    assert_eq!(class, b.symbol);
-    assert_eq!(
-        member,
-        dotty::source_declarations::ClassMember::Method(method)
-    );
-    assert!(
-        matches!(error, dotty::typer::TyperError::ExpectedExpressionTypeMismatch { actual, expected, .. } if actual == defs.boolean && expected == defs.int),
-        "{error:?}"
-    );
-    assert_error_text(
-        &NamedClassSources::new(&units, &store).unwrap(),
-        &error,
-        unit,
-        text,
-        "true",
-    );
-    assert_eq!(dotty::typer_error_span(&error, units[0].ast()), None);
-    assert_eq!(
-        bodies.get(b.symbol).unwrap_err(),
-        ClassPlanError::MissingClassBody(b.symbol)
-    );
-
-    let classes = class_plans(&units[..1], &bodies, &output, &store).unwrap();
-    let plan = dotty::jvm::JvmCompilationUnit {
-        store: &store,
-        typed_ast: &output.arena,
-        classes,
-    };
-    let artifact = plan
-        .prepare_emission(&defs)
-        .unwrap()
-        .emit_class(units[0].classes()[0].symbol)
-        .unwrap();
-    assert_eq!(
-        super::run_java_client("surviving-body", "SurvivingClassClient", &[artifact]).trim(),
-        "40"
-    );
+    let [a_file, b_file] = body_files(text);
+    for files in [[a_file, b_file], [b_file, a_file]] {
+        let (report, owner, member, boolean, int) = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let sources = NamedClassSources::new(&units, &store).unwrap();
+            let a = sources.file(a_file.0).unwrap();
+            let b = &sources.file(b_file.0).unwrap().classes()[0];
+            let method = b.methods().next().unwrap();
+            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let (mut output, mut bodies) = type_bodies(
+                &NamedClassSources::new([a], &store).unwrap(),
+                &mut store,
+                defs,
+                &packages,
+                headers,
+            );
+            let failure = sources
+                .type_class_body(
+                    b.symbol,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut output.arena,
+                    dotty::core::NoResolver,
+                )
+                .map(|body| bodies.record(body).unwrap())
+                .unwrap_err();
+            let report = failure
+                .into_reported_error(|id| sources.file(id).map(NamedUnit::ast))
+                .unwrap();
+            assert_eq!(dotty::typer_error_span(report.error(), a.ast()), None);
+            assert_eq!(
+                bodies.get(b.symbol).unwrap_err(),
+                ClassPlanError::MissingClassBody(b.symbol)
+            );
+            let plan = dotty::jvm::JvmCompilationUnit {
+                store: &store,
+                typed_ast: &output.arena,
+                classes: class_plans(std::slice::from_ref(a), &bodies, &output, &store).unwrap(),
+            };
+            let artifact = plan
+                .prepare_emission(&defs)
+                .unwrap()
+                .emit_class(a.classes()[0].symbol)
+                .unwrap();
+            assert_eq!(
+                super::run_java_client("surviving-body", "SurvivingClassClient", &[artifact])
+                    .trim(),
+                "40"
+            );
+            (report, b.symbol, method.symbol, defs.boolean, defs.int)
+        };
+        assert_eq!(
+            (report.class(), report.member()),
+            (Some(owner), Some(member))
+        );
+        assert!(
+            matches!(report.error(),dotty::typer::TyperError::ExpectedExpressionTypeMismatch{actual,expected,..} if *actual == boolean && *expected == int)
+        );
+        assert_eq!(
+            report.code(),
+            Some("typer.expected_expression_type_mismatch")
+        );
+        let span = report.location().unwrap();
+        assert_eq!(span.source(), b_file.0);
+        let range = span.span().range();
+        assert_eq!(&text[range.start() as usize..range.end() as usize], "true");
+    }
 }
 
 #[test]
@@ -2632,7 +2643,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
         [(answer, dotty::SignatureBlockage::Failed(seed))]
     );
     let report = failure
-        .into_call_diagnostic(|id| sources.file(id).map(|u| u.ast()))
+        .into_reported_error(|id| sources.file(id).map(|u| u.ast()))
         .unwrap();
     assert!(matches!(
         report.error(),
@@ -2642,7 +2653,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
             ..
         }
     ));
-    assert_eq!(report.code(), "typer.application_arity_mismatch");
+    assert_eq!(report.code(), Some("typer.application_arity_mismatch"));
     assert_eq!(report.member(), Some(seed));
     let span = report.location().unwrap();
     assert_eq!(span.source(), units[1].source());
