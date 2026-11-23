@@ -406,6 +406,14 @@ identity-only loading and full class loading use the module-class identity
 only when the same TASTy proves the top-level object. A `$` in the binary
 name is not sufficient evidence.
 
+A direct JVM lookup of a Scala module class uses the canonical TASTy object
+and module class when both resources come from the same classpath origin.
+The classfile must have the Scala marker, its own static `MODULE$` field of
+the exact class type, and the matching object and module declarations in
+TASTy. Identity lookup and full completion then reuse the same symbol as
+object lookup, in either order. A standalone JVM class retains its
+classfile hierarchy and members.
+
 ### 4.5 Shared-store symbol resolver
 
 `ClasspathSymbolResolver<E>` is the classloader implementation of

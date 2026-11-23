@@ -4345,6 +4345,101 @@ fn unresolved_semantic_reference_name_at_depth(
     }
 }
 
+/// Reads the nested binary identity from an explicit THIS/ObjectClass parent owner.
+fn module_owned_parent(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<BinaryName> {
+    if depth >= 128 {
+        return None;
+    }
+    let tree = unshare_parent_tree(file, tree.clone())?;
+    let (member, qualifier) = match tree.decode_structured().ok()? {
+        StructuredTree::Length(StructuredNode::Apply(apply)) => {
+            return module_owned_parent(file, &apply.function, depth + 1);
+        }
+        StructuredTree::Length(StructuredNode::TypeApply(apply)) => {
+            return module_owned_parent(file, &apply.function, depth + 1);
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection))
+            if render_member_name(file, selection.name)?.as_str() == "<init>"
+                && matches!(selection.qualifier.decode_structured(), Ok(StructuredTree::AstChild(child)) if child.tag == NEW_TAG) =>
+        {
+            return module_owned_parent(file, &selection.underlying_type, depth + 1);
+        }
+        StructuredTree::Ident(ident) if ident.tag == IDENTTPT_TAG => {
+            return module_owned_parent(file, &ident.type_tree, depth + 1);
+        }
+        StructuredTree::Select(select) if select.tag == dotty_tasty::tasty::SELECTTPT_TAG => {
+            (select.name, select.qualifier)
+        }
+        StructuredTree::Reference(reference) if reference.tag == TYPEREF_TAG => {
+            (reference.reference, reference.qualifier)
+        }
+        _ => return None,
+    };
+    let RawName::Utf8(member) = file.name(member)? else {
+        return None;
+    };
+    let qualifier = unshare_parent_tree(file, qualifier)?;
+    let StructuredTree::AstChild(this) = qualifier.decode_structured().ok()? else {
+        return None;
+    };
+    if this.tag != dotty_tasty::tasty::THIS_TAG {
+        return None;
+    }
+    let owner = unshare_parent_tree(file, this.child)?;
+    let StructuredTree::Reference(owner) = owner.decode_structured().ok()? else {
+        return None;
+    };
+    if owner.tag != TYPEREF_TAG {
+        return None;
+    }
+    let RawName::ObjectClass { underlying } = file.name(owner.reference)? else {
+        return None;
+    };
+    let RawName::Utf8(owner_name) = file.name(*underlying)? else {
+        return None;
+    };
+    if [member, owner_name]
+        .iter()
+        .any(|n| n.is_empty() || !n.chars().all(is_binary_name_character))
+    {
+        return None;
+    }
+    let RawTree::Leaf(package) = unshare_parent_tree(file, owner.qualifier)? else {
+        return None;
+    };
+    if package.tag != TERMREFPKG_TAG {
+        return None;
+    }
+    let package = file
+        .render_name(package.name_ref()?)
+        .ok()?
+        .replace('.', "/");
+    let owner = BinaryName::from_internal(format!("{package}/{owner_name}"));
+    if !owner.is_path_safe() {
+        return None;
+    }
+    Some(BinaryName::from_internal(format!(
+        "{}${member}",
+        owner.as_internal()
+    )))
+}
+
+fn unshare_parent_tree<'a>(file: &TastyFile<'a>, mut tree: RawTree<'a>) -> Option<RawTree<'a>> {
+    for _ in 0..128 {
+        match tree {
+            RawTree::Leaf(ref leaf) if matches!(leaf.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
+                tree = decode_shared_tree(file, leaf.ast_ref()?.address)?;
+            }
+            _ => return Some(tree),
+        }
+    }
+    None
+}
+
 fn resolve_parent_name_with_alias(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
@@ -4353,6 +4448,9 @@ fn resolve_parent_name_with_alias(
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
+    if let Some(name) = module_owned_parent(file, parent, 0) {
+        return Some(name);
+    }
     if allow_tuple2_constructor_parent
         && let Some(name) = resolve_tuple2_times_colon_constructor_parent(file, parent, package)
     {
@@ -5869,15 +5967,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 5);
+        assert_eq!(current_unresolved_roots.len(), 4);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            36
+            37
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 7);
-        assert_eq!(recovered_roots.len(), 36);
-        assert_eq!(recovered_weight, 372);
+        assert_eq!(current_weight, 6);
+        assert_eq!(recovered_roots.len(), 37);
+        assert_eq!(recovered_weight, 373);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -6279,18 +6377,17 @@ mod tests {
         assert_eq!(decoded.super_class.as_internal(), "review/Café");
 
         let recheck = fixture_bytes("scala3-compiler/dotty/tools/dotc/transform/Recheck.tasty");
-        let error = decode_with_resolvers(
+        let decoded = decode_with_resolvers(
             &recheck,
             &BinaryName::from_internal("dotty/tools/dotc/transform/Recheck"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("the nested Phase owner must not be flattened into a package path");
-        assert!(matches!(
-            error,
-            TastyDecodeError::UnresolvedSupertype(parent)
-                if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("Phase")
-        ));
+        .unwrap();
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "dotty/tools/dotc/core/Phases$Phase"
+        );
 
         let tuple2 = fixture_bytes("scala3-library/scala/Tuple2.tasty");
         let decoded = decode_with_resolvers(
