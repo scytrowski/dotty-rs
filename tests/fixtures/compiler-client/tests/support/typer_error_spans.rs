@@ -75,7 +75,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             }
             for failure in errors {
                 let call = failure
-                    .into_call_diagnostic(|source| sources.file(source).map(|unit| unit.ast()))
+                    .into_reported_error(|source| sources.file(source).map(|unit| unit.ast()))
                     .unwrap();
                 let member = call.member().unwrap();
                 let declaration = sources.declarations().member(member).unwrap();

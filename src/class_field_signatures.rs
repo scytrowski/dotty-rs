@@ -42,6 +42,29 @@ pub enum ClassFieldSignatureError {
 }
 
 impl ClassFieldSignatureError {
+    /// Captures the original typer error, its declaring class and member, and a
+    /// validated source span. For an invalid declaration, returns the original
+    /// phase failure without consulting the AST. Use files from the naming session.
+    pub fn into_reported_error<'a>(
+        self,
+        ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::ReportedTyperError, Self> {
+        let Self::Field {
+            class,
+            field,
+            error,
+        } = self
+        else {
+            return Err(self);
+        };
+        Ok(crate::ReportedTyperError::from_class(
+            error,
+            class,
+            Some(field),
+            ast_for,
+        ))
+    }
+
     /// Reports a field failure using [`TypingDiagnostic::from_typer`] and the original
     /// untyped arena for its source. An invalid class has no source location.
     pub fn diagnostic<'a>(

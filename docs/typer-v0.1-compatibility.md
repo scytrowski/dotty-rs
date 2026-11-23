@@ -2384,7 +2384,9 @@ the message. `MemberSignatureError::diagnostic` uses the same
 `TypingDiagnostic` when the failure occurs during signature inference.
 For a parameterless method, `provider.value(1)` reports
 `Expected 0 arguments, got 1` at the whole call in either phase.
-Other typer errors retain their display text.
+Missing type names, missing term names and expected-expression type mismatches
+also have stable codes and default messages. Clients can select their own
+wording by matching the original `TyperError`.
 
 `ClassFieldSignatureError::diagnostic` produces the same report for a field
 completed through the class-wide field pass. For constructor and class header
@@ -2392,6 +2394,15 @@ errors, pass the original `TyperError` directly to `TypingDiagnostic::from_typer
 For example, if `Base` expects an `Int`, checking
 `class Derived(start: Boolean) extends Base(start)` locates the argument
 `start` in the parent call in Derived.scala.
+
+Clients that publish after analysis can instead convert the three phase errors
+with `into_reported_error`. The result retains the original typer error, the
+enclosing symbols and its optional validated byte span. Structural errors are
+returned in their original wrapper. For a raw header or constructor failure,
+`ReportedTyperError::from_class` takes the class and optional member.
+`call_identity` is available for supported call retries within one analysis.
+Use the original document version for the byte range and discard retry keys
+when analyzing an edit.
 
 For a direct method call such as `a.take(42)`, pass the original call tree to
 `TypedClassBody::selected_method` with its source arena, the typed arena and

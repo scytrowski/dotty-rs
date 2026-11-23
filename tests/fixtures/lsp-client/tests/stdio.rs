@@ -337,6 +337,32 @@ fn parent_argument_diagnostic_tracks_an_unsaved_type_edit_in_either_file_order()
 }
 
 #[test]
+fn repairing_an_unknown_type_clears_the_marker_and_preserves_overload_navigation() {
+    let uri = "file:///fixture/Broken.scala";
+    let broken = "class Broken(/* 😀 */ start: Missing)";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A, B]);
+        client.open(A, &format!("class A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"));
+        let caller = "  def good(a: A): Int = a.take(false)";
+        client.open(B, &format!("class B {{\n{caller}\n}}"));
+        client.open(uri, broken);
+        let prefix = broken.split_once("Missing").unwrap().0;
+        let start = if encoding == "utf-8" {
+            prefix.len()
+        } else {
+            prefix.encode_utf16().count()
+        };
+        let location = range(0, start, start + "Missing".len());
+        client.diagnostics(uri,1,json!([{"range":location,"severity":1,"source":"dotty","code":"typer.type_name_not_found","message":"Unknown type name"}]));
+        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
+        client.edit(uri, 2, location, "Int");
+        client.diagnostics(uri, 2, json!([]));
+        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
+        client.shutdown();
+    }
+}
+
+#[test]
 fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
     // This document sorts between A and B. While it is rejected, B is the
     // third open document but only the second file in the semantic batch.

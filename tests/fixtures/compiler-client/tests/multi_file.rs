@@ -1297,9 +1297,9 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
                 let SignatureError::Member(error) = result.unwrap_err() else {
                     panic!("expected a member failure")
                 };
-                let report = error.into_call_diagnostic(lookup).unwrap();
+                let report = error.into_reported_error(lookup).unwrap();
                 assert_eq!(report.member(), Some(member));
-                assert_eq!(report.source(), caller.0);
+                assert_eq!(report.source(), Some(caller.0));
                 assert!(matches!(store.symbols.info(member), SymbolInfo::Missing));
                 reports.push(report);
             }
@@ -1340,13 +1340,13 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             ("a.value(1)", "typer.application_arity_mismatch"),
             ("false", "typer.application_argument_type_mismatch"),
         ]) {
-            let retry = retry.into_call_diagnostic(lookup).unwrap();
+            let retry = retry.into_reported_error(lookup).unwrap();
             assert_eq!(
-                retry.identity(&defs),
-                Some(original.identity(&defs).unwrap())
+                retry.call_identity(&defs),
+                Some(original.call_identity(&defs).unwrap())
             );
             assert_eq!(retry.render(), original.render());
-            assert_eq!(original.code(), code);
+            assert_eq!(original.code(), Some(code));
             let offset = caller.2.find(site).unwrap() as u32;
             let span = original.location().unwrap();
             assert_eq!(span.source(), caller.0);

@@ -60,6 +60,9 @@ pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, 
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
 
+mod reported_typer_error;
+pub use reported_typer_error::ReportedTyperError;
+
 mod call_diagnostic;
 pub use call_diagnostic::{CallDiagnostic, CallErrorIdentity};
 

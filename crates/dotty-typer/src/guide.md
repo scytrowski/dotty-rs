@@ -58,6 +58,10 @@ to inspect the zero-based argument index. Both expose stable categories through
 actual type descriptions at the point of failure. Use those for presentation
 after rollback, since the failed attempt's type slots may have been reused.
 
+[`TyperError::diagnostic_code`] also classifies missing type and term names
+and an expression that does not conform to its expected type. Other variants
+can return `None`. Match the error directly to inspect its payload.
+
 Read committed warnings with [`SourceTyper::diagnostics`] or drain them with
 [`SourceTyper::take_diagnostics`]. Match the [`TyperWarning`] payload to
 classify a warning. Its range is measured in UTF-8 bytes in the typer’s source

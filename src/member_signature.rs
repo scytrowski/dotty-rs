@@ -27,6 +27,29 @@ pub enum MemberSignatureError {
 }
 
 impl MemberSignatureError {
+    /// Captures the original typer error, its declaring class and member, and a
+    /// validated source span. For an invalid declaration, returns the original
+    /// phase failure without consulting the AST. Use files from the naming session.
+    pub fn into_reported_error<'a>(
+        self,
+        ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::ReportedTyperError, Self> {
+        let Self::Typing {
+            member,
+            declaration,
+            error,
+        } = self
+        else {
+            return Err(self);
+        };
+        Ok(crate::ReportedTyperError::from_class(
+            error,
+            declaration.class,
+            Some(member),
+            ast_for,
+        ))
+    }
+
     /// Retains an owned call failure with its canonical declaring member. Supply the
     /// original untyped arena for the requested source, or `None` if unavailable.
     /// Returns the original phase error intact for every other failure.

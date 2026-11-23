@@ -4,6 +4,20 @@ use super::{
 };
 
 impl TyperError {
+    /// Stable category for supported source diagnostics. Covers unresolved type
+    /// and term names, expected expression types, and ordinary call failures.
+    /// Other variants retain their typed payload without a diagnostic code.
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        match self {
+            Self::TypeNameNotFound { .. } => Some("typer.type_name_not_found"),
+            Self::TermNameNotFound { .. } => Some("typer.term_name_not_found"),
+            Self::ExpectedExpressionTypeMismatch { .. } => {
+                Some("typer.expected_expression_type_mismatch")
+            }
+            other => other.call_error_code(),
+        }
+    }
+
     /// Stable diagnostic code for ordinary call arity and argument-type failures.
     /// Other failures, including explicit type-argument errors, return `None`.
     pub fn call_error_code(&self) -> Option<&'static str> {
