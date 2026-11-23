@@ -15,6 +15,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource::into_classes`], [`NamedSource::project_classes`] |
 | Track constructor failures, header attempts and ready classes across files | [`ClassHeaderPhase`], [`ClassHeaderReport`] |
 | Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
+| Select ready classes and track member signatures, retries and failures | [`NamedClassSources::member_signatures`], [`MemberSignaturePhase`], [`MemberSignatureReport`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
@@ -267,7 +268,7 @@ Clients choose the order of attempts and which failures to report. Use
 IDs, including supplied symbols, must come from the store used to name the
 files. Preserve the same typed arena and header bindings for later planning.
 
-## Select classes for member typing after header completion
+## Check members of ready classes after header completion
 
 [`ClassHeaderPhase::prepare`] checks the constructors of the selected sources.
 An editor can then attempt all headers and queue the waiters released by each
@@ -278,7 +279,8 @@ first rejected constructor, follow a blocked provider immediately and use
 ```rust
 use std::collections::VecDeque;
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
-use dotty::typer::{SignatureCompletion, TyperError};
+use dotty::typer::TyperError;
+use dotty::{MemberSignatureFailure, MemberSignaturePhase};
 use dotty::{ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, NamedClassSources, parse_source};
 
 let mut store = SemanticStore::new();
@@ -286,7 +288,7 @@ let defs = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
 let mut files = Vec::new();
 for (i, name, text) in [
-    (8, "Children.scala", "class Good(x: Int) extends Base(x) { def value() = 7 }; class Bad(y: Missing)"),
+    (8, "Children.scala", "class Good(x: Int) extends Base(x) { def value() = 7; val broken = value(1) }; class Bad(y: Missing)"),
     (2, "Base.scala", "class Base(seed: Int)"),
 ] {
     let parsed = parse_source(SourceId::from_index(i), text, Default::default())?
@@ -315,17 +317,38 @@ assert_eq!(failure.source, Some(files[0].source()));
 assert!(matches!(&failure.error, ClassHeaderError::Typing(e)
     if matches!(e.error(), TyperError::TypeNameNotFound { .. })));
 
-for symbol in report.ready {
-    let (_, class) = sources.class(symbol).unwrap();
-    for method in class.methods() {
-        // This example has no dependencies between method signatures.
-        assert!(matches!(sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages)?,
-            SignatureCompletion::Complete(_)));
+let selection = sources.member_signatures(report.ready, &store)?;
+let mut signatures = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+work.extend(selection.members().iter().copied());
+while let Some(member) = work.pop_front() {
+    if let Ok(attempt) = signatures.attempt(member) {
+        work.extend(attempt.retry);
     }
 }
+let signatures = signatures.finish();
+let value = good.methods().next().unwrap();
+assert!(signatures.ready.contains(&value.symbol));
+let [MemberSignatureFailure::Typing { declaration, report }] = signatures.failures.as_slice()
+    else { panic!("expected one rejected field signature") };
+assert_eq!(declaration.class, good.symbol);
+assert!(matches!(report.error(), TyperError::ApplicationArityMismatch { expected: 0, actual: 1, .. }));
+assert_eq!(report.location().unwrap().source(), files[0].source());
+
+let (body, body_report) = sources.check_class_body(good.symbol, &mut store, defs, &packages,
+    &mut arena, dotty::core::NoResolver).into_parts();
+assert_eq!(body_report.errors.len(), 1);
+assert!(body.bindings().unwrap().get(files[0].source(), value.tree).is_some());
 assert!(bindings.get(files[0].source(), good.parents[0]).is_some());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+The selection includes constructor fields and all declared body fields and methods.
+[`MemberSignatureSelection::field_roots`] gives a compiler its ordered field pass
+before its caller-chosen method roots. Cross-file retries target missing eligible
+providers within the selection. An unavailable field outside it retains the
+original typer error. An editor can keep independent members of a class available
+when another signature fails. Inspect `blockages` for the provider of a failed
+chain or its cycle and `remaining` for work that still needs an attempt.
 
 Keep the same typed arena and bindings for subsequent body typing and JVM
 planning. A header can recursively complete another class in its file. The phase

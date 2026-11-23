@@ -22,8 +22,8 @@ the call. A second scenario checks an inferred field in Consumer.scala against
 a method in Provider.scala in both file orders. Signature and body checking
 report one error at `provider.value(1)`. Editing it to `provider.value()`
 clears the diagnostic. The fixture uses
-`ReportedTyperError` for both call and ordinary typing failures. Signature and
-body errors supply the enclosing class and member through `into_reported_error`.
+`ReportedTyperError` for both call and ordinary typing failures. The member signature report supplies the enclosing class, member and captured
+byte range. Body errors provide the same context through `into_reported_error`.
 Within one analysis the fixture suppresses a body retry when the signature
 already produced the same `CallErrorIdentity`. It renders the message at
 publication. Two inferred fields with matching bad calls retain independent
@@ -41,7 +41,10 @@ Its own call becomes navigable once the base class is repaired.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 
-The fixture records header and member dependencies separately. Completion wakes
+The fixture uses `MemberSignaturePhase` for members selected from ready classes.
+A protocol test breaks the initializer of `seed`, checks the original diagnostic
+and an independent sibling error, then repairs the initializer and verifies the
+cross-file definition link in both UTF-8 and UTF-16. Completion wakes
 direct waiters, and diagnostics for a cycle point to each participating
 declaration. A stdio regression repairs a cross-file inheritance cycle and
 keeps an independent call error in the same document through the edit.
