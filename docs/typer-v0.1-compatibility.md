@@ -58,8 +58,9 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 
 ### Contextual exports from source objects
 
-A source object can export a public contextual member declared by a
-package-owned object in the same source unit. Completing the exporting object's
+A source object can export a public contextual member selected on a
+package-owned object in the same source unit, including members inherited from
+a source parent in that unit. Completing the exporting object's
 signature enters a fresh method in its declaration scope. An exported
 immutable value has the singleton result of the original qualified member.
 A renamed forwarder keeps that target while exposing its new name to clients.
@@ -82,13 +83,22 @@ contextual flag. Conditional methods at each level bind their own type and
 value parameters. A failed client lookup rolls back any forwarders published
 while completing the chain and retains the public candidate names for ambiguity.
 
+For a receiver `Ints extends Base[Int]`, exporting the inherited `key` as
+`selected` keeps the declaration `Base.key` and the singleton path `Ints.key`.
+Typed selectors use the receiver’s instantiation. A conditional forwarder
+can thus delegate to `Ints.pair[B](e)` with result `TC[Pair[Int, B]]`.
+Search ranks generated candidates by the exporting owner. A diamond exposes
+the same inherited declaration once, and an ordinary override masks a legacy
+implicit. If both objects inherit the same concrete declaration, a wildcard
+skips it and a named selector reports an error at the export clause.
+
 Two objects exporting each other's givens with no declared evidence yield a
 missing argument at the client call. Source completion allows up to 16 nested
 requests to complete previously uncompleted export qualifiers on the same stack.
 Exceeding this limit returns a typing error and restores the enclosing transaction.
 
 The regression fixtures exercise source typing and compare it with Scala 3.9.0
-typer output. Inherited exports, arbitrary stable qualifiers,
+typer output. Binary export targets, arbitrary stable qualifiers,
 general overloaded or multi-clause forwarding, and emission of these methods
 in Rust-produced TASTy or JVM classes remain outside this contract.
 

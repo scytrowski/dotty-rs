@@ -129,6 +129,7 @@ def main():
         classpath = os.pathsep.join((output, toolchain.classpath))
         check_contextual_exports(toolchain, output, client_output, classpath)
         check_chained_exports(toolchain, output, client_output, classpath)
+        check_inherited_exports(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -258,6 +259,36 @@ def check_chained_exports(toolchain, output, client_output, classpath):
         "[E172]", "1 error found", "No given instance of type cycles.TC[Int] was found for parameter e",
         "this.need[Int](/* missing */summon[cycles.TC[Int]])",
     ), toolchain.classpath)
+
+
+def check_inherited_exports(toolchain, output, client_output, classpath):
+    check_typer_output(toolchain, output, "InheritedExports.scala", 0, (
+        "def direct: inheritexport.TC[Int] = inheritexport.Ints.key",
+        "this.need[Int](inheritexport.Ints.key)",
+        "def named: inheritexport.TC[Int] = inheritexport.Named.selected",
+        "final given def selected: (inheritexport.Ints.key : inheritexport.TC[Int])",
+        "this.need[Int](inheritexport.Api.key)",
+        "this.need[Int](inheritexport.Only.key)",
+        "this.need[Boolean](inheritexport.BoolOnly.key)",
+        "inheritexport.Api.pair[Int](inheritexport.Api.key)",
+        "inheritexport.TC[inheritexport.Pair[Int, B]] =\n      inheritexport.Ints.pair[B](e)",
+        "this.need[Int](inheritexport.Second.key)", "this.need[Int](inheritexport.Both.old)",
+        "final implicit def old: (inheritexport.Diamond.old : inheritexport.TC[Int])",
+        "this.need[Int](inheritexport.High.high)", "this.need[Int](inheritexport.Shared.key)",
+        "export inheritexport.Ints.given\n  }\n  class SharedClient",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "InheritedErrors.scala", 1, (
+        "[E172]", "5 errors found",
+        "given instance other in object Rival and given instance key in object Api",
+        "given instance high in object Ranked", "given instance low in object Ranked",
+        "import inheritexport.Only.given\n        this.need[Boolean](/* missing */summon[inheritexport.TC[Boolean]])",
+        "import inheritexport.Api.given\n        this.need[Long](/* missing */summon[inheritexport.TC[Long]])",
+        "import inheritexport.OldApi.*\n        this.need[Int](/* missing */summon[inheritexport.TC[Int]])",
+    ), classpath)
+    check_typer_output(toolchain, client_output, "InheritedSharedNamed.scala", 1, (
+        "1 error found", "no eligible member key at inheritexport.Ints",
+        "inheritexport.Ints.key cannot be exported because it is already a member of object SharedNamed",
+    ), classpath)
 
 
 def check_typer_output(toolchain, output, source, code, required, classpath):

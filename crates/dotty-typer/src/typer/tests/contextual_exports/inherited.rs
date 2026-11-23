@@ -215,3 +215,63 @@ fn common_parent_members_survive_wildcard_export_but_cannot_be_aliased() {
         }
     }
 }
+
+#[test]
+fn generic_inherited_export_projects_the_parent_and_rebinds_method_parameters() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "poly").unwrap();
+    let TreeKind::Apply(app) = &typer.typed_ast().get(evidence(&typer, call)).kind else {
+        panic!("provider application")
+    };
+    assert_eq!(
+        qualified_name(&typer, reference(&typer, app.args[0])),
+        ("Api", "key")
+    );
+    let TreeKind::TypeApply(ta) = &typer.typed_ast().get(app.function).kind else {
+        panic!("inferred provider type argument")
+    };
+    assert_eq!(typer.typed_ast().get(ta.args[0]).ty, defs.int);
+    let provider = reference(&typer, ta.function);
+    assert_eq!(qualified_name(&typer, provider), ("Api", "pair"));
+    let original = provider_delegate(&mut typer, provider);
+    assert_eq!(qualified_name(&typer, original), ("Base", "pair"));
+    let target = typer.store.export_target(provider).unwrap();
+    let Type::TermRef { prefix, .. } = typer.store.types.get(target) else {
+        panic!("qualified target")
+    };
+    assert_eq!(
+        qualified_name(
+            &typer,
+            typer.store.types.get(*prefix).reference_symbol().unwrap()
+        )
+        .1,
+        "Ints"
+    );
+
+    let SymbolInfo::Complete(signature) = *typer.store.symbols.info(provider) else {
+        panic!()
+    };
+    let Type::Poly(poly) = typer.store.types.get(signature) else {
+        panic!()
+    };
+    let Type::Method(clause) = typer.store.types.get(poly.result) else {
+        panic!()
+    };
+    let Type::Applied { args, .. } = typer.store.types.get(clause.result) else {
+        panic!("TC[Pair[Int,B]]")
+    };
+    let Type::Applied { args, .. } = typer.store.types.get(args[0]) else {
+        panic!("Pair[Int,B]")
+    };
+    assert_eq!(args[0], defs.int);
+    assert!(
+        matches!(typer.store.types.get(args[1]),Type::ParamRef {binder,index:0} if *binder==signature)
+    );
+
+    let call = client_result(&mut typer, &parsed, "chain").unwrap();
+    let second = reference(&typer, evidence(&typer, call));
+    assert_eq!(qualified_name(&typer, second), ("Second", "key"));
+    let (_, middle) = stable_path(&mut typer, second);
+    assert_eq!(qualified_name(&typer, middle), ("Api", "key"));
+}
