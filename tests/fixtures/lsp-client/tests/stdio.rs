@@ -466,6 +466,60 @@ fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
 }
 
 #[test]
+fn a_document_recovers_navigation_when_preparation_first_yields_classes() {
+    let caller = "  def good(): Int = a.take(false)";
+    let header = "class B(a: A) {";
+    let take = caller.find("take").unwrap();
+    let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":take+1}});
+    let unknown = header.find('A').unwrap();
+    let missing_class = json!([{"source":"dotty", "severity":1, "range":range(0,unknown,unknown+1),
+        "code":"typer.type_name_not_found", "message":"Unknown type name"}]);
+    for (encoding, literal, qualifier, trait_col) in [("utf-8", 46, 21, 11), ("utf-16", 44, 19, 9)]
+    {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &format!("class A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"));
+        client.open(B, &format!("{header}\n{caller}\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
+
+        client.edit(
+            A,
+            2,
+            range(3, 1, 1),
+            "\n/* 😀 */ trait T\nclass Outer {\n  /* 😀 */ private[Missing] val hidden: Int 1\n}",
+        );
+        client.diagnostics(A, 2, json!([{"source":"dotty","severity":1,"range":range(6,literal,literal+1),
+            "code":"parser.declaration.expected_value_equals","message":"Expected '=' before the initializer"}]));
+        client.diagnostics(B, 1, missing_class.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(A, 3, range(6, literal, literal), "= ");
+        client.diagnostics(A, 3, json!([{"source":"dotty","severity":1,"range":range(6,qualifier,qualifier+7),
+            "code":"namer.visibility.invalid_qualifier","message":"Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package"}]));
+        client.diagnostics(B, 1, missing_class.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(A, 4, range(6, qualifier - 1, qualifier + 8), "");
+        client.diagnostics(A, 4, json!([{"source":"dotty","severity":1,"range":range(4,trait_col,trait_col+7),
+            "code":"declaration.unsupported","message":"Unsupported declaration in the ordinary-class view"}]));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
+
+        client.edit(A, 5, range(4, trait_col, trait_col + 5), "class");
+        client.diagnostics(A, 5, json!([]));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
+        client.shutdown();
+    }
+}
+
+#[test]
 fn lexer_and_parser_markers_clear_independently_after_unsaved_edits() {
     let uri = "file:///fixture/Broken.scala";
     for (encoding, literal, comment) in [("utf-8", 42, 46), ("utf-16", 40, 44)] {

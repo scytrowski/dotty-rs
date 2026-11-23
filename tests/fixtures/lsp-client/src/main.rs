@@ -138,42 +138,15 @@ impl Workspace {
             for (uri, file) in files {
                 let doc = &self.docs[uri];
                 let mut diagnostics = Vec::new();
-                for diagnostic in &file.syntax_diagnostics {
-                    let problem = diagnostic.render();
-                    publish_problem(conn, uri, &doc.text, enc, &problem, &mut diagnostics)?;
-                }
                 for problem in &file.problems {
                     let report = match problem {
                         Problem::Typing(error) => &error.render(),
                         Problem::Header(error) => &unlocated_error(error),
                         Problem::MemberSignature(error) => &unlocated_error(error),
                         Problem::Body(error) => &unlocated_error(error),
-                        Problem::Naming(d) => &SourceDiagnostic::from_namer(d),
+                        Problem::Preparation(d) => &d.render(),
                         Problem::Sources(error) => &unlocated_error(error),
                         Problem::Scan(error) => &unlocated_error(error),
-                        Problem::NamerFailure(error) => &unlocated_error(error),
-                        Problem::Declaration(diagnostic) => {
-                            let (code, message) = match diagnostic.error {
-                                dotty::source_declarations::DeclarationError::Unsupported {
-                                    ..
-                                } => (
-                                    "declaration.unsupported",
-                                    "Unsupported declaration in the ordinary-class view",
-                                ),
-                                dotty::source_declarations::DeclarationError::InvalidBinding {
-                                    ..
-                                } => (
-                                    "declaration.invalid_binding",
-                                    "Inconsistent source declaration binding",
-                                ),
-                            };
-                            &SourceDiagnostic {
-                                code: Some(code),
-                                message: message.into(),
-                                location: diagnostic.location,
-                                severity: DiagnosticSeverity::Error,
-                            }
-                        }
                         Problem::Cycle { cycle, location } => &SourceDiagnostic {
                             code: Some(cycle.code()),
                             location: *location,
