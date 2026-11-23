@@ -1,11 +1,11 @@
 //! Ordered access to the named class sources selected by the caller.
 use std::{collections::HashMap, fmt};
 
-use crate::ClassHeaderBindings;
-use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
+use crate::core::{AstArena, Definitions, Packages, SymbolKind, TypeId, Typed};
 use crate::core::{SemanticStore, SourceId, SymbolId};
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
+use crate::{ClassHeaderBindings, ClassHeaderError, ReportedTyperError};
 use crate::{
     MemberSignatureError, NamedClassSource, SourceDeclaration, SourceDeclarationIndex,
     SourceDeclarationIndexError,
@@ -119,6 +119,50 @@ impl<'a> NamedClassSources<'a> {
     ) -> Option<(&'a NamedClassSource, SourceDeclaration)> {
         let declaration = self.declarations.get(symbol)?;
         Some((self.file(declaration.source)?, declaration))
+    }
+
+    /// Completes the primary constructor of the supplied class in its declaring
+    /// file. Supply the naming session's store, definitions and packages. The
+    /// returned type belongs to that store. Prepare the constructors of eligible
+    /// classes before attempting their headers.
+    ///
+    /// An ineligible class yields [`ClassHeaderError::InvalidClass`] before
+    /// typing. A rejected constructor rolls back its attempt and retains both the
+    /// class and constructor symbols in the report.
+    pub fn complete_constructor_signature(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> Result<TypeId, ClassHeaderError> {
+        let (file, view) = self
+            .class(class)
+            .ok_or(ClassHeaderError::InvalidClass(class))?;
+        crate::typer::SourceTyper::new(
+            file.ast(),
+            file.source(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+        )
+        .complete_symbol(view.constructor)
+        .map_err(|error| self.header_error(class, Some(view.constructor), error))
+    }
+
+    fn header_error(
+        &self,
+        class: SymbolId,
+        member: Option<SymbolId>,
+        error: TyperError,
+    ) -> ClassHeaderError {
+        ClassHeaderError::Typing(Box::new(ReportedTyperError::from_class(
+            error,
+            class,
+            member,
+            |id| self.file(id).map(NamedClassSource::ast),
+        )))
     }
 
     /// Attempts one header using the declaring file and the indexed classes
@@ -360,6 +404,55 @@ mod tests {
                 .is_none()
         );
         assert!(sources.class(other.classes()[0].symbol).is_none());
+    }
+
+    #[test]
+    fn constructor_signature_uses_the_selected_class_and_rejects_other_roots() {
+        use crate::core::{SymbolInfo, Type};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let a = named(
+            42,
+            "class A(start: Int) { def value() = 1 }",
+            &mut store,
+            &mut packages,
+        );
+        let b = named(7, "class B(start: Boolean)", &mut store, &mut packages);
+        let omitted = named(13, "class Other(start: Int)", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&a, &b], &store).unwrap();
+        for (file, expected) in [(&b, defs.boolean), (&a, defs.int)] {
+            let class = &file.classes()[0];
+            let ty = sources
+                .complete_constructor_signature(class.symbol, &mut store, defs, &packages)
+                .unwrap();
+            assert_eq!(
+                store.symbols.info(class.constructor),
+                &SymbolInfo::Complete(ty)
+            );
+            let Type::Method(method) = store.types.get(ty) else {
+                panic!("expected constructor method")
+            };
+            let [start] = method.params.as_slice() else {
+                panic!("expected one parameter")
+            };
+            assert_eq!(start.ty, expected);
+        }
+        let before = store.checkpoint();
+        for symbol in [
+            a.classes()[0].methods().next().unwrap().symbol,
+            omitted.classes()[0].symbol,
+        ] {
+            assert!(
+                matches!(sources.complete_constructor_signature(symbol, &mut store, defs, &packages),
+                Err(ClassHeaderError::InvalidClass(id)) if id == symbol)
+            );
+            assert_eq!(store.checkpoint(), before);
+        }
+        assert_eq!(
+            store.symbols.info(omitted.classes()[0].constructor),
+            &SymbolInfo::Missing
+        );
     }
 
     fn prepare_constructors(

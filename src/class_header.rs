@@ -8,6 +8,34 @@ use crate::core::{ConflictingTypedTree, SourceId, SourceTypedIndex, TreeId};
 use crate::source_declarations::named_class_template;
 use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
 
+/// Failure while preparing the constructor or header of an indexed source class.
+#[derive(Debug)]
+pub enum ClassHeaderError {
+    /// The requested symbol does not identify a class in the selected named sources.
+    InvalidClass(SymbolId),
+    /// The typer rejected a selected class. The report preserves the original
+    /// failure and any location resolved against this analysis.
+    Typing(Box<crate::ReportedTyperError>),
+}
+
+impl std::fmt::Display for ClassHeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidClass(id) => write!(f, "invalid source class {id:?}"),
+            Self::Typing(report) => report.error().fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ClassHeaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidClass(_) => None,
+            Self::Typing(report) => Some(report.error()),
+        }
+    }
+}
+
 /// Source-to-typed bindings from successful class-header completions in one session.
 #[derive(Debug, Default)]
 pub struct ClassHeaderBindings {
