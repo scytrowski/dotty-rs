@@ -234,3 +234,140 @@ fn conditional_reexport_requires_one_unambiguous_witness_in_the_client() {
     names.sort();
     assert_eq!(names, [("ambiguousDep", "left"), ("ambiguousDep", "right")]);
 }
+
+#[test]
+fn rejected_chain_restores_scopes_and_can_be_followed_by_a_success() {
+    let (parsed, mut store, packages, defs, index, source) = errors_unit();
+    let scopes: Vec<_> = parsed
+        .ast
+        .iter()
+        .filter_map(|(t, _)| index.export_site_at(source, t))
+        .map(|s| index.scope_of(s.owner).unwrap())
+        .collect();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let initial = typer.store.checkpoint();
+    let before: Vec<_> = scopes
+        .iter()
+        .map(|&s| typer.store.scopes.get(s).entered_symbols().count())
+        .collect();
+    for _ in 0..2 {
+        assert!(matches!(
+            rejected_call(&mut typer, &parsed, "clash"),
+            TyperError::AmbiguousContextualArgument { .. }
+        ));
+        assert_eq!(typer.store.checkpoint(), initial);
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        for (&scope, &expected) in scopes.iter().zip(&before) {
+            assert_eq!(
+                typer.store.scopes.get(scope).entered_symbols().count(),
+                expected
+            );
+        }
+    }
+    let call = client_result(&mut typer, &parsed, "mono").unwrap();
+    let public = reference(&typer, evidence(&typer, call));
+    let middle = stable_delegate(&mut typer, public);
+    let control = client_result(&mut typer, &parsed, "control").unwrap();
+    assert_eq!(reference(&typer, control), middle);
+}
+
+#[test]
+fn empty_given_cycle_terminates_without_publishing_evidence() {
+    let text = include_str!("../../../../tests/fixtures/contextual-arguments/ChainedCycle.scala");
+    for qualifier in ["LeftSide", "RightSide"] {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name(&text.replace("import LeftSide", &format!("import {qualifier}")));
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let checkpoint = typer.store.checkpoint();
+        for _ in 0..2 {
+            assert!(matches!(
+                rejected_call(&mut typer, &parsed, "use"),
+                TyperError::MissingContextualArgument { .. }
+            ));
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+        }
+    }
+}
+
+#[test]
+fn declaration_order_and_precompleted_modules_preserve_the_same_delegation() {
+    let forward = concat!(
+        "object Front { export Mid.given }\n",
+        "object Mid { export Leaf.given }\n"
+    );
+    let reverse = forward.lines().rev().collect::<Vec<_>>().join("\n");
+    for objects in [forward, reverse.as_str()] {
+        let text = format!(
+            "package test\n{objects}\nobject Leaf {{ given leaf: Int = 1 }}\nclass Client {{ def read: Int = Front.leaf }}"
+        );
+        for warm in [false, true] {
+            let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+            let mut typer =
+                SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+            if warm {
+                let mid = parsed
+                    .ast
+                    .iter()
+                    .filter_map(|(t, _)| index.export_site_at(source, t))
+                    .map(|s| s.owner)
+                    .find(|&owner| {
+                        typer
+                            .store
+                            .names
+                            .resolve(typer.store.symbols.get(owner).name.text())
+                            .trim_end_matches('$')
+                            == "Mid"
+                    })
+                    .unwrap();
+                typer.complete_symbol(mid).unwrap();
+            }
+            let root = client_result(&mut typer, &parsed, "read").unwrap();
+            let front = reference(&typer, root);
+            let mid = stable_delegate(&mut typer, front);
+            let leaf = stable_delegate(&mut typer, mid);
+            assert_eq!(
+                [front, mid, leaf].map(|s| qualified_name(&typer, s)),
+                [("Front", "leaf"), ("Mid", "leaf"), ("Leaf", "leaf")]
+            );
+        }
+    }
+}
+
+#[test]
+fn deeply_nested_cold_exports_report_a_limit_and_restore_the_session() {
+    let mut text = String::from("package chain\n");
+    for i in 0..64 {
+        text.push_str(&format!(
+            "object Layer{i} {{ export Layer{}.given }}\n",
+            i + 1
+        ));
+    }
+    text.push_str("object Layer64 { given seed: Int = 1 }");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let first = parsed
+        .ast
+        .iter()
+        .filter_map(|(t, _)| index.export_site_at(source, t))
+        .map(|s| s.owner)
+        .find(|&id| {
+            store
+                .names
+                .resolve(store.symbols.get(id).name.text())
+                .trim_end_matches('$')
+                == "Layer0"
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let checkpoint = typer.store.checkpoint();
+    for _ in 0..2 {
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::UnsupportedExpression {
+                expression_kind: "source export qualifier completion depth limit",
+                ..
+            })
+        ));
+        assert_eq!(typer.export_qualifier_depth, 0);
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+    }
+}

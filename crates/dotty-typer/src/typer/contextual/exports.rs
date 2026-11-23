@@ -4,6 +4,9 @@ use super::*;
 use dotty_core::ast::{DefDef, TypeDef, ValDef};
 use dotty_core::types::{instantiate_method_result, instantiate_poly};
 
+// Cold qualifiers recursively enter source class completion before their scope is read.
+const MAX_EXPORT_QUALIFIER_DEPTH: usize = 16;
+
 struct ExportBody {
     rhs: TreeId<Typed>,
     type_params: Vec<TreeId<Typed>>,
@@ -47,8 +50,22 @@ impl SourceTyper<'_> {
             let module = self.source_module_class_of_object(object)?;
             // The namer enters ordinary members, while completing the qualifier
             // enters its export forwarders. Both must be visible to this site.
-            if !self.index.export_sites_for_owner(module).is_empty() {
-                self.completed_expression_symbol_info(module, journal)?;
+            // ClassInfo is installed before exports. A back edge to an object
+            // already being completed can therefore read its declaration scope.
+            if !self.index.export_sites_for_owner(module).is_empty()
+                && !matches!(self.store.symbols.info(module), SymbolInfo::Complete(_))
+            {
+                if self.export_qualifier_depth >= MAX_EXPORT_QUALIFIER_DEPTH {
+                    return Err(TyperError::UnsupportedExpression {
+                        source: self.source,
+                        tree_index: site.tree.index(),
+                        expression_kind: "source export qualifier completion depth limit",
+                    });
+                }
+                self.export_qualifier_depth += 1;
+                let completed = self.completed_expression_symbol_info(module, journal);
+                self.export_qualifier_depth -= 1;
+                completed?;
             }
             let members = self.synthetic_module_scope(module)?;
             let prefix =
