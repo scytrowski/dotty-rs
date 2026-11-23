@@ -353,11 +353,29 @@ fn repairing_an_unknown_type_clears_the_marker_and_preserves_overload_navigation
             prefix.encode_utf16().count()
         };
         let location = range(0, start, start + "Missing".len());
-        client.diagnostics(uri,1,json!([{"range":location,"severity":1,"source":"dotty","code":"typer.type_name_not_found","message":"Unknown type name"}]));
-        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
+        let unknown = json!([{"range":location,"severity":1,"source":"dotty","code":"typer.type_name_not_found","message":"Unknown type name"}]);
+        client.diagnostics(uri, 1, unknown.clone());
+        let child = "file:///fixture/Child.scala";
+        let child_text = format!("class Child(start: Int) extends Broken(start) {{\n{caller}\n}}");
+        client.open(child, &child_text);
+        client.diagnostics(uri, 1, unknown);
+        client.diagnostics(child, 1, json!([]));
+        let column = caller.find("take").unwrap();
+        let position =
+            json!({"textDocument":{"uri":child},"position":{"line":1,"character":column + 1}});
+        assert_eq!(
+            client.request("textDocument/definition", position.clone()),
+            Value::Null
+        );
+        client.definition(column, 2, BOOL_METHOD);
+
         client.edit(uri, 2, location, "Int");
         client.diagnostics(uri, 2, json!([]));
-        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
+        client.diagnostics(child, 1, json!([]));
+        let resolved = client.request("textDocument/definition", position);
+        assert_eq!(resolved[0]["targetUri"], A);
+        assert_eq!(resolved[0]["targetSelectionRange"], range(2, 6, 10));
+        client.definition(column, 2, BOOL_METHOD);
         client.shutdown();
     }
 }

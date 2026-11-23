@@ -6,14 +6,14 @@ use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
     SymbolId, TextRange, Typed,
 };
-use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{ClassMember, DeclarationError};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic};
+use dotty::typer::{SignatureCompletion, TyperDiagnostic};
 use dotty::{
-    ClassBodyError, MemberSignatureError, NameSourceError, NamedClassSource, NamedClassSources,
-    NamedClassSourcesError, ReportedTyperError, SignatureBlockage, SignatureCycle,
-    SignatureDependencies, SignaturePhase, SourceDeclarationIndex, SyntaxDiagnostic,
+    ClassBodyError, ClassHeaderBindings, ClassHeaderError, MemberSignatureError, NameSourceError,
+    NamedClassSource, NamedClassSources, NamedClassSourcesError, ReportedTyperError,
+    SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+    SourceDeclarationIndex, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -26,6 +26,7 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Typing(ReportedTyperError),
+    Header(ClassHeaderError),
     MemberSignature(MemberSignatureError),
     Body(ClassBodyError),
     Sources(NamedClassSourcesError),
@@ -56,6 +57,13 @@ fn typing_problem(owner: SourceId, report: ReportedTyperError) -> (SourceId, Pro
         report.location().map_or(owner, |span| span.source()),
         Problem::Typing(report),
     )
+}
+
+fn header_problem(owner: SourceId, error: ClassHeaderError) -> (SourceId, Problem) {
+    match error {
+        ClassHeaderError::Typing(report) => typing_problem(owner, *report),
+        invalid @ ClassHeaderError::InvalidClass(_) => (owner, Problem::Header(invalid)),
+    }
 }
 
 pub struct Link {
@@ -230,21 +238,14 @@ fn analyze_sources(
     let mut classes = Vec::new();
     let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
     let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
-    for u in sources.files() {
-        let source = u.source();
-        let mut typer = SourceTyper::new(u.ast(), u.source(), u.index(), store, defs, packages);
-        for c in u.classes() {
-            match typer.complete_symbol(c.constructor) {
-                Ok(_) => classes.push(c.symbol),
-                Err(e) => {
-                    headers.record_failure(c.symbol);
-                    unavailable.insert(c.symbol);
-                    let (file, problem) = typing_problem(
-                        source,
-                        ReportedTyperError::from_class(e, c.symbol, Some(c.constructor), ast_for),
-                    );
-                    results.get_mut(&file).unwrap().problems.push(problem);
-                }
+    for (file, class) in sources.classes() {
+        match sources.complete_constructor_signature(class.symbol, store, defs, packages) {
+            Ok(_) => classes.push(class.symbol),
+            Err(error) => {
+                headers.record_failure(class.symbol);
+                unavailable.insert(class.symbol);
+                let (source, problem) = header_problem(file.source(), error);
+                results.get_mut(&source).unwrap().problems.push(problem);
             }
         }
     }
@@ -252,7 +253,7 @@ fn analyze_sources(
         &mut headers,
         &classes,
         |symbol| {
-            sources.try_complete_class_header(
+            sources.try_complete_class_header_reported(
                 symbol,
                 store,
                 defs,
@@ -264,10 +265,7 @@ fn analyze_sources(
         |symbol, error| {
             let source = sources.declarations().get(symbol).unwrap().source;
             unavailable.insert(symbol);
-            let (file, problem) = typing_problem(
-                source,
-                ReportedTyperError::from_class(error, symbol, None, ast_for),
-            );
+            let (file, problem) = header_problem(source, error);
             results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
