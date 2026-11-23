@@ -3,19 +3,6 @@ use super::*;
 const CHAIN: &str =
     include_str!("../../../../tests/fixtures/contextual-arguments/ChainedExports.scala");
 
-fn qualified_name<'a>(typer: &'a SourceTyper<'_>, id: SymbolId) -> (&'a str, &'a str) {
-    let entry = typer.store.symbols.get(id);
-    let owner = typer.store.symbols.get(entry.owner.unwrap());
-    (
-        typer
-            .store
-            .names
-            .resolve(owner.name.text())
-            .trim_end_matches('$'),
-        typer.store.names.resolve(entry.name.text()),
-    )
-}
-
 fn stable_delegate(typer: &mut SourceTyper<'_>, method: SymbolId) -> SymbolId {
     let tree = typer.type_export_forwarder_definition(method).unwrap();
     assert_eq!(

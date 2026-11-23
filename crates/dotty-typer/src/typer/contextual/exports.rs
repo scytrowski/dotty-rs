@@ -70,9 +70,12 @@ impl SourceTyper<'_> {
             let members = self.synthetic_module_scope(module)?;
             let prefix =
                 self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
-            for target in self.contextual_symbols(members) {
+            for target in self.contextual_members(members, journal)? {
                 let entry = self.store.symbols.get(target);
-                if entry.visibility != Visibility::Public
+                if !entry
+                    .owner
+                    .is_some_and(|class| self.is_current_source_symbol(class))
+                    || entry.visibility != Visibility::Public
                     || !matches!(entry.kind, SymbolKind::Field | SymbolKind::Method)
                 {
                     continue;
