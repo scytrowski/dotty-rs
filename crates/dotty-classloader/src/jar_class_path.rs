@@ -1,7 +1,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
-use crate::zip_archive::{ArchivePackages, ZipArchive};
+use crate::zip_archive::{ArchiveClassPathIndex, ZipArchive};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -9,10 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
 
-/// The lowest feature-release version multi-release JARs recognize
-/// (JEP 238): `META-INF/versions/N/` directories with `N < 9` are not
-/// version directories at all.
-const MIN_VERSIONED_DIRECTORY: u16 = 9;
 const MAX_RESOURCE_CACHE_ENTRIES: usize = 512;
 const MAX_RESOURCE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHED_RESOURCE_BYTES: usize = 1024 * 1024;
@@ -44,9 +40,7 @@ const MAX_CACHED_RESOURCE_BYTES: usize = 1024 * 1024;
 pub struct JarClassPath {
     path: PathBuf,
     archive: ZipArchive,
-    release_version: u16,
-    multi_release: bool,
-    packages: ArchivePackages,
+    packages: ArchiveClassPathIndex,
     profile: JarResourceProfileCounters,
     resource_cache: Mutex<JarResourceCache>,
 }
@@ -86,8 +80,6 @@ impl JarClassPath {
         Ok(Self {
             path,
             archive,
-            release_version,
-            multi_release,
             packages,
             profile: JarResourceProfileCounters::default(),
             resource_cache: Mutex::new(JarResourceCache::default()),
@@ -106,37 +98,17 @@ impl JarClassPath {
         }
     }
 
-    /// The versioned entry names to probe, highest version first, for
-    /// `entry_name`'s multi-release override. Empty when this JAR isn't
-    /// multi-release, or when `release_version` is below the lowest
-    /// version directory JEP 238 recognizes (`MIN_VERSIONED_DIRECTORY`
-    /// then exceeds the upper bound, which `RangeInclusive` already
-    /// treats as empty).
-    fn versioned_entry_names(&self, entry_name: &str) -> impl Iterator<Item = String> {
-        let upper_bound = if self.multi_release {
-            self.release_version
-        } else {
-            0
-        };
-
-        (MIN_VERSIONED_DIRECTORY..=upper_bound)
-            .rev()
-            .map(move |version| format!("META-INF/versions/{version}/{entry_name}"))
-    }
-
-    /// Reads `entry_name`, preferring the highest multi-release override
-    /// (see [`Self::versioned_entry_names`]) and falling back to the
-    /// unversioned entry.
+    /// Reads the selected resource path from this archive's immutable release index.
     fn read_versioned_entry(&self, entry_name: &str) -> Result<Option<Vec<u8>>, ClassPathError> {
-        for versioned_entry_name in self.versioned_entry_names(entry_name) {
-            self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
-            if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
-                return Ok(Some(bytes));
-            }
-        }
-
+        let versioned;
+        let path = if let Some(version) = self.packages.overrides.get(entry_name) {
+            versioned = format!("META-INF/versions/{version}/{entry_name}");
+            &versioned
+        } else {
+            entry_name
+        };
         self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(self.archive.read_entry(entry_name)?)
+        Ok(self.archive.read_entry(path)?)
     }
 }
 
@@ -545,6 +517,23 @@ pub(crate) mod tests {
         assert_eq!(profile.cached_entries, 0);
 
         std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn a_cold_miss_checks_one_zip_path_per_format_at_any_release() {
+        for release in [8, 17, 21, u16::MAX] {
+            let jar = JarClassPath::new(
+                fixture_path("tests/fixtures/multi_release_jar/mr_sample.jar"),
+                release,
+            )
+            .unwrap();
+            assert!(
+                jar.find_class(&BinaryName::from_internal("absent/Item"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(jar.resource_profile().zip_entry_reads, 2);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
-use crate::zip_archive::{ArchivePackages, ZipArchive};
+use crate::zip_archive::{ArchiveClassPathIndex, ZipArchive};
 use std::io::{self, Read};
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ const JMOD_MAGIC: [u8; 4] = [0x4A, 0x4D, 0x01, 0x00];
 pub struct JmodClassPath {
     path: PathBuf,
     archive: ZipArchive,
-    packages: ArchivePackages,
+    packages: ArchiveClassPathIndex,
 }
 
 impl JmodClassPath {

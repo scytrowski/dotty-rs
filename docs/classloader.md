@@ -166,7 +166,9 @@ resolution.
   opened, so repeated queries use the central-directory snapshot.
   Versioned entries contribute their logical package paths only when the main
   section of the JAR manifest declares `Multi-Release: true`, and only for versions from 9 through the
-  configured effective release. JMOD resources are considered only under
+  configured effective release. Each versioned resource is indexed at its highest
+  eligible release, so a cold class lookup checks at most one entry per format.
+  JMOD resources are considered only under
   their `classes/` root. The empty path represents the unnamed/default
   package boundary, while `_root_` is a Scala source lookup marker; these
   classpath checks do not implement Scala default imports or source lookup.

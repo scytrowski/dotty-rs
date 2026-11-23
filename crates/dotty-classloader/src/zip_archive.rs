@@ -511,11 +511,12 @@ impl ZipStorage {
     }
 }
 
-/// Direct resource directories and logical package prefixes for one classpath entry.
+/// Package evidence and eligible resource overrides for one classpath entry.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ArchivePackages {
+pub(crate) struct ArchiveClassPathIndex {
     pub(crate) direct: HashSet<String>,
     pub(crate) prefixes: HashSet<String>,
+    pub(crate) overrides: HashMap<String, u16>,
 }
 
 /// A ZIP archive indexed by its central directory. Its bytes are either
@@ -653,8 +654,8 @@ impl ZipArchive {
         &self,
         archive_root: &str,
         release: Option<u16>,
-    ) -> ArchivePackages {
-        let mut packages = ArchivePackages::default();
+    ) -> ArchiveClassPathIndex {
+        let mut packages = ArchiveClassPathIndex::default();
         for name in self.entries.keys() {
             let Some(resource) = name.strip_prefix(archive_root) else {
                 continue;
@@ -671,6 +672,8 @@ impl ZipArchive {
                 && version.to_string() == version_name
             {
                 packages.insert_resource(path);
+                let selected = packages.overrides.entry(path.to_owned()).or_insert(version);
+                *selected = (*selected).max(version);
             }
         }
         packages
@@ -758,7 +761,7 @@ impl ZipArchive {
     }
 }
 
-impl ArchivePackages {
+impl ArchiveClassPathIndex {
     fn insert_resource(&mut self, resource: &str) {
         if resource.starts_with('/') {
             return;
