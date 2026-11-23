@@ -11,6 +11,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | --- | --- |
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
+| Prepare one bound file and retain typed diagnostics | [`ParsedSource::prepare_classes`], [`ClassPreparation`], [`PreparationDiagnostic`] |
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource::into_classes`], [`NamedSource::project_classes`] |
 | Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
@@ -95,6 +96,65 @@ binds and eagerly renders them as `ParsedSource<SourceDiagnostic>`.
 message, and optional location. Codes can be absent for typer/adapter failures;
 message wording is for presentation. Keep the original source text when
 converting byte ranges to line/column coordinates for an editor.
+
+## Prepare ordinary classes for a compiler or editor
+
+Call [`ParsedSource::prepare_classes`] after binding each detached parse to the
+session interner. The caller chooses how to schedule parsing and in which order
+to bind the results. A [`ClassPreparation::Prepared`] outcome may carry
+diagnostics. Even a file consisting entirely of omitted traits has a prepared
+view with zero classes. A [`ClassPreparation::Rejected`] carries its file ID and
+diagnostics. Scanning failures returned by [`parse_source`] precede this step.
+
+This client keeps the valid classes and gives an unsupported declaration its
+own message. It can still identify the parser rejection from a different file.
+
+```rust
+use dotty::{NamedClassSources, PreparationDiagnostic, SyntaxDiagnostic, parse_source};
+use dotty::core::{Packages, SemanticStore, SourceId};
+use dotty::source_declarations::DeclarationError;
+
+let mut store = SemanticStore::new();
+let mut packages = Packages::new();
+let mut files = Vec::new();
+let mut messages = Vec::new();
+for (index, filename, text) in [
+    (7, "Model.scala", "class A; trait T; class B"),
+    (3, "Broken.scala", "class Broken { val n: Int 1 }"),
+] {
+    let source = SourceId::from_index(index);
+    let parsed = parse_source(source, text, Default::default())?.bind(&mut store.names);
+    let (file, reports) = parsed.prepare_classes(filename, &mut store, &mut packages).into_parts();
+    files.extend(file);
+    for report in reports {
+        let message = match &report {
+            PreparationDiagnostic::Declaration(d)
+                if matches!(d.error, DeclarationError::Unsupported { .. }) => {
+                    let range = report.location().ok_or("expected a declaration position")?.span().range();
+                    format!("Skipped {}", &text[range.start() as usize..range.end() as usize])
+                }
+            PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(_)) => {
+                assert_eq!(report.code(), Some("parser.declaration.expected_value_equals"));
+                report.render().message
+            }
+            _ => return Err("unexpected preparation diagnostic".into()),
+        };
+        messages.push((report.source(), message));
+    }
+}
+assert_eq!(messages[0], (SourceId::from_index(7), "Skipped trait T".to_owned()));
+assert_eq!(messages[1].0, SourceId::from_index(3));
+let sources = NamedClassSources::new(&files, &store)?;
+assert_eq!(sources.files().count(), 1);
+assert_eq!(sources.classes().count(), 2);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Preparation reports retain their payloads, codes and original byte ranges after
+the session ends. Resolve IDs only in their originating session and apply a range
+to the corresponding document version. For a recovered tree on syntax rejection,
+call [`ParsedSource::name`] and match [`NameSourceError::Syntax`]. To require
+complete coverage after successful naming, use [`NamedSource::into_classes`].
 
 ## Select ordinary classes from a mixed source file
 
