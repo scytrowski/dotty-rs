@@ -294,6 +294,7 @@ impl SourceTyper<'_> {
             }
             let (arguments, application_kind) = self.contextual_call_arguments(
                 &mut function,
+                callable,
                 &method,
                 context,
                 tree_index,
@@ -1378,6 +1379,7 @@ impl SourceTyper<'_> {
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             let (args, kind) = self.contextual_call_arguments(
                 &mut tree,
+                signature,
                 &method,
                 context,
                 tree_index,

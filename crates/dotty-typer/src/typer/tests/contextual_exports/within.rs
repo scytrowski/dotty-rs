@@ -51,3 +51,48 @@ fn explicit_arguments_select_the_second_type_on_the_first_argument_path() {
         "{error:?}"
     );
 }
+
+fn assert_arguments(typer: &SourceTyper<'_>, tree: TreeId<Typed>, site: &str, names: &[&str]) {
+    let TreeKind::Apply(call) = &typer.typed_ast().get(tree).kind else {
+        panic!("argument clause at {site}")
+    };
+    let actual: Vec<_> = call
+        .args
+        .iter()
+        .map(|&tree| qualified_name(typer, reference(typer, tree)))
+        .collect();
+    assert_eq!(
+        actual,
+        names.iter().map(|&name| (site, name)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn inferred_method_and_provider_clauses_use_the_selected_family_path() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, owner, method) in [
+        ("inferred", "Client", "read"),
+        ("original", "Makers", "product"),
+        ("oldDirect", "Legacy", "old"),
+    ] {
+        let root = client_result(&mut typer, &parsed, site).unwrap();
+        let tree = if site == "inferred" {
+            root
+        } else {
+            evidence(&typer, root)
+        };
+        assert_arguments(&typer, tree, site, &["p", "v"]);
+        let TreeKind::Apply(call) = &typer.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        assert_eq!(
+            qualified_name(&typer, reference(&typer, call.function)),
+            (owner, method)
+        );
+    }
+    assert!(matches!(
+        rejected_call(&mut typer, &parsed, "wrongSearch"),
+        TyperError::MissingContextualArgument { .. }
+    ));
+}

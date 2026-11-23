@@ -13,6 +13,7 @@ impl SourceTyper<'_> {
     pub(super) fn contextual_call_arguments(
         &mut self,
         function: &mut TreeId<Typed>,
+        binder: TypeId,
         method: &MethodType,
         context: ExpressionContext,
         tree_index: u32,
@@ -23,6 +24,10 @@ impl SourceTyper<'_> {
         let mut args = Vec::with_capacity(method.params.len());
         let mut kind = ApplyKind::Regular;
         for (ordinal, param) in method.params.iter().enumerate() {
+            let param = dotty_core::MethodParam {
+                ty: self.contextual_parameter_type(binder, param.ty, &args, tree_index)?,
+                ..*param
+            };
             let default = self.default_call(*function, ordinal, param.ty);
             // A missing candidate may have opened a recursive dictionary before
             // reaching a missing dependency. Its symbols follow the probe's lifetime.
@@ -34,9 +39,9 @@ impl SourceTyper<'_> {
                     .as_deref_mut()
                 {
                     Some(h) => {
-                        typer.contextual_parameter_value(param, context, tree_index, h, nested)
+                        typer.contextual_parameter_value(&param, context, tree_index, h, nested)
                     }
-                    None => typer.search_contextual_argument(param, context, tree_index, nested),
+                    None => typer.search_contextual_argument(&param, context, tree_index, nested),
                 };
             let Some(default) = default else {
                 args.push(search(self, journal)?);
