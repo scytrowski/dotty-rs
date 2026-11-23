@@ -147,29 +147,6 @@ fn a_single_using_clause_forwards_both_witnesses_in_declaration_order() {
 }
 
 #[test]
-fn an_intra_clause_dependency_is_rejected_before_publishing_a_forwarder() {
-    let input = "package multi
-trait Family { type Out }
-class Product
-object Records { given product(using f: Family, v: f.Out): Product = new Product }
-object Api { export Records.product }";
-    let (parsed, mut store, packages, defs, index, source) = parse_and_name(input);
-    let site = parsed
-        .ast
-        .iter()
-        .find_map(|(tree, _)| index.export_site_at(source, tree))
-        .unwrap();
-    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
-    let before = typer.store.checkpoint();
-    let error = typer.complete_symbol(site.owner).unwrap_err();
-    assert!(
-        matches!(error,TyperError::UnsupportedExpression {tree_index,expression_kind:"contextual export with a dependency within a parameter clause",..} if tree_index == site.tree.index()),
-        "{error:?}"
-    );
-    assert_eq!(typer.store.checkpoint(), before);
-}
-
-#[test]
 fn exported_binary_type_constructor_uses_both_inferred_arguments() {
     check_sites(
         &[("directPoly", "Records"), ("viaPoly", "Poly")],

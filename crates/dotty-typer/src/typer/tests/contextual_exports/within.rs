@@ -164,3 +164,98 @@ fn omitted_default_after_explicit_using_is_chosen_over_lexical_evidence() {
         ("C", "choose$default$2")
     );
 }
+
+fn dependent_delegate(typer: &mut SourceTyper<'_>, method: SymbolId) -> SymbolId {
+    let tree = typer.type_export_forwarder_definition(method).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    let [clause] = def.value_param_clauses.as_slice() else {
+        panic!("one parameter clause")
+    };
+    let params: Vec<_> = clause
+        .iter()
+        .map(|&tree| {
+            let sym = typer.typed_index.synthetic_definition_symbol(tree).unwrap();
+            assert_eq!(typer.store.symbols.owner(sym), Some(method));
+            sym
+        })
+        .collect();
+    let SymbolInfo::Complete(ty) = *typer.store.symbols.info(params[1]) else {
+        panic!()
+    };
+    let Type::TypeRef { prefix, .. } = typer.store.types.get(ty) else {
+        panic!("forwarder f.Out")
+    };
+    assert_eq!(
+        typer.store.types.get(*prefix).reference_symbol(),
+        Some(params[0])
+    );
+    let TreeKind::Apply(body) = &typer.typed_ast().get(def.rhs.unwrap()).kind else {
+        panic!()
+    };
+    assert_eq!(
+        body.args
+            .iter()
+            .map(|&arg| reference(typer, arg))
+            .collect::<Vec<_>>(),
+        params
+    );
+    let callee = match &typer.typed_ast().get(body.function).kind {
+        TreeKind::TypeApply(app) => {
+            assert_eq!(app.args.len(), def.type_params.len());
+            for (&arg, &definition) in app.args.iter().zip(&def.type_params) {
+                assert_eq!(
+                    Some(reference(typer, arg)),
+                    typer.typed_index.synthetic_definition_symbol(definition)
+                );
+            }
+            app.function
+        }
+        _ => {
+            assert!(def.type_params.is_empty());
+            body.function
+        }
+    };
+    reference(typer, callee)
+}
+
+#[test]
+fn exported_dependent_parameters_forward_their_own_value_and_type_symbols() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, owner, name) in [
+        ("viaApi", "Api", "product"),
+        ("named", "Api", "product"),
+        ("generic", "Generic", "lifted"),
+    ] {
+        let tree = client_result(&mut typer, &parsed, site).unwrap();
+        let call = if site == "viaApi" {
+            evidence(&typer, tree)
+        } else {
+            tree
+        };
+        let args: &[&str] = if site == "generic" {
+            &["p", "v", "tag"]
+        } else {
+            &["p", "v"]
+        };
+        assert_arguments(&typer, call, site, args);
+        let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+            panic!()
+        };
+        let target = if site == "generic" {
+            let TreeKind::TypeApply(ta) = &typer.typed_ast().get(app.function).kind else {
+                panic!()
+            };
+            assert_eq!(typer.typed_ast().get(ta.args[0]).ty, defs.int);
+            ta.function
+        } else {
+            app.function
+        };
+        let method = reference(&typer, target);
+        assert_eq!(qualified_name(&typer, method), (owner, name));
+        let leaf = dependent_delegate(&mut typer, method);
+        assert_eq!(qualified_name(&typer, leaf), ("Makers", name));
+    }
+}
