@@ -19,3 +19,7 @@ class Client:
   def leading(b: Box[Int])(using f: Fmt[Int]): Box[Int] = front(using value = b)
   def gap(b: Box[Int])(using f: Fmt[Int]): Box[Int] = middle(using b, flag = true)
   def wide(b: Box[Int])(using f: Fmt[Int]): Any = choose(using value = b)
+  def fallback[A](using value: Box[A], fmt: Fmt[A] = new Fmt[A]): Box[A] = value
+  def defaulted(b: Box[Int]): Box[Int] = fallback(using value = b)
+  def shadow(b: Box[Int])(using f: Fmt[Int]): Box[Int] = fallback(using value = b)
+  def overrideDefault(b: Box[Int])(using f: Fmt[Int]): Box[Int] = fallback(using fmt = f, value = b)

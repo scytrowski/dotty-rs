@@ -997,7 +997,7 @@ impl SourceTyper<'_> {
                     error => error,
                 })?;
             }
-            if copy_defaults.is_some() {
+            if copy_defaults.is_some() || named.is_some() {
                 let mut b = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
                 let targs = type_arguments
                     .iter()

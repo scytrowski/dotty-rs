@@ -162,3 +162,48 @@ fn omitted_evidence_alone_does_not_guess_unconstrained_type_parameters() {
         })
     ));
 }
+
+fn type_application<'a>(
+    t: &'a SourceTyper<'_>,
+    tree: TreeId<Typed>,
+) -> &'a dotty_core::ast::TypeApply<Typed> {
+    let TreeKind::TypeApply(a) = &t.typed_ast().get(tree).kind else {
+        panic!("expected inferred type application")
+    };
+    a
+}
+
+#[test]
+fn generic_default_replays_inferred_type_argument_and_only_warns_for_shadowed_evidence() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for site in ["defaulted", "shadow", "overrideDefault"] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let a = call(&t, tree);
+        let target = type_application(&t, a.function);
+        assert_eq!(target.args.len(), 1);
+        assert_eq!(t.typed_ast().get(target.args[0]).ty, defs.int);
+        if site == "overrideDefault" {
+            assert_eq!(qualified_name(&t, reference(&t, a.args[1])), (site, "f"));
+        } else {
+            let getter = type_application(&t, a.args[1]);
+            assert_eq!(
+                qualified_name(&t, reference(&t, getter.function)),
+                ("Client", "fallback$default$2")
+            );
+            assert_eq!(getter.args, target.args);
+        }
+        let warnings = t.take_diagnostics();
+        if site == "shadow" {
+            let [warning] = &warnings[..] else {
+                panic!("expected one warning")
+            };
+            let TyperWarning::DefaultShadowsGiven { name } = warning.issue() else {
+                panic!()
+            };
+            assert_eq!(t.store.names.resolve(name.as_name().text()), "fmt");
+        } else {
+            assert!(warnings.is_empty());
+        }
+    }
+}
