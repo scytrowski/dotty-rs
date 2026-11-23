@@ -836,7 +836,29 @@ impl SourceTyper<'_> {
             mut typed_arguments,
             is_constructor_application,
         } = request;
+        let mut named = None;
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
+            if let Some(Type::Method(method)) = self.store.types.try_get(poly.result)
+                && application_kind_accepts(application_kind, method.kind)
+            {
+                named = self.named_using_arguments(
+                    application_kind,
+                    method,
+                    &argument_trees,
+                    tree_index,
+                )?;
+            }
+            if let Some(slots) = &named
+                && slots
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, slot)| slot.as_ref().is_none_or(|a| a.written != ordinal))
+            {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                });
+            }
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
@@ -853,6 +875,10 @@ impl SourceTyper<'_> {
                 };
                 let mut arguments = Vec::with_capacity(argument_trees.len());
                 for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
+                    let argument_tree = named
+                        .as_ref()
+                        .and_then(|slots| slots[argument_index].as_ref())
+                        .map_or(argument_tree, |a| &a.value);
                     let is_lambda = self.is_function_literal_value(*argument_tree);
                     let typed = if is_lambda {
                         if let Some(expected) = expected_parameters.get(argument_index).copied() {
@@ -1011,8 +1037,10 @@ impl SourceTyper<'_> {
                 method_kind: method.kind,
             });
         }
-        let named =
-            self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
+        if named.is_none() {
+            named =
+                self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
+        }
         let mut shared = Vec::new();
         let partial_using = application_kind == ApplyKind::Using
             && !argument_trees.is_empty()
