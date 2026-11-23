@@ -17284,6 +17284,10 @@ mod tests {
         assert!(empty.has_term_clause);
         assert!(one.has_term_clause);
         assert!(!type_only.has_term_clause);
+        assert_eq!(
+            method("curried").term_clauses.as_deref(),
+            Some([(MethodKind::Plain, 1); 2].as_slice())
+        );
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);

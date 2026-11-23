@@ -1031,7 +1031,13 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     let mut changes = Vec::new();
     for (current, frozen) in changed_members {
         let (name, _) = current.split_once(':').unwrap();
-        if name != "getOrElse" {
+        if name == "fold" {
+            // def fold[B](ifEmpty: => B)(f: A => B): B has two plain clauses.
+            assert_eq!(
+                *current,
+                frozen.replace(",scala.Function1[", ")Plain:(scala.Function1[")
+            );
+        } else if name != "getOrElse" {
             // These four Option signatures each have a single legacy implicit
             // clause in the pinned Scala library. Freeze the entire rest of the row.
             assert_eq!(*current, frozen.replace(")Plain:", ")Implicit:"));
@@ -1040,7 +1046,7 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     }
     assert_eq!(
         changes,
-        ["flatten", "getOrElse", "orNull", "unzip3", "unzip"]
+        ["flatten", "fold", "getOrElse", "orNull", "unzip3", "unzip"]
     );
 }
 

@@ -534,14 +534,15 @@ Existing ancestor identities and origins are preserved. A richer neighboring
 unit remains on the existing bounded loader path. Ordinary `load_class`
 behavior is unchanged.
 
-For `DefDef` methods, TASTy clause presence is retained independently of the
-flattened JVM parameter list. A definition with no clauses of either kind
-lowers as `Type::ByName` (TASTy's `ExprType`); a type-parameter-only
-definition keeps its direct result under `Type::Poly`, matching the semantic
-unpickler; an explicit empty `()` clause remains `Type::Method` with no
-parameters. Only methods from class files or Java-marked TASTy receive
-`JAVA_DEFINED` for Java empty-clause call adaptation. A `.class` descriptor cannot distinguish those source forms and
-continues to lower a zero-argument method as an empty `Type::Method`.
+For `DefDef` methods, each successive TASTy term clause lowers to a nested
+`Type::Method`, preserving its arity and whether it is plain, implicit, or
+contextual. A definition with no clauses of either kind lowers to
+`Type::ByName` (TASTy's `ExprType`). A type-parameter-only definition keeps
+its direct result under `Type::Poly`, matching the semantic unpickler. An
+explicit empty `()` clause remains a `Type::Method` with no parameters.
+Only methods from class files or Java-marked TASTy receive `JAVA_DEFINED`
+for Java empty-clause call adaptation. A JVM descriptor represents all term
+parameters in one list and a zero-argument method as an empty `Type::Method`.
 
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the

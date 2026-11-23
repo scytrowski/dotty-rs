@@ -325,7 +325,7 @@ pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
     pub semantic_flags: SymbolFlags,
-    /// Wire clause boundaries for contextual methods and their linked getters.
+    /// Wire clause boundaries for multi-clause methods, contextual methods, and linked getters.
     pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
     pub singleton_result_parameter: Option<usize>,
@@ -3291,7 +3291,8 @@ fn decode_members(
                 let has_term_clause = !clauses.is_empty();
                 // A getter for a trailing implicit may copy only ordinary clauses.
                 // A getter with no term clauses keeps its parameterless result type.
-                let preserve_clauses = (default_for.is_some() && has_term_clause)
+                let preserve_clauses = clauses.len() > 1
+                    || (default_for.is_some() && has_term_clause)
                     || clauses.iter().any(|(kind, _)| *kind != MethodKind::Plain);
 
                 methods.push(DecodedTastyMethod {
