@@ -287,6 +287,35 @@ impl fmt::Display for TypeRebindError {
     }
 }
 
+/// Copies binders in a semantic type graph so another declaration can own
+/// an independent signature. References to copied binders follow their new
+/// identities. Unchanged non-binder types can retain their original IDs.
+/// The root and all referenced IDs must belong to the supplied store.
+/// Traversal errors, including excessive depth, roll back the entire copy.
+///
+/// ```
+/// use dotty_core::{Definitions, SemanticStore, types::{MethodKind, MethodType, Type, freshen_type_binders}};
+/// let mut store = SemanticStore::default();
+/// let result = Definitions::bootstrap(&mut store).int;
+/// let original = store.types.alloc(Type::Method(MethodType {
+///     params: vec![], kind: MethodKind::Plain, result,
+/// }));
+/// let copy = freshen_type_binders(&mut store, original).unwrap();
+/// assert_ne!(original, copy);
+/// assert_eq!(store.types.get(original), store.types.get(copy));
+/// ```
+pub fn freshen_type_binders(
+    store: &mut SemanticStore,
+    root: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    let checkpoint = store.checkpoint();
+    let result = Rebinder::new(store).ty(root);
+    if result.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    result
+}
+
 /// Replaces references to exact semantic symbols throughout a type graph.
 ///
 /// Only symbol-designated `TypeRef` and `TermRef` nodes are eligible. Names

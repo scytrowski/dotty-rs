@@ -2,7 +2,7 @@
 
 use super::*;
 use dotty_core::ast::{DefDef, TypeDef, ValDef};
-use dotty_core::types::{instantiate_method_result, instantiate_poly};
+use dotty_core::types::{freshen_type_binders, instantiate_method_result, instantiate_poly};
 
 // Cold qualifiers recursively enter source class completion before their scope is read.
 const MAX_EXPORT_QUALIFIER_DEPTH: usize = 16;
@@ -250,36 +250,25 @@ impl SourceTyper<'_> {
         signature: TypeId,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
-        let unsupported = || TyperError::UnsupportedExpression {
-            source: self.source,
-            tree_index,
-            expression_kind: "exported provider requires one type parameter and one using parameter",
+        let body = match self.store.types.get(signature) {
+            Type::Poly(poly) if poly.params.len() == 1 => poly.result,
+            _ => signature,
         };
-        let Type::Poly(mut poly) = self.store.types.get(signature).clone() else {
-            return Err(unsupported());
-        };
-        if poly.params.len() != 1
-            || !matches!(self.store.types.get(poly.result), Type::Method(m) if m.kind == MethodKind::Contextual
+        if !matches!(self.store.types.get(body), Type::Method(m) if m.kind == MethodKind::Contextual
             && matches!(m.params.as_slice(), [p] if !p.erased && !p.varargs)
             && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_)))
         {
-            return Err(unsupported());
-        }
-        let fresh = self.store.types.reserve();
-        let arg = self.store.types.alloc(Type::ParamRef {
-            binder: fresh.id(),
-            index: 0,
-        });
-        let instance = instantiate_poly(self.store, signature, &[arg]).map_err(|error| {
-            TyperError::TypeRebinding {
+            return Err(TyperError::UnsupportedExpression {
                 source: self.source,
                 tree_index,
-                error,
-            }
-        })?;
-        poly.params[0].bounds = instance.bounds[0];
-        poly.result = instance.result;
-        Ok(self.store.types.fill(fresh, Type::Poly(poly)))
+                expression_kind: "unsupported contextual export parameter clauses",
+            });
+        }
+        freshen_type_binders(self.store, signature).map_err(|error| TyperError::TypeRebinding {
+            source: self.source,
+            tree_index,
+            error,
+        })
     }
 
     /// Materializes a source object's exported contextual method and its delegation
@@ -389,18 +378,16 @@ impl SourceTyper<'_> {
         })
     }
 
-    fn build_export_provider_body(
+    fn export_type_application(
         &mut self,
         method: SymbolId,
         select: TreeId<Typed>,
-    ) -> Result<ExportBody, TyperError> {
+        signature: TypeId,
+    ) -> Result<(TreeId<Typed>, TypeId, Vec<TreeId<Typed>>), TyperError> {
         let invalid = || TyperError::SourceProvenanceMissing { symbol: method };
         let position = self.store.symbols.get(method).position;
-        let SymbolInfo::Complete(signature) = *self.store.symbols.info(method) else {
-            return Err(invalid());
-        };
         let Some(Type::Poly(poly)) = self.store.types.try_get(signature) else {
-            return Err(invalid());
+            return Ok((select, signature, Vec::new()));
         };
         let &[parameter] = poly.params.as_slice() else {
             return Err(invalid());
@@ -439,7 +426,22 @@ impl SourceTyper<'_> {
                 }),
             },
         );
-        let Type::Method(clause) = self.store.types.get(instance.result) else {
+        Ok((type_apply, instance.result, vec![type_def]))
+    }
+
+    fn build_export_provider_body(
+        &mut self,
+        method: SymbolId,
+        select: TreeId<Typed>,
+    ) -> Result<ExportBody, TyperError> {
+        let invalid = || TyperError::SourceProvenanceMissing { symbol: method };
+        let position = self.store.symbols.get(method).position;
+        let SymbolInfo::Complete(signature) = *self.store.symbols.info(method) else {
+            return Err(invalid());
+        };
+        let (function, callable, type_params) =
+            self.export_type_application(method, select, signature)?;
+        let Type::Method(clause) = self.store.types.get(callable) else {
             return Err(invalid());
         };
         let &[formal] = clause.params.as_slice() else {
@@ -456,12 +458,12 @@ impl SourceTyper<'_> {
             .store
             .types
             .alloc(Type::term_ref(self.definitions.no_prefix, witness));
-        let result = instantiate_method_result(self.store, instance.result, &[Some(path)])
+        let result = instantiate_method_result(self.store, callable, &[Some(path)])
             .map_err(|_| invalid())?;
         let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
         let tpt = builder.type_tree(formal.ty, position);
         let ref_tree = builder.ident(*formal.name.as_name(), path, position);
-        let rhs = builder.apply(type_apply, vec![ref_tree], result, position);
+        let rhs = builder.apply(function, vec![ref_tree], result, position);
         let param = self.typed_index.alloc_synthetic_definition(
             &mut self.typed_arena,
             witness,
@@ -478,7 +480,7 @@ impl SourceTyper<'_> {
         );
         Ok(ExportBody {
             rhs,
-            type_params: vec![type_def],
+            type_params,
             value_param_clauses: vec![vec![param]],
         })
     }
