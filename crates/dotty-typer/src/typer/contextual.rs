@@ -15,6 +15,7 @@ mod exports;
 mod extension;
 pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
+mod open_goal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextualRef {

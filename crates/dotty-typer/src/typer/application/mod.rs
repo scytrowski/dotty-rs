@@ -838,6 +838,7 @@ impl SourceTyper<'_> {
         } = request;
         let named =
             self.named_using_arguments(application_kind, callable, &argument_trees, tree_index)?;
+        let mut inferred_witnesses = HashMap::new();
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
@@ -916,19 +917,40 @@ impl SourceTyper<'_> {
                 tree_index,
                 info_journal,
             )?;
-            let type_arguments = self.infer_poly_application_with_defaults(
-                PolyApplicationInference {
-                    binder: callable,
-                    poly: &poly,
-                    arguments: &arguments,
-                    application_kind,
-                    tree_index,
-                    unused_covariant_parameter,
-                },
+            let inference = PolyApplicationInference {
+                binder: callable,
+                poly: &poly,
+                arguments: &arguments,
+                application_kind,
+                tree_index,
+                unused_covariant_parameter,
+            };
+            let mut constraints = self.collect_application_constraints(
+                &inference,
                 named.as_deref(),
                 copy_defaults.as_deref().unwrap_or_default(),
                 info_journal,
             )?;
+            if let Some(slots) = &named
+                && constraints.contains(&None)
+                && let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned()
+            {
+                for (ordinal, (slot, param)) in slots.iter().zip(&method.params).enumerate() {
+                    if slot.is_some() || constraints.iter().all(Option::is_some) {
+                        continue;
+                    }
+                    if let Some(witness) = self.infer_omitted_witness(
+                        param.ty,
+                        &inference,
+                        &mut constraints,
+                        context,
+                        info_journal,
+                    )? {
+                        inferred_witnesses.insert(ordinal, witness);
+                    }
+                }
+            }
+            let type_arguments = self.finish_application_inference(&inference, constraints)?;
             let instantiated =
                 dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
                     .map_err(TyperError::PolyInstantiation)?;
@@ -1094,6 +1116,10 @@ impl SourceTyper<'_> {
             let (written, argument_tree) = match slot {
                 Some(a) => (a.written, &a.value),
                 None if named.is_some() || argument_index >= argument_trees.len() => {
+                    if let Some(witness) = inferred_witnesses.remove(&argument_index) {
+                        arguments.push(witness);
+                        continue;
+                    }
                     let parameter = dotty_core::MethodParam {
                         ty: formal_ty,
                         ..*parameter
