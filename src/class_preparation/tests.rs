@@ -141,3 +141,88 @@ fn complete_empty_and_partial_files_are_all_prepared() {
         }
     }
 }
+
+#[test]
+fn reports_preserve_bound_syntax_order_including_tied_byte_offsets_after_analysis() {
+    use crate::lexer::{LexerIssue, NumericComponent, NumericIssue};
+    use crate::parser::{DeclarationIssue, ParseIssue};
+    let id = SourceId::from_index(7);
+    let text = "val x: Int 0x";
+    let reports = {
+        let mut store = SemanticStore::new();
+        let parsed = bound(text, id, &mut store);
+        let (file, reports) = parsed
+            .prepare_classes("X.scala", &mut store, &mut Packages::new())
+            .into_parts();
+        assert!(file.is_none());
+        reports
+    };
+    let [
+        a @ PreparationDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }),
+        b @ PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(parser)),
+    ] = &reports[..]
+    else {
+        panic!("expected lexer before parser at the same offset")
+    };
+    assert_eq!(
+        diagnostic.issue(),
+        &LexerIssue::Numeric(NumericIssue::MissingDigits {
+            component: NumericComponent::BasePrefix { base: 16 }
+        })
+    );
+    assert!(matches!(
+        parser.issue(),
+        ParseIssue::Declaration(DeclarationIssue::ExpectedValueEquals { .. })
+    ));
+    assert_eq!(a.code(), Some(diagnostic.issue().code()));
+    assert_eq!(b.code(), Some("parser.declaration.expected_value_equals"));
+    for d in &reports {
+        let span = d.location().unwrap();
+        assert_eq!((d.source(), span.source()), (id, id));
+        let range = span.span().range();
+        assert_eq!(&text[range.start() as usize..range.end() as usize], "0x");
+        assert_eq!(d.render().code, d.code());
+    }
+}
+
+#[test]
+fn ordered_projection_reports_keep_the_original_trees_and_ranges_after_analysis() {
+    let text = "class A; trait Z; trait B";
+    let id = SourceId::from_index(19);
+    let (reports, trees) = {
+        let mut store = SemanticStore::new();
+        let parsed = bound(text, id, &mut store);
+        let crate::core::TreeKind::PackageDef(package) =
+            &parsed.syntax.ast.get(parsed.syntax.root).kind
+        else {
+            panic!("expected package")
+        };
+        let trees = [package.stats[1], package.stats[2]];
+        let (file, reports) = parsed
+            .prepare_classes("Mixed.scala", &mut store, &mut Packages::new())
+            .into_parts();
+        assert_eq!(file.unwrap().classes().len(), 1);
+        (reports, trees)
+    };
+    assert_eq!(reports.len(), 2);
+    for ((d, tree), expected) in reports.iter().zip(trees).zip(["trait Z", "trait B"]) {
+        let PreparationDiagnostic::Declaration(report) = d else {
+            panic!("expected a typed omission")
+        };
+        assert_eq!(
+            report.error,
+            DeclarationError::Unsupported { source: id, tree }
+        );
+        let span = d.location().unwrap();
+        assert_eq!(
+            (d.source(), span.source(), d.code()),
+            (id, id, Some("declaration.unsupported"))
+        );
+        let range = span.span().range();
+        assert_eq!(
+            &text[range.start() as usize..range.end() as usize],
+            expected
+        );
+        assert_eq!(d.render().location, Some(span));
+    }
+}
