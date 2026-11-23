@@ -45,17 +45,23 @@ impl SourceTyper<'_> {
                 continue;
             }
             let module = self.source_module_class_of_object(object)?;
+            // The namer enters ordinary members, while completing the qualifier
+            // enters its export forwarders. Both must be visible to this site.
+            if !self.index.export_sites_for_owner(module).is_empty() {
+                self.completed_expression_symbol_info(module, journal)?;
+            }
             let members = self.synthetic_module_scope(module)?;
             let prefix =
                 self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
             for target in self.contextual_symbols(members) {
                 let entry = self.store.symbols.get(target);
                 if entry.visibility != Visibility::Public
-                    || entry.flags.contains(SymbolFlags::EXPORTED)
                     || !matches!(entry.kind, SymbolKind::Field | SymbolKind::Method)
                 {
                     continue;
                 }
+                let stable = entry.kind == SymbolKind::Field
+                    || matches!(entry.info, SymbolInfo::Complete(info) if self.store.export_target(target) == Some(info));
                 let contextual_flags = entry.flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT);
                 let evidence = ContextualRef {
                     symbol: target,
@@ -83,11 +89,11 @@ impl SourceTyper<'_> {
                     site.tree.index(),
                     journal,
                 )?;
-                let signature = if self.store.symbols.get(target).kind == SymbolKind::Method {
+                let signature = if stable {
+                    result
+                } else {
                     let source = self.widen_expression_type_journaled(result, journal, 0)?;
                     self.export_provider_signature(source, site.tree.index())?
-                } else {
-                    result
                 };
                 let decl = dotty_core::Symbol {
                     name,
@@ -251,14 +257,14 @@ impl SourceTyper<'_> {
             target,
             position,
         );
-        let body = if self.store.symbols.get(member).kind == SymbolKind::Method {
-            self.build_export_provider_body(method, rhs)?
-        } else {
+        let body = if entry.info == SymbolInfo::Complete(target) {
             ExportBody {
                 rhs,
                 type_params: vec![],
                 value_param_clauses: vec![],
             }
+        } else {
+            self.build_export_provider_body(method, rhs)?
         };
         let result = self.typed_arena.get(body.rhs).ty;
         let tpt = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)

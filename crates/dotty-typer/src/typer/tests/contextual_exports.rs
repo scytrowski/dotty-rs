@@ -1,3 +1,5 @@
+mod chained;
+
 use super::*;
 
 const LIBRARY: &str =
