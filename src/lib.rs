@@ -40,6 +40,9 @@ pub use class_header::{
     ClassHeaderBindings, ClassHeaderError, ClassHeaderFailure, try_complete_class_header,
 };
 
+mod class_header_phase;
+pub use class_header_phase::{ClassHeaderAttempt, ClassHeaderPhase};
+
 mod class_field_signatures;
 pub use class_field_signatures::{
     ClassFieldSignatureCompletion, ClassFieldSignatureError, try_complete_class_field_signatures,

@@ -254,3 +254,49 @@ fn selected_constructors_can_stop_or_continue_after_a_located_failure() {
         SymbolInfo::Complete(_)
     ));
 }
+
+#[test]
+fn completing_a_shared_base_wakes_both_siblings_once_in_observed_order() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let siblings = named(
+        4,
+        "class A(x: Int) extends Base(x); class B(y: Int) extends Base(y)",
+        &mut store,
+        &mut packages,
+    );
+    let base = named(7, "class Base(x: Int)", &mut store, &mut packages);
+    let sources = NamedClassSources::new([&siblings, &base], &store).unwrap();
+    let [a, b] = siblings.classes() else { panic!() };
+    let base = base.classes()[0].symbol;
+    let mut arena = AstArena::new();
+    let mut bindings = ClassHeaderBindings::default();
+    let mut phase = crate::ClassHeaderPhase::prepare(
+        &sources,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        &mut bindings,
+    );
+    for class in [b, a, b] {
+        let attempt = phase.attempt(class.symbol).unwrap();
+        assert_eq!(attempt.completion, SignatureCompletion::BlockedOn(base));
+        assert!(attempt.retry.is_empty());
+    }
+    assert_eq!(phase.attempt(base).unwrap().retry, [b.symbol, a.symbol]);
+    assert!(phase.attempt(base).unwrap().retry.is_empty());
+    for class in [a, b] {
+        assert!(matches!(
+            phase.attempt(class.symbol).unwrap().completion,
+            SignatureCompletion::Complete(_)
+        ));
+        assert!(phase.is_ready(class.symbol));
+    }
+    drop(phase);
+    for class in [a, b] {
+        let target = bindings.get(siblings.source(), class.parents[0]).unwrap();
+        assert_eq!(arena.get(target).position.unwrap().source(), siblings.source());
+    }
+}
