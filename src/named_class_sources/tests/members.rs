@@ -581,6 +581,8 @@ fn checked_bodies_keep_their_original_same_file_owners_after_reporting() {
     }
     let (_, work) = phase.finish_with_body_work();
     let mut arena = AstArena::new();
+    let mut bodies = crate::CheckedClassBodies::default();
+    assert!(bodies.get(b.symbol).is_none());
     for class in [b, a] {
         let (body, report) = work.check(
             class.symbol,
@@ -597,5 +599,22 @@ fn checked_bodies_keep_their_original_same_file_owners_after_reporting() {
             matches!(body, crate::CheckedClassBody::Complete(_)),
             class.symbol == a.symbol
         );
+        bodies.record(body).unwrap();
     }
+    assert!(matches!(
+        bodies.get(a.symbol),
+        Some(crate::CheckedClassBody::Complete(_))
+    ));
+    assert!(matches!(
+        bodies.get(b.symbol),
+        Some(crate::CheckedClassBody::Partial(_))
+    ));
+    assert_eq!(
+        bodies.record(crate::CheckedClassBody::Invalid(b.symbol)),
+        Err(crate::CheckedBodyError::Duplicate(b.symbol))
+    );
+    assert!(matches!(
+        bodies.get(b.symbol),
+        Some(crate::CheckedClassBody::Partial(_))
+    ));
 }
