@@ -85,6 +85,19 @@ impl ReportedTyperError {
         self.member
     }
 
+    /// Within the same analysis, identifies a repeated arity or argument failure
+    /// only when [`CallDiagnostic::identity`] can establish a safe key. Keep
+    /// both reports if this returns `None`; discard all keys after an edit.
+    pub fn call_identity(
+        &self,
+        definitions: &crate::core::Definitions,
+    ) -> Option<crate::CallErrorIdentity> {
+        match &self.failure {
+            Failure::Call(call) => call.identity(definitions),
+            Failure::Other { .. } => None,
+        }
+    }
+
     /// Stable category when the typer assigns one. Always inspect [`Self::error`]
     /// for the full payload, including for variants without a code.
     pub fn code(&self) -> Option<&'static str> {
@@ -353,6 +366,83 @@ mod tests {
         );
         assert!(
             matches!(ClassFieldSignatureError::InvalidClass(class.symbol).into_reported_error(|_|unreachable!()),Err(ClassFieldSignatureError::InvalidClass(s)) if s == class.symbol)
+        );
+    }
+
+    #[test]
+    fn retries_share_a_call_key_only_at_the_same_known_call_site() {
+        use crate::core::TreeKind;
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let source = SourceId::from_index(3);
+        let file = crate::parse_source(
+            source,
+            "class C { def f() = { value(1); value(1) } }",
+            Default::default(),
+        )
+        .unwrap()
+        .bind(&mut store.names)
+        .name("C.scala", &mut store, &mut Packages::new())
+        .unwrap()
+        .into_classes(&store)
+        .unwrap();
+        let c = &file.classes()[0];
+        let member = c.methods().next().unwrap().symbol;
+        let sites: Vec<_> = file
+            .ast()
+            .iter()
+            .filter(|(_, tree)| matches!(tree.kind, TreeKind::Apply(_)))
+            .map(|(id, _)| id.index())
+            .collect();
+        assert_eq!(sites.len(), 2);
+        let error = |tree_index| TyperError::ApplicationArityMismatch {
+            source,
+            tree_index,
+            actual: 1,
+            expected: 0,
+        };
+        let signature = crate::MemberSignatureError::Typing {
+            member,
+            declaration: crate::SourceDeclaration {
+                source,
+                class: c.symbol,
+                kind: crate::core::SymbolKind::Method,
+            },
+            error: error(sites[0]),
+        }
+        .into_reported_error(|_| Some(file.ast()))
+        .unwrap();
+        let body = |site| {
+            crate::ClassBodyError::Member {
+                class: c.symbol,
+                member: c.members[0],
+                error: error(site),
+            }
+            .into_reported_error(|_| Some(file.ast()))
+            .unwrap()
+        };
+        let first = signature.call_identity(&defs).unwrap();
+        assert_eq!(body(sites[0]).call_identity(&defs), Some(first));
+        assert_ne!(body(sites[1]).call_identity(&defs).unwrap(), first);
+        assert_eq!(
+            ReportedTyperError::from_typer(error(sites[0]), |_| Some(file.ast()))
+                .call_identity(&defs),
+            None
+        );
+        assert_eq!(
+            ReportedTyperError::from_class(error(sites[0]), c.symbol, Some(member), |_| None)
+                .call_identity(&defs),
+            None
+        );
+        assert_eq!(
+            ReportedTyperError::from_class(
+                TyperError::UnknownSymbol { symbol: member },
+                c.symbol,
+                Some(member),
+                |_| unreachable!()
+            )
+            .call_identity(&defs),
+            None
         );
     }
 }
