@@ -34,3 +34,52 @@ fn named_inherited_export_preserves_receiver_and_original_declaration() {
     let call = client_result(&mut typer, &parsed, "directSearch").unwrap();
     assert_eq!(reference(&typer, evidence(&typer, call)), original);
 }
+
+const BAD: &str =
+    include_str!("../../../../tests/fixtures/contextual-arguments/InheritedErrors.scala");
+
+fn with_client(client: &str) -> NamedTestUnit {
+    parse_and_name(&format!(
+        "{LIB}\n{}",
+        client.strip_prefix("package inheritexport\n").unwrap()
+    ))
+}
+
+#[test]
+fn an_exported_given_has_the_priority_of_its_public_owner() {
+    let (parsed, mut store, packages, defs, index, source) = with_client(BAD);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (method, expected) in [("all", ("Api", "key")), ("rankedControl", ("High", "high"))] {
+        let call = client_result(&mut typer, &parsed, method).unwrap();
+        assert_eq!(
+            qualified_name(&typer, reference(&typer, evidence(&typer, call))),
+            expected
+        );
+    }
+    for (method, expected) in [
+        ("clash", [("Api", "key"), ("Rival", "other")]),
+        ("ranked", [("Ranked", "high"), ("Ranked", "low")]),
+    ] {
+        let TyperError::AmbiguousContextualArgument {
+            candidate_names, ..
+        } = rejected_call(&mut typer, &parsed, method)
+        else {
+            panic!("expected ambiguity at {method}")
+        };
+        let mut names: Vec<_> = candidate_names
+            .iter()
+            .map(|(owner, name)| {
+                (
+                    typer
+                        .store
+                        .names
+                        .resolve(owner.unwrap().text())
+                        .trim_end_matches('$'),
+                    typer.store.names.resolve(name.text()),
+                )
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, expected);
+    }
+}
