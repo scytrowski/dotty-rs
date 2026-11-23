@@ -263,3 +263,88 @@ fn terminal_member_causes_distinguish_cycle_dependents_failure_and_pending() {
     assert_eq!(causes[3].1, SignatureBlockage::Failed(bad));
     assert_eq!(causes[4].1, SignatureBlockage::Pending(later));
 }
+
+#[test]
+fn signature_rejection_and_body_rejection_have_distinct_owners_and_ranges() {
+    use crate::{MemberSignatureFailure, MemberSignaturePhase};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let text = "class C { def value(): Int = 7; val broken = value(1); def wrong(): Int = false; def good(): Int = value() }";
+    let file = named(13, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let class = &file.classes()[0];
+    let broken = class.fields().next().unwrap();
+    let wrong = class.methods().nth(1).unwrap();
+    let good = class.methods().nth(2).unwrap();
+    let selection = sources.member_signatures([class.symbol], &store).unwrap();
+    let mut phase = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    for &member in selection.members() {
+        let _ = phase.attempt(member);
+    }
+    let signatures = phase.finish();
+    assert!(signatures.ready.contains(&wrong.symbol));
+    let [MemberSignatureFailure::Typing { report, .. }] = signatures.failures.as_slice() else {
+        panic!()
+    };
+    let site = |report: &crate::ReportedTyperError| {
+        let span = report.location().unwrap();
+        assert_eq!(span.source(), file.source());
+        let r = span.span().range();
+        &text[r.start() as usize..r.end() as usize]
+    };
+    assert_eq!(
+        (report.member(), site(report)),
+        (Some(broken.symbol), "value(1)")
+    );
+    let mut arena = AstArena::new();
+    let (body, report) = sources
+        .check_class_body(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    let reports: Vec<_> = report
+        .errors
+        .into_iter()
+        .map(|e| e.into_reported_error(|_| Some(file.ast())).unwrap())
+        .collect();
+    let [retry, body_error] = reports.as_slice() else {
+        panic!()
+    };
+    assert_eq!(
+        (retry.member(), site(retry)),
+        (Some(broken.symbol), "value(1)")
+    );
+    assert_eq!(
+        (body_error.member(), site(body_error)),
+        (Some(wrong.symbol), "false")
+    );
+    assert!(matches!(
+        body_error.error(),
+        TyperError::ExpectedExpressionTypeMismatch { .. }
+    ));
+    let calls = file.navigation().unwrap();
+    let target = calls
+        .definition_at_with_bindings(
+            text.rfind("value()").unwrap() as u32,
+            file.ast(),
+            &arena,
+            &store,
+            |_| body.bindings(),
+            |_| Some(calls),
+        )
+        .unwrap();
+    assert_eq!(target.name.start() as usize, text.find("value()").unwrap());
+    assert!(
+        body.bindings()
+            .unwrap()
+            .get(file.source(), good.tree)
+            .is_some()
+    );
+}
