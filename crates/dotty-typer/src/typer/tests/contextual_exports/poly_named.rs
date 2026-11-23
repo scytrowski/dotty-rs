@@ -53,3 +53,49 @@ fn full_named_using_infers_from_values_and_reports_binding_errors() {
         );
     }
 }
+
+#[test]
+fn reordered_named_values_constrain_their_own_formals_and_execute_in_written_order() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, params, types) in [
+        ("reversed", ["b", "f"], vec![defs.int]),
+        ("two", ["b", "c"], vec![defs.int, defs.boolean]),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        assert_eq!(result_arguments(&t, tree), types);
+        let names: Vec<_> = call(&t, tree)
+            .args
+            .iter()
+            .map(|&arg| qualified_name(&t, reference(&t, arg)).1)
+            .collect();
+        assert_eq!(names, params);
+    }
+    client_result(&mut t, &parsed, "effects").unwrap();
+    let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, "effects");
+    let TreeKind::Block(block) = &t
+        .typed_ast()
+        .get(t.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!("lifted effects")
+    };
+    let [boolean, integer] = block.stats[..] else {
+        panic!("two strict initializers")
+    };
+    for (stat, name) in [(boolean, "boolean"), (integer, "integer")] {
+        let TreeKind::ValDef(v) = &t.typed_ast().get(stat).kind else {
+            panic!()
+        };
+        let TreeKind::Apply(a) = &t.typed_ast().get(v.rhs.unwrap()).kind else {
+            panic!()
+        };
+        assert_eq!(qualified_name(&t, reference(&t, a.function)).1, name);
+    }
+    for (&arg, stat) in call(&t, block.expr).args.iter().zip([integer, boolean]) {
+        assert_eq!(
+            Some(reference(&t, arg)),
+            t.typed_index.synthetic_definition_symbol(stat)
+        );
+    }
+}

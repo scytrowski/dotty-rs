@@ -848,42 +848,30 @@ impl SourceTyper<'_> {
                     tree_index,
                 )?;
             }
-            if let Some(slots) = &named
-                && slots
-                    .iter()
-                    .enumerate()
-                    .any(|(ordinal, slot)| slot.as_ref().is_none_or(|a| a.written != ordinal))
-            {
-                return Err(TyperError::UsingApplicationDeferred {
-                    source: self.source,
-                    tree_index,
-                });
-            }
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
-                let expected_parameters = match self.store.types.try_get(poly.result) {
-                    Some(Type::Method(method)) => method
-                        .params
-                        .iter()
-                        .map(|parameter| match self.store.types.try_get(parameter.ty) {
-                            Some(Type::ByName { result }) => *result,
-                            _ => parameter.ty,
-                        })
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
-                let mut arguments = Vec::with_capacity(argument_trees.len());
-                for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
-                    let argument_tree = named
-                        .as_ref()
-                        .and_then(|slots| slots[argument_index].as_ref())
-                        .map_or(argument_tree, |a| &a.value);
-                    let is_lambda = self.is_function_literal_value(*argument_tree);
+                let mut operands: Vec<_> = argument_trees.iter().copied().enumerate().collect();
+                if let Some(slots) = &named {
+                    for (ordinal, slot) in slots.iter().enumerate() {
+                        if let Some(arg) = slot {
+                            operands[arg.written] = (ordinal, arg.value);
+                        }
+                    }
+                }
+                let mut arguments = Vec::with_capacity(operands.len());
+                for (ordinal, argument_tree) in operands {
+                    let is_lambda = self.is_function_literal_value(argument_tree);
                     let typed = if is_lambda {
-                        if let Some(expected) = expected_parameters.get(argument_index).copied() {
+                        if let Some(Type::Method(method)) = self.store.types.try_get(poly.result)
+                            && let Some(param) = method.params.get(ordinal)
+                        {
+                            let expected = match self.store.types.try_get(param.ty) {
+                                Some(Type::ByName { result }) => *result,
+                                _ => param.ty,
+                            };
                             self.type_value_expression_expected_with_poly_binder(
-                                *argument_tree,
+                                argument_tree,
                                 context,
                                 expected,
                                 Some(callable),
@@ -892,7 +880,7 @@ impl SourceTyper<'_> {
                             )?
                         } else {
                             self.type_value_expression_inner(
-                                *argument_tree,
+                                argument_tree,
                                 context,
                                 info_journal,
                                 new_mappings,
@@ -900,7 +888,7 @@ impl SourceTyper<'_> {
                         }
                     } else {
                         self.type_value_expression_inner(
-                            *argument_tree,
+                            argument_tree,
                             context,
                             info_journal,
                             new_mappings,
@@ -946,6 +934,7 @@ impl SourceTyper<'_> {
                     tree_index,
                     unused_covariant_parameter,
                 },
+                named.as_deref(),
                 copy_defaults.as_deref().unwrap_or_default(),
                 info_journal,
             )?;

@@ -1,6 +1,7 @@
 //! Shared generic argument constraint collection and bound validation.
 
 use super::super::*;
+use super::named::NamedArgument;
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct InferenceLocation {
@@ -249,12 +250,13 @@ impl SourceTyper<'_> {
         request: PolyApplicationInference<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        self.infer_poly_application_with_defaults(request, &[], info_journal)
+        self.infer_poly_application_with_defaults(request, None, &[], info_journal)
     }
 
-    pub(in crate::typer) fn infer_poly_application_with_defaults(
+    pub(super) fn infer_poly_application_with_defaults(
         &mut self,
         request: PolyApplicationInference<'_>,
+        named: Option<&[Option<NamedArgument>]>,
         defaults: &[TypeId],
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
@@ -300,17 +302,15 @@ impl SourceTyper<'_> {
         }
 
         let mut inferred = vec![None; poly.params.len()];
-        for (argument_index, (parameter, argument)) in method
-            .params
-            .iter()
-            .zip(
-                arguments
-                    .iter()
-                    .map(|a| a.widened_type)
-                    .chain(defaults.iter().copied()),
-            )
-            .enumerate()
-        {
+        for (ordinal, parameter) in method.params.iter().enumerate() {
+            let argument_index = named
+                .and_then(|slots| slots[ordinal].as_ref())
+                .map_or(ordinal, |a| a.written);
+            let argument = if let Some(arg) = arguments.get(argument_index) {
+                arg.widened_type
+            } else {
+                defaults[ordinal - arguments.len()]
+            };
             self.infer_type_constraints(
                 parameter.ty,
                 argument,
