@@ -65,3 +65,54 @@ fn renamed_reexport_delegates_through_the_intermediate_stable_method() {
         val_symbol(&parsed, typer.store(), &index, source, "ints").0
     );
 }
+
+const BAD: &str =
+    include_str!("../../../../tests/fixtures/contextual-arguments/ChainedErrors.scala");
+
+fn errors_unit() -> NamedTestUnit {
+    parse_and_name(&format!(
+        "{CHAIN}\n{}",
+        BAD.strip_prefix("package chain\n").unwrap()
+    ))
+}
+
+#[test]
+fn given_search_uses_the_public_reexport_on_the_first_lookup() {
+    for (method, name) in [("inside", "first"), ("mono", "first"), ("all", "flags")] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(CHAIN);
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let call = client_result(&mut typer, &parsed, method).unwrap();
+        let selected = reference(&typer, evidence(&typer, call));
+        assert_eq!(qualified_name(&typer, selected), ("Public", name));
+        let target = stable_delegate(&mut typer, selected);
+        assert_eq!(qualified_name(&typer, target), ("Middle", name));
+    }
+}
+
+#[test]
+fn competing_import_reports_the_public_reexport_at_the_call() {
+    let (parsed, mut store, packages, defs, index, source) = errors_unit();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let error = rejected_call(&mut typer, &parsed, "clash");
+    let TyperError::AmbiguousContextualArgument {
+        candidate_names, ..
+    } = error
+    else {
+        panic!("{error:?}")
+    };
+    let mut names: Vec<_> = candidate_names
+        .iter()
+        .map(|(owner, name)| {
+            (
+                typer
+                    .store
+                    .names
+                    .resolve(owner.unwrap().text())
+                    .trim_end_matches('$'),
+                typer.store.names.resolve(name.text()),
+            )
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, [("Public", "first"), ("Rival", "other")]);
+}
