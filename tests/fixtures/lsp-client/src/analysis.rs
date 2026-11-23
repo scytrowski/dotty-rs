@@ -1,12 +1,11 @@
 //! Fresh semantic session for one set of open document versions.
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
     SymbolId, TextRange, Typed,
 };
-use dotty::source_declarations::ClassMember;
 use dotty::typer::TyperDiagnostic;
 use dotty::{
     ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, MemberSignatureError,
@@ -209,19 +208,13 @@ fn analyze_sources(
             queue.extend(attempt.retry);
         }
     }
-    let signatures = signatures.finish();
-    let mut signature_calls = HashSet::new();
+    let (signatures, work) = signatures.finish_with_body_work();
     for failure in signatures.failures {
         let (file, problem) = match failure {
             MemberSignatureFailure::Typing {
                 declaration,
                 report,
-            } => {
-                if let Some(key) = report.call_identity(&defs) {
-                    signature_calls.insert(key);
-                }
-                typing_problem(declaration.source, *report)
-            }
+            } => typing_problem(declaration.source, *report),
             MemberSignatureFailure::InvalidMember(id) => {
                 let owner = sources
                     .declarations()
@@ -236,15 +229,11 @@ fn analyze_sources(
         };
         results.get_mut(&file).unwrap().problems.push(problem);
     }
-    let blocked_members: HashSet<_> = signatures.blockages.iter().map(|(id, _)| *id).collect();
     report_blockages(signatures.blockages, sources.declarations(), store, results);
     let mut bodies = HashMap::new();
     for symbol in headers.ready {
-        let (file, c) = sources.class(symbol).unwrap();
-        let source = file.source();
-        let (body, report) = sources
-            .check_class_body(c.symbol, store, defs, packages, &mut arena, NoResolver)
-            .into_parts();
+        let source = sources.class(symbol).unwrap().0.source();
+        let (body, report) = work.check(symbol, store, defs, packages, &mut arena, NoResolver);
         for (source, diagnostic) in report.diagnostics {
             results
                 .get_mut(&source)
@@ -253,29 +242,13 @@ fn analyze_sources(
                 .push(Problem::TyperWarning { source, diagnostic });
         }
         for error in report.errors {
-            if let ClassBodyError::Member {
-                member: ClassMember::Method(d) | ClassMember::Field(d),
-                ..
-            } = &error
-                && blocked_members.contains(&d.symbol)
-            {
-                continue;
-            }
             let (file, problem) = match error.into_reported_error(ast_for) {
-                Ok(report) => {
-                    if report
-                        .call_identity(&defs)
-                        .is_some_and(|key| signature_calls.contains(&key))
-                    {
-                        continue;
-                    }
-                    typing_problem(source, report)
-                }
+                Ok(report) => typing_problem(source, report),
                 Err(invalid) => (source, Problem::Body(invalid)),
             };
             results.get_mut(&file).unwrap().problems.push(problem);
         }
-        bodies.insert(c.symbol, body);
+        bodies.insert(symbol, body);
     }
     for u in sources.files() {
         let source = u.source();

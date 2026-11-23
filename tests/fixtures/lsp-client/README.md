@@ -24,8 +24,9 @@ report one error at `provider.value(1)`. Editing it to `provider.value()`
 clears the diagnostic. The fixture uses
 `ReportedTyperError` for both call and ordinary typing failures. The member signature report supplies the enclosing class, member and captured
 byte range. Body errors provide the same context through `into_reported_error`.
-Within one analysis the fixture suppresses a body retry when the signature
-already produced the same `CallErrorIdentity`. It renders the message at
+The fixture calls `finish_with_body_work` and checks signature-ready members.
+A rejected signature supplies its own marker. Independent checked methods
+retain their navigation bindings while a dependency is broken. The fixture renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 

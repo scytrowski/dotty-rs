@@ -2418,6 +2418,15 @@ binary dependencies can pass the same mutable `SymbolResolver` to
 For example, the external client uses the JDK classpath resolver to check a
 string literal against a source method parameter.
 
+A caller driving `MemberSignaturePhase` can finish with
+`finish_with_body_work` and keep both the signature report and a
+`ClassBodyWork` for the selected classes. Its `check` visits ready body
+declarations in source order. Rejected, blocked and remaining signatures
+keep their reasons in the snapshot. Skipping even one declaration makes the
+body partial, including when every attempted body succeeds. Partial bindings
+support navigation. Only a complete body can be passed to the JVM planner.
+Rebuild the snapshot after further signature attempts or source edits.
+
 After signature completion, `dotty::check_class_body` uses the same resolver
 to check every member in declaration order. Each failed method or field
 initializer contributes its first error and rolls back its own typing attempt.
