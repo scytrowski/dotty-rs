@@ -1072,9 +1072,14 @@ impl SourceTyper<'_> {
         for (argument_index, (argument_tree, parameter)) in
             argument_trees.iter().zip(&method.params).enumerate()
         {
-            let expected_type = match self.store.types.try_get(parameter.ty) {
+            let formal_ty = if method.kind == MethodKind::Plain {
+                parameter.ty
+            } else {
+                self.contextual_parameter_type(callable, parameter.ty, &arguments, tree_index)?
+            };
+            let expected_type = match self.store.types.try_get(formal_ty) {
                 Some(Type::ByName { result }) => *result,
-                _ => parameter.ty,
+                _ => formal_ty,
             };
             let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
                 let typed_argument = typed_arguments[argument_index];

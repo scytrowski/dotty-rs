@@ -355,9 +355,9 @@ impl SourceTyper<'_> {
                             .iter()
                             .zip(&app.args)
                             .map(|(&copy, &arg)| (copy == arg).then_some(arg));
-                        self.instantiate_contextual_result(
+                        self.instantiate_contextual_component(
                             signature,
-                            previous.result,
+                            MethodComponent::Result(previous.result),
                             paths,
                             tree_index,
                         )?
