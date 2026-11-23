@@ -628,6 +628,68 @@ fn method_rhs(unit: &NamedUnit, store: &SemanticStore, name: &str) -> (SymbolId,
         .unwrap_or_else(|| panic!("source should define method {name}"))
 }
 
+fn methods_classpath(label: &str) -> TemporaryDirectory {
+    let root = TemporaryDirectory::new(label);
+    write_stub_class(root.path(), "java/lang/Object", None, 0x0021);
+    let package = root.path().join("me/cytrowski/tastyfixtures/semantic");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("Methods.tasty"),
+        include_bytes!("../crates/dotty-tasty-unpickler/tests/fixtures/semantic/Methods.tasty"),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn tasty_empty_clause_method_requires_parentheses_in_an_int_context() {
+    let root = methods_classpath("empty-clause");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "import me.cytrowski.tastyfixtures.semantic.Methods
+         def omitted(m: Methods): Int = m.empty
+         def called(m: Methods): Int = m.empty()",
+        SourceId::from_index(0),
+        &mut store,
+        &mut packages,
+    );
+    let resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(root.path()),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "called");
+    let context = typer.expression_context_for(method).unwrap();
+    let call = typer
+        .type_expression_expected(rhs, context, definitions.int)
+        .unwrap();
+    assert!(matches!(
+        typer.typed_ast().get(call).kind,
+        TreeKind::Apply(_)
+    ));
+
+    let (method, rhs) = method_rhs(&unit, typer.store(), "omitted");
+    let context = typer.expression_context_for(method).unwrap();
+    let error = typer
+        .type_expression_expected(rhs, context, definitions.int)
+        .unwrap_err();
+    assert!(matches!(error,
+        TyperError::ExpectedExpressionConformanceUnsupported { source, tree_index, expected, .. }
+            if source == unit.source && tree_index == rhs.index() && expected == definitions.int
+    ));
+}
+
 #[derive(Default)]
 struct ResolutionLog {
     packages: Vec<(Vec<String>, SymbolId)>,

@@ -7652,7 +7652,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 info,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
+            let flags = self.store.symbols.get(symbol).flags | method.semantic_flags;
             self.store.symbols.get_mut(symbol).flags = flags;
             if endpoints.contains(&method.offset) {
                 entries.insert(method.offset, (symbol, info, method));
@@ -9147,7 +9147,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Visibility::Package(owner)
         };
 
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = if matches!(origin, SymbolOrigin::Classfile(_)) {
+            SymbolFlags::JAVA_DEFINED
+        } else {
+            SymbolFlags::EMPTY
+        };
         if flags.is_static() {
             symbol_flags = symbol_flags | SymbolFlags::STATIC;
         }
@@ -16905,7 +16909,7 @@ mod tests {
         );
         assert_eq!(
             loader.store.symbols.get(method_symbol).flags,
-            SymbolFlags::JAVA_DEFINED | SymbolFlags::FINAL
+            SymbolFlags::FINAL
         );
 
         let Type::Poly(poly) = loader.store.types.get(method_type_id) else {

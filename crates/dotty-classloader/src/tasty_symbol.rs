@@ -324,7 +324,7 @@ pub(crate) struct DecodedTastyMethod {
     pub default_for: Option<(usize, usize)>,
     pub name: String,
     pub flags: MethodAccessFlags,
-    pub contextual_flags: SymbolFlags,
+    pub semantic_flags: SymbolFlags,
     /// Wire clause boundaries for contextual methods and their linked getters.
     pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
@@ -3071,6 +3071,15 @@ fn decode_members(
     let mut methods = Vec::new();
     let address_index = file.ast_address_index()?;
 
+    let source_flags = if file
+        .attributes()?
+        .is_some_and(|attrs| attrs.contains(&dotty_tasty::tasty::Attribute::Java))
+    {
+        SymbolFlags::JAVA_DEFINED
+    } else {
+        SymbolFlags::EMPTY
+    };
+
     let mut incomplete_methods = HashSet::new();
     let definitions = stats.iter().filter_map(|tree| match tree {
         RawTree::LengthNode(node) if node.tag == DEFDEF_TAG => Some(node),
@@ -3290,12 +3299,13 @@ fn decode_members(
                     default_for,
                     name: method_name,
                     flags: decode_method_flags(&body.tail),
-                    contextual_flags: symbol_flags(&body.tail).intersection(
-                        SymbolFlags::GIVEN
-                            | SymbolFlags::IMPLICIT
-                            | SymbolFlags::INLINE
-                            | SymbolFlags::TRANSPARENT,
-                    ),
+                    semantic_flags: source_flags
+                        | symbol_flags(&body.tail).intersection(
+                            SymbolFlags::GIVEN
+                                | SymbolFlags::IMPLICIT
+                                | SymbolFlags::INLINE
+                                | SymbolFlags::TRANSPARENT,
+                        ),
                     term_clauses: preserve_clauses.then_some(clauses),
                     singleton_result_parameter,
                     type_parameters,
@@ -5941,6 +5951,32 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn java_attribute_preserves_java_method_adaptation_for_tasty_input() {
+        use dotty_tasty::tasty::{Attribute, EncodedSection, TastyFileBuilder};
+
+        let bytes = unpickler_fixture_bytes("Methods.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let attributes = file.section(StandardSection::Attributes).unwrap();
+        let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+        for section in file.sections().iter() {
+            let section = if section.name == attributes.name {
+                EncodedSection::attributes(section.name, &[Attribute::Java]).unwrap()
+            } else {
+                EncodedSection::raw(section.name, section.payload)
+            };
+            builder.push_section(section);
+        }
+        let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");
+        let decoded = decode(&builder.encode().unwrap(), &owner).unwrap();
+        let empty = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "empty")
+            .unwrap();
+        assert!(empty.semantic_flags.contains(SymbolFlags::JAVA_DEFINED));
     }
 
     fn with_header_version(mut bytes: Vec<u8>, major: u8, minor: u8, experimental: u8) -> Vec<u8> {
