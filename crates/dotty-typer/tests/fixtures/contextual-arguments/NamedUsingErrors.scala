@@ -5,3 +5,4 @@ class Errors:
   def missing(c: Client, t: Tag): Int = c.pick(using flag = true, text = t)
   def ambiguous(c: Client)(using i: Int, j: Int, t: Tag): Int = c.pick(using flag = true)
   def misplaced(c: Client, t: Tag): Int = c.pick(using text = t, true, n = 7)
+  def wrongPath(c: Client, p: Family, q: Family)(w: q.Out): p.Out = c.read(using v = w, f = p)

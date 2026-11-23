@@ -1,4 +1,5 @@
 package namedctx
+trait Family { type Out }
 trait Tag
 class Client:
   def pick(using n: Int, flag: Boolean, text: Tag): Int = n
@@ -16,3 +17,6 @@ class Client:
   def useDefault(): Int = fallback(using flag = true)
   def preferGiven(using i: Int): Int = fallback(using flag = true)
   def overrideDefault(using i: Int): Int = fallback(using flag = true, n = i)
+  def read(using f: Family, v: f.Out): f.Out = v
+  def dep(using p: Family, w: p.Out): p.Out = read(using v = w, f = p)
+  def omitFamily(using p: Family, w: p.Out): p.Out = read(using v = w)

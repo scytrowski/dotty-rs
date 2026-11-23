@@ -13,9 +13,12 @@ impl SourceTyper<'_> {
         trees: &[TreeId<Untyped>],
     ) -> bool {
         kind == ApplyKind::Using
-            && trees
-                .iter()
-                .any(|&t| matches!(self.arena.get(t).kind, TreeKind::NamedArg(_)))
+            && trees.iter().any(|&t| {
+                matches!(
+                    self.arena.try_get(t).map(|t| &t.kind),
+                    Some(TreeKind::NamedArg(_))
+                )
+            })
     }
 
     pub(super) fn named_using_arguments(
@@ -37,7 +40,14 @@ impl SourceTyper<'_> {
         let mut slots: Vec<_> = (0..method.params.len()).map(|_| None).collect();
         let mut next_unfilled = 0;
         for (written, &tree) in trees.iter().enumerate() {
-            let (ordinal, value) = if let TreeKind::NamedArg(arg) = self.arena.get(tree).kind {
+            let node = self
+                .arena
+                .try_get(tree)
+                .ok_or(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                })?;
+            let (ordinal, value) = if let TreeKind::NamedArg(arg) = node.kind {
                 let ordinal = ordinals
                     .get(&arg.name)
                     .ok_or(TyperError::UnknownNamedArgument {
@@ -85,15 +95,20 @@ impl SourceTyper<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn order_named_operands(
         &mut self,
-        function: TreeId<Typed>,
+        call: TreeId<Typed>,
         slots: &[Option<NamedArgument>],
         method: &MethodType,
-        arguments: &mut [TreeId<Typed>],
         shared: &mut Vec<TreeId<Typed>>,
         context: ExpressionContext,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<TreeId<Typed>, TyperError> {
+    ) -> Result<(), TyperError> {
+        let TreeKind::Apply(mut app) = self.typed_arena.get(call).kind.clone() else {
+            return Err(TyperError::UsingApplicationDeferred {
+                source: self.source,
+                tree_index,
+            });
+        };
         let mut written: Vec<_> = slots
             .iter()
             .enumerate()
@@ -106,8 +121,8 @@ impl SourceTyper<'_> {
                 self.store.types.get(method.params[ordinal].ty),
                 Type::ByName { .. }
             ) {
-                arguments[ordinal] = self.share_default_operand(
-                    arguments[ordinal],
+                app.args[ordinal] = self.share_strict_operand(
+                    app.args[ordinal],
                     &mut initializers,
                     context,
                     journal,
@@ -115,11 +130,13 @@ impl SourceTyper<'_> {
             }
         }
         if initializers.is_empty() {
-            return Ok(function);
+            return Ok(());
         }
-        let target = self.lift_named_callee(function, shared, context, tree_index, 0, journal)?;
+        app.function =
+            self.lift_named_callee(app.function, shared, context, tree_index, 0, journal)?;
         shared.extend(initializers);
-        Ok(target)
+        self.typed_arena.get_mut(call).kind = TreeKind::Apply(app);
+        Ok(())
     }
 
     // The receiver and already-applied strict clauses execute before this clause.
@@ -143,7 +160,7 @@ impl SourceTyper<'_> {
         let kind = match node.kind {
             TreeKind::Ident(_) => return Ok(tree),
             TreeKind::Select(mut s) => {
-                let receiver = self.share_default_operand(s.qualifier, stats, context, journal)?;
+                let receiver = self.share_strict_operand(s.qualifier, stats, context, journal)?;
                 if receiver == s.qualifier {
                     return Ok(tree);
                 }
@@ -198,7 +215,7 @@ impl SourceTyper<'_> {
                 )?;
                 for (arg, p) in a.args.iter_mut().zip(previous.params) {
                     if !matches!(self.store.types.get(p.ty), Type::ByName { .. }) {
-                        *arg = self.share_default_operand(*arg, stats, context, journal)?;
+                        *arg = self.share_strict_operand(*arg, stats, context, journal)?;
                     }
                 }
                 TreeKind::Apply(a)

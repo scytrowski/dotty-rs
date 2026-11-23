@@ -191,3 +191,58 @@ fn default_getter_warns_only_when_it_shadows_unique_evidence() {
         }
     }
 }
+
+#[test]
+fn dependent_named_arguments_use_the_chosen_path_and_report_the_wrong_rhs() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for site in ["dep", "omitFamily"] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let [family, witness] = args(&t, tree) else {
+            panic!()
+        };
+        let family = reference(&t, *family);
+        assert_eq!(qualified_name(&t, family), (site, "p"));
+        assert_eq!(qualified_name(&t, reference(&t, *witness)), (site, "w"));
+        let Type::TypeRef { prefix, .. } = t.store.types.get(t.typed_ast().get(tree).ty) else {
+            panic!()
+        };
+        assert_eq!(t.store.types.get(*prefix).reference_symbol(), Some(family));
+    }
+    let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, "wrongPath");
+    let TreeKind::Apply(a) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let TreeKind::NamedArg(value) = &parsed.ast.get(a.args[0]).kind else {
+        panic!()
+    };
+    let checkpoint = t.store.checkpoint();
+    for _ in 0..2 {
+        let error = client_result(&mut t, &parsed, "wrongPath").unwrap_err();
+        assert!(
+            matches!(error,TyperError::ApplicationArgumentTypeMismatch{tree_index,argument_index:1,..} if tree_index==value.arg.index()),
+            "{error:?}"
+        );
+        assert_eq!(t.store.checkpoint(), checkpoint);
+    }
+}
+
+#[test]
+fn lifting_a_field_preserves_the_original_singleton_path() {
+    let code = "trait Family { type Out }
+        class C(val p: Family) {
+          def read(using f: Family, v: f.Out): f.Out = v
+          def run(w: p.Out): p.Out = read(using v = w, f = p)
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(code);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut t, &parsed, "run").unwrap();
+    let result = t.typed_ast().get(call).ty;
+    let Type::TypeRef { prefix, .. } = t.store.types.get(result) else {
+        panic!()
+    };
+    let p = t.store.types.get(*prefix).reference_symbol().unwrap();
+    assert_eq!(qualified_name(&t, p), ("C", "p"));
+    let temp = reference(&t, args(&t, call)[0]);
+    assert_eq!(t.store.symbols.info(temp), &SymbolInfo::Complete(*prefix));
+}

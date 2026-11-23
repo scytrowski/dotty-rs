@@ -296,7 +296,7 @@ impl SourceTyper<'_> {
         let mut getter = match original.kind {
             TreeKind::Select(sel) => {
                 let receiver =
-                    self.share_default_operand(sel.qualifier, stats, context, journal)?;
+                    self.share_strict_operand(sel.qualifier, stats, context, journal)?;
                 let prefix = self.typed_arena.get(receiver).ty;
                 let getter_type = self.store.types.alloc(Type::term_ref(prefix, call.getter));
                 if receiver != sel.qualifier {
@@ -385,7 +385,7 @@ impl SourceTyper<'_> {
                             if matches!(self.store.types.get(param.ty), Type::ByName { .. }) {
                                 arg
                             } else {
-                                self.share_default_operand(arg, stats, context, journal)?
+                                self.share_strict_operand(arg, stats, context, journal)?
                             },
                         );
                     }
@@ -477,7 +477,7 @@ impl SourceTyper<'_> {
         Ok(true)
     }
 
-    pub(in crate::typer) fn share_default_operand(
+    pub(in crate::typer) fn share_strict_operand(
         &mut self,
         tree: TreeId<Typed>,
         stats: &mut Vec<TreeId<Typed>>,
@@ -505,7 +505,13 @@ impl SourceTyper<'_> {
             }
         }
         let position = node.position;
-        let value_type = self.widen_expression_type_journaled(ty, journal, 0)?;
+        // A temporary for a stable field aliases that very path. Later formals
+        // may refer to its member types even when the field access must be lifted.
+        let value_type = if self.is_stable_selection_prefix(ty)? {
+            ty
+        } else {
+            self.widen_expression_type_journaled(ty, journal, 0)?
+        };
         let name = dotty_core::TermName::new(self.store.names.intern("defaultArg$"));
         let symbol = self.store.symbols.alloc(dotty_core::Symbol {
             name: *name.as_name(),

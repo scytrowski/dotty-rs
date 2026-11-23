@@ -1210,7 +1210,11 @@ impl SourceTyper<'_> {
                             TyperError::argument_type_mismatch(
                                 self.store,
                                 self.source,
-                                tree_index,
+                                if slot.is_some() {
+                                    argument_tree.index()
+                                } else {
+                                    tree_index
+                                },
                                 argument_index,
                                 actual,
                                 expected_type,
@@ -1232,23 +1236,6 @@ impl SourceTyper<'_> {
                 self.record_typed_child(argument_trees[written], argument, new_mappings)?;
             }
             arguments.push(argument);
-        }
-        if let Some(slots) = &named
-            && slots
-                .iter()
-                .enumerate()
-                .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
-        {
-            function = self.order_named_operands(
-                function,
-                slots,
-                &method,
-                &mut arguments,
-                &mut shared,
-                context,
-                tree_index,
-                info_journal,
-            )?;
         }
         arguments.extend(defaults);
         if application_kind == ApplyKind::Regular
@@ -1274,6 +1261,24 @@ impl SourceTyper<'_> {
                 position,
                 tree_index,
             )?;
+            // Compute dependent result paths from the original operands before
+            // introducing temporaries solely for evaluation order.
+            if let Some(slots) = &named
+                && slots
+                    .iter()
+                    .enumerate()
+                    .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
+            {
+                self.order_named_operands(
+                    call,
+                    slots,
+                    &method,
+                    &mut shared,
+                    context,
+                    tree_index,
+                    info_journal,
+                )?;
+            }
             return Ok(self.bind_default_operands(shared, call, position));
         }
         let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
