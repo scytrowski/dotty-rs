@@ -955,7 +955,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
     let seeds = (
         SourceId::from_index(6),
         "Seeds.scala",
-        "class Seeds { val seed = 40 }",
+        "class Seeds { val seed = 40 }; class OtherSeeds { val seed = 7 }",
     );
     for files in [[consumer, provider, seeds], [seeds, provider, consumer]] {
         let mut store = SemanticStore::new();
@@ -976,6 +976,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
         let answer = caller.classes()[0].fields().next().unwrap().symbol;
         let value = units[1].method_symbol();
         let seed = leaves.classes()[0].fields().next().unwrap().symbol;
+        assert_ne!(seed, leaves.classes()[1].fields().next().unwrap().symbol);
         let mut edges = Vec::new();
         let headers = super::complete_signatures_in_order(
             &units,

@@ -480,8 +480,7 @@ mod tests {
 
     #[test]
     fn constructor_failure_keeps_an_independent_class_navigable() {
-        let text =
-            "class Bad(x: Missing); class Good { def get(): Int = 7; def use(): Int = get() }";
+        let text = "class Bad(x: Missing) { def only(): Int = 1; val broken = only(false) }; class Good { def get() = 7; def use() = get() }";
         let uri = "Good.scala";
         let doc = Document {
             version: 1,
