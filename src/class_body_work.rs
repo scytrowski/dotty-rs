@@ -63,6 +63,41 @@ impl<'file> ClassBodyWork<'file> {
         Self { classes, skipped }
     }
 
+    pub(crate) fn skip_reason(&self, member: SymbolId) -> Option<&BodySkipReason> {
+        self.skipped.get(&member)
+    }
+
+    /// Checks the ready body declarations in source order with the original store,
+    /// typed arena and resolver. Skipped members retain their signature reasons in
+    /// [`Self::members`] and produce no new body error or binding. A body error
+    /// rolls back that member; independent ready members are still checked.
+    /// An unselected class yields [`crate::ClassBodyError::InvalidClass`] before typing.
+    pub fn check(
+        &self,
+        class: SymbolId,
+        store: &mut crate::core::SemanticStore,
+        definitions: crate::core::Definitions,
+        packages: &crate::core::Packages,
+        arena: &mut crate::core::AstArena<crate::core::Typed>,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> (crate::CheckedClassBody, crate::ClassBodyReport) {
+        let Some(&(file, view)) = self.classes.get(&class) else {
+            return crate::ClassBodyCheck::invalid(class).into_parts();
+        };
+        crate::class_body::visit_class_body(
+            view,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+            arena,
+            resolver,
+            crate::class_body::BodyVisit::Ready(self),
+        )
+        .into_parts()
+    }
+
     /// Lists constructor fields in parameter order followed by body declarations
     /// in source order. A member with no skip reason has a ready signature. An
     /// unselected class yields `None`; a selected empty class has an empty iterator.

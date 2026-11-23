@@ -161,10 +161,15 @@ pub fn type_class_body_with_resolver(
         packages,
         arena,
         resolver,
-        |first, _| first,
-        None,
-        None,
+        BodyVisit::FirstError,
     )
+    .body
+    .map_err(|errors| {
+        errors
+            .into_iter()
+            .next()
+            .expect("fail-fast visit returned a member or class error")
+    })
 }
 
 /// Outcome and non-fatal diagnostics of one class body check.
@@ -271,9 +276,7 @@ pub fn check_class_body(
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
 ) -> ClassBodyCheck {
-    let mut diagnostics = Vec::new();
-    let mut partial_bindings = None;
-    let body = visit_class_body(
+    visit_class_body(
         class,
         ast,
         index,
@@ -282,19 +285,18 @@ pub fn check_class_body(
         packages,
         arena,
         resolver,
-        |first, rest| std::iter::once(first).chain(rest).collect(),
-        Some(&mut diagnostics),
-        Some(&mut partial_bindings),
-    );
-    ClassBodyCheck {
-        body,
-        diagnostics,
-        partial_bindings,
-    }
+        BodyVisit::All,
+    )
+}
+
+pub(crate) enum BodyVisit<'a> {
+    FirstError,
+    All,
+    Ready(&'a crate::ClassBodyWork<'a>),
 }
 
 #[allow(clippy::too_many_arguments)]
-fn visit_class_body<E>(
+pub(crate) fn visit_class_body(
     class: &SourceClass,
     ast: &AstArena<Untyped>,
     index: &SourceSemanticIndex,
@@ -303,15 +305,10 @@ fn visit_class_body<E>(
     packages: &Packages,
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
-    collect_errors: impl FnOnce(ClassBodyError, &mut dyn Iterator<Item = ClassBodyError>) -> E,
-    diagnostics: Option<&mut Vec<(SourceId, TyperDiagnostic)>>,
-    partial_bindings: Option<&mut Option<SourceTypedIndex>>,
-) -> Result<TypedClassBody, E> {
+    visit: BodyVisit<'_>,
+) -> ClassBodyCheck {
     let Some(source) = class.body_source(ast, index, store) else {
-        return Err(collect_errors(
-            ClassBodyError::InvalidClass(class.symbol),
-            &mut std::iter::empty(),
-        ));
+        return ClassBodyCheck::invalid(class.symbol);
     };
     let mut typer = SourceTyper::new_with_typed_ast(
         ast,
@@ -323,38 +320,58 @@ fn visit_class_body<E>(
         std::mem::take(arena),
     )
     .with_resolver(Box::new(resolver));
-    // Advancing this iterator types the next members. The fail-fast caller stops
-    // at the first failure. The diagnostic caller consumes the rest in source order.
-    let mut failures = class.members.iter().filter_map(|&member| {
+
+    // Constructor fields have signatures but no initializer in the template body.
+    let mut incomplete = matches!(visit, BodyVisit::Ready(work)
+        if class.constructor_fields.iter().any(|id|work.skip_reason(*id).is_some()));
+    let mut errors = Vec::new();
+    for &member in &class.members {
+        if matches!(visit, BodyVisit::Ready(work) if work.skip_reason(member.symbol()).is_some()) {
+            incomplete = true;
+            continue;
+        }
         let result = match member {
             ClassMember::Field(field) => typer.type_field_initializer(field.symbol),
             ClassMember::Method(method) => typer.type_method_definition(method.tree),
         };
-        result.err().map(|error| ClassBodyError::Member {
-            class: class.symbol,
-            member,
-            error,
-        })
-    });
-    let errors = failures
-        .next()
-        .map(|first| collect_errors(first, &mut failures));
-    if let Some(diagnostics) = diagnostics {
-        diagnostics.extend(typer.take_diagnostics().into_iter().map(|d| (source, d)));
-    }
-    if let Some(errors) = errors {
-        if let Some(bindings) = partial_bindings {
-            let output = typer.into_typed_output();
-            *bindings = Some(output.source_typed_index);
-            *arena = output.typed_ast;
-        } else {
-            *arena = typer.into_typed_ast();
+        if let Err(error) = result {
+            errors.push(ClassBodyError::Member {
+                class: class.symbol,
+                member,
+                error,
+            });
+            if matches!(visit, BodyVisit::FirstError) {
+                break;
+            }
         }
-        return Err(errors);
     }
-    let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());
-    *arena = extended;
-    Ok(body)
+    let diagnostics = if matches!(visit, BodyVisit::FirstError) {
+        Vec::new()
+    } else {
+        typer
+            .take_diagnostics()
+            .into_iter()
+            .map(|d| (source, d))
+            .collect()
+    };
+    let mut partial_bindings = None;
+    let body = if incomplete || !errors.is_empty() {
+        let (extended, index) = typer.into_typed_ast_and_index();
+        *arena = extended;
+        if !matches!(visit, BodyVisit::FirstError) {
+            partial_bindings = Some(index);
+        }
+        Err(errors)
+    } else {
+        let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());
+        *arena = extended;
+        Ok(body)
+    };
+    ClassBodyCheck {
+        body,
+        diagnostics,
+        partial_bindings,
+    }
 }
 
 #[cfg(test)]

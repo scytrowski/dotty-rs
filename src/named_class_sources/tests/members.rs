@@ -283,7 +283,7 @@ fn signature_rejection_and_body_rejection_have_distinct_owners_and_ranges() {
     for &member in selection.members() {
         let _ = phase.attempt(member);
     }
-    let signatures = phase.finish();
+    let (signatures, work) = phase.finish_with_body_work();
     assert!(signatures.ready.contains(&wrong.symbol));
     let [MemberSignatureFailure::Typing { report, .. }] = signatures.failures.as_slice() else {
         panic!()
@@ -347,6 +347,35 @@ fn signature_rejection_and_body_rejection_have_distinct_owners_and_ranges() {
             .get(file.source(), good.tree)
             .is_some()
     );
+    let mut checked_arena = AstArena::new();
+    let (checked, report) = work.check(
+        class.symbol,
+        &mut store,
+        defs,
+        &packages,
+        &mut checked_arena,
+        crate::core::NoResolver,
+    );
+    let [error] = report
+        .errors
+        .try_into()
+        .unwrap_or_else(|_: Vec<_>| panic!("only wrong has a body error"));
+    let error = error.into_reported_error(|_| Some(file.ast())).unwrap();
+    assert_eq!(
+        (error.member(), site(&error)),
+        (Some(wrong.symbol), "false")
+    );
+    let target = calls
+        .definition_at_with_bindings(
+            text.rfind("value()").unwrap() as u32,
+            file.ast(),
+            &checked_arena,
+            &store,
+            |_| checked.bindings(),
+            |_| Some(calls),
+        )
+        .unwrap();
+    assert_eq!(target.name.start() as usize, text.find("value()").unwrap());
 }
 
 #[test]
