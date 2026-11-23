@@ -128,7 +128,8 @@ resolution.
   on the shared file handle. ZIP-relative offsets are translated from the
   supplied archive start, including a 4-byte JMOD prefix. `JmodClassPath`
   validates the JMOD magic and uses this backing, so `JdkClassPath::new`
-  indexes each JMOD's metadata without retaining its complete payload; JARs
+  indexes each JMOD's metadata. It maps direct packages to their contributing
+  JMODs in lexical filename order, including split and unnamed packages. JARs
   remain memory-backed. If an opened JMOD is truncated or modified in place,
   later reads use the current file contents and report typed ZIP errors if
   those bytes no longer match the indexed archive. On systems that permit

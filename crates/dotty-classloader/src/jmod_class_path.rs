@@ -54,6 +54,10 @@ impl JmodClassPath {
         })
     }
 
+    pub(crate) fn direct_packages(&self) -> impl Iterator<Item = &str> {
+        self.packages.direct.iter().map(String::as_str)
+    }
+
     pub(crate) fn origin(&self) -> ClassOrigin {
         ClassOrigin::Jmod(self.path.clone())
     }
