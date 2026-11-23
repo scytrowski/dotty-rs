@@ -369,12 +369,32 @@ fn repairing_an_unknown_type_clears_the_marker_and_preserves_overload_navigation
         );
         client.definition(column, 2, BOOL_METHOD);
 
-        client.edit(uri, 2, location, "Int");
+        client.edit(uri, 2, location.clone(), "Int");
         client.diagnostics(uri, 2, json!([]));
         client.diagnostics(child, 1, json!([]));
-        let resolved = client.request("textDocument/definition", position);
-        assert_eq!(resolved[0]["targetUri"], A);
-        assert_eq!(resolved[0]["targetSelectionRange"], range(2, 6, 10));
+        let resolved = client.request("textDocument/definition", position.clone());
+        assert_eq!(
+            resolved,
+            json!([{
+                "originSelectionRange":range(1,column,column+4),
+                "targetUri":A, "targetSelectionRange":range(2,6,10),
+                "targetRange":range(2,2,BOOL_METHOD.len())
+            }])
+        );
+        client.definition(column, 2, BOOL_METHOD);
+
+        client.edit(uri, 3, range(0, start, start + 3), "Missing");
+        client.diagnostics(
+            uri,
+            3,
+            json!([{"range":location,"severity":1,"source":"dotty",
+            "code":"typer.type_name_not_found","message":"Unknown type name"}]),
+        );
+        client.diagnostics(child, 1, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", position),
+            Value::Null
+        );
         client.definition(column, 2, BOOL_METHOD);
         client.shutdown();
     }

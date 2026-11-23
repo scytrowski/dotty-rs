@@ -151,6 +151,29 @@ impl<'a> NamedClassSources<'a> {
         .map_err(|error| self.header_error(class, Some(view.constructor), error))
     }
 
+    /// Prepares the requested constructors in caller order, one per iterator step.
+    /// Consume the iterator before attempting headers. Collect into a `Result`
+    /// to stop at the first error, or visit every outcome to recover across files.
+    /// A failed attempt preserves earlier successful constructor signatures.
+    /// All inputs, symbols and returned IDs belong to this naming session.
+    pub fn prepare_class_constructors(
+        &self,
+        classes: impl IntoIterator<Item = SymbolId>,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> impl Iterator<Item = Result<SymbolId, crate::ClassHeaderFailure>> {
+        classes.into_iter().map(move |class| {
+            self.complete_constructor_signature(class, store, definitions, packages)
+                .map(|_| class)
+                .map_err(|error| crate::ClassHeaderFailure {
+                    class,
+                    source: self.class(class).map(|(file, _)| file.source()),
+                    error,
+                })
+        })
+    }
+
     fn header_error(
         &self,
         class: SymbolId,

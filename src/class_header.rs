@@ -36,6 +36,30 @@ impl std::error::Error for ClassHeaderError {
     }
 }
 
+/// A constructor or header rejection paired with the requested class's identity.
+/// The owner can differ from the site of a recursively encountered typer error.
+#[derive(Debug)]
+pub struct ClassHeaderFailure {
+    /// Symbol supplied by the caller in this naming session.
+    pub class: SymbolId,
+    /// Declaring file if the requested symbol is an indexed ordinary class.
+    pub source: Option<SourceId>,
+    /// Original structural or typing failure, retaining any captured source range.
+    pub error: ClassHeaderError,
+}
+
+impl std::fmt::Display for ClassHeaderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ClassHeaderFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Source-to-typed bindings from successful class-header completions in one session.
 #[derive(Debug, Default)]
 pub struct ClassHeaderBindings {

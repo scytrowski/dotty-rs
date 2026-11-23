@@ -36,7 +36,12 @@ pub use dotty_classloader::classloader;
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
 mod class_header;
-pub use class_header::{ClassHeaderBindings, ClassHeaderError, try_complete_class_header};
+pub use class_header::{
+    ClassHeaderBindings, ClassHeaderError, ClassHeaderFailure, try_complete_class_header,
+};
+
+mod class_header_phase;
+pub use class_header_phase::{ClassHeaderAttempt, ClassHeaderPhase, ClassHeaderReport};
 
 mod class_field_signatures;
 pub use class_field_signatures::{
