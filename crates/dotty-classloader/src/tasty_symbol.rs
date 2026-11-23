@@ -2745,6 +2745,16 @@ fn decode_tasty_parent_type(
     if depth >= MAX_PARENT_TYPE_DEPTH {
         return Ok(None);
     }
+    let shared_application = match tree {
+        RawTree::Leaf(term)
+            if resolved_name.as_internal() == "scala/Function1"
+                && matches!(term.tag, SHAREDTYPE_TAG | SHAREDTERM_TAG) =>
+        {
+            unshare_parent_tree(file, tree.clone())
+        }
+        _ => None,
+    };
+    let tree = shared_application.as_ref().unwrap_or(tree);
     if let Ok(StructuredTree::Length(StructuredNode::Apply(application))) = tree.decode_structured()
         && application.arguments.is_empty()
     {
@@ -4521,7 +4531,20 @@ fn resolve_parent_name_with_alias(
             }
         }
     }
-    resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+    let name = resolve_parent_name_with_bare(file, parent, package, resolve_bare)?;
+    if name.as_internal() == "scala/ImpureFunction1"
+        && let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+            unshare_parent_tree(file, parent.clone())?
+                .decode_structured()
+                .ok()?
+        && resolve_scala_package_type_reference(file, &applied.tycon, 0).as_ref() == Some(&name)
+    {
+        // Scala synthesizes this capture-annotated alias. Its nominal JVM
+        // parent is Function1; the applied parent view retains both arguments.
+        return (applied.arguments.len() == 2)
+            .then(|| BinaryName::from_internal("scala/Function1"));
+    }
+    Some(name)
 }
 
 /// Resolves the pinned first applied constructor parent in Scala 3.9's
@@ -4578,8 +4601,8 @@ fn resolve_tuple_constructor_owner(
         return None;
     }
 
-    let underlying_name = resolve_tuple_package_type_reference(file, underlying_type, 0)?;
-    let constructor_name = resolve_tuple_package_type_reference(file, &applied.tycon, 0)?;
+    let underlying_name = resolve_scala_package_type_reference(file, underlying_type, 0)?;
+    let constructor_name = resolve_scala_package_type_reference(file, &applied.tycon, 0)?;
     if underlying_name.as_internal() == "scala/*:"
         && constructor_name == underlying_name
         && underlying_name.package_path() == "scala"
@@ -4590,13 +4613,13 @@ fn resolve_tuple_constructor_owner(
     }
 }
 
-fn resolve_tuple_package_type_reference(
+fn resolve_scala_package_type_reference(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
     depth: usize,
 ) -> Option<BinaryName> {
-    const MAX_TUPLE_TYPE_REFERENCE_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE_TYPE_REFERENCE_DEPTH {
+    const MAX_TYPE_REFERENCE_DEPTH: usize = 128;
+    if depth >= MAX_TYPE_REFERENCE_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = tree
@@ -4604,7 +4627,7 @@ fn resolve_tuple_package_type_reference(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple_package_type_reference(file, &target, depth + 1);
+        return resolve_scala_package_type_reference(file, &target, depth + 1);
     }
 
     let StructuredTree::Reference(ReferenceNode {
@@ -4615,23 +4638,23 @@ fn resolve_tuple_package_type_reference(
     else {
         return None;
     };
-    // The tuple parent is authenticated from the nominal class-name entry
+    // Authenticate the type reference from its nominal class-name entry
     // itself. Resolving a Signed name through its result signature would let
     // a method signature impersonate the class name.
     let dotty_tasty::tasty::RawName::Utf8(name) = file.name(reference)? else {
         return None;
     };
-    let package = resolve_tuple_package_prefix(file, &qualifier, depth + 1)?;
+    let package = resolve_scala_package_prefix(file, &qualifier, depth + 1)?;
     Some(BinaryName::from_internal(format!("{package}/{name}")))
 }
 
-fn resolve_tuple_package_prefix(
+fn resolve_scala_package_prefix(
     file: &TastyFile<'_>,
     prefix: &RawTree<'_>,
     depth: usize,
 ) -> Option<String> {
-    const MAX_TUPLE_PACKAGE_PREFIX_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE_PACKAGE_PREFIX_DEPTH {
+    const MAX_PACKAGE_PREFIX_DEPTH: usize = 128;
+    if depth >= MAX_PACKAGE_PREFIX_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = prefix
@@ -4639,7 +4662,7 @@ fn resolve_tuple_package_prefix(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple_package_prefix(file, &target, depth + 1);
+        return resolve_scala_package_prefix(file, &target, depth + 1);
     }
 
     let RawTree::Leaf(term) = prefix else {
@@ -7188,6 +7211,99 @@ mod tests {
     }
 
     #[test]
+    fn shared_impure_function_parent_preserves_the_applied_type() {
+        let bytes = fixture_bytes("scala3-library/scala/collection/SetOps.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let node = index
+            .iter()
+            .find(|node| {
+                matches!(node.decode_structured(), Ok(StructuredNode::AppliedType(applied))
+                if resolve_scala_package_type_reference(&file, &applied.tycon, 0)
+                    .is_some_and(|name| name.as_internal() == "scala/ImpureFunction1"))
+            })
+            .unwrap();
+        let direct = RawTree::LengthNode(node.clone());
+        let shared = RawTree::Leaf(
+            SimpleTerm::new(SHAREDTYPE_TAG, TermValue::AstRef(node.offset as u32)).unwrap(),
+        );
+        let function = resolve_parent_name_with_alias(
+            &file,
+            &shared,
+            "scala/collection",
+            false,
+            &mut |_, _| None,
+            &mut |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(function.as_internal(), "scala/Function1");
+        let parent_type = |tree| {
+            decode_tasty_parent_type(
+                &file,
+                tree,
+                &function,
+                "scala/collection",
+                &HashMap::new(),
+                &mut |_, _| None,
+                0,
+            )
+            .unwrap()
+        };
+        let applied = parent_type(&direct);
+        assert!(
+            matches!(&applied, Some(DecodedTastyType::Applied { arguments, .. }) if arguments.len() == 2)
+        );
+        assert_eq!(parent_type(&shared), applied);
+    }
+
+    #[test]
+    fn impure_function_parent_requires_the_scala_package_and_two_arguments() {
+        let bytes = fixture_bytes("scala3-library/scala/collection/SetOps.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let name_ref = |name: &str| {
+            file.names()
+                .entries()
+                .iter()
+                .position(|entry| matches!(entry, RawName::Utf8(s) if s == name))
+                .unwrap() as u32
+        };
+        for (package, arity, expected) in [
+            ("scala", 2, Some("scala/Function1")),
+            ("scala", 1, None),
+            ("scala", 3, None),
+            ("java", 2, Some("java/ImpureFunction1")),
+        ] {
+            let mut payload = Writer::new();
+            for ty in
+                std::iter::once("ImpureFunction1").chain(std::iter::repeat_n("Boolean", arity))
+            {
+                payload.write_u8(TYPEREF_TAG);
+                payload.write_nat(name_ref(ty)).unwrap();
+                payload.write_u8(TERMREFPKG_TAG);
+                payload.write_nat(name_ref(package)).unwrap();
+            }
+            let parent = RawTree::LengthNode(dotty_tasty::tasty::RawNode {
+                tag: APPLIEDTYPE_TAG,
+                offset: 0,
+                payload: payload.as_slice(),
+            });
+            let resolved = resolve_parent_name_with_alias(
+                &file,
+                &parent,
+                "test",
+                false,
+                &mut |_, _| None,
+                &mut |_, _| None,
+            );
+            assert_eq!(
+                resolved.as_ref().map(BinaryName::as_internal),
+                expected,
+                "{package}, arity {arity}"
+            );
+        }
+    }
+
+    #[test]
     fn decodes_collection_class_parameters_and_keeps_partial_applied_parent_views() {
         let indexed_seq = decode(
             &fixture_bytes("scala3-library/scala/collection/IndexedSeq.tasty"),
@@ -7550,17 +7666,17 @@ mod tests {
         };
         assert_eq!(root_type_tag, TYPEREF_TAG);
         assert_eq!(
-            resolve_tuple_package_prefix(&file, &package_prefix, 0).as_deref(),
+            resolve_scala_package_prefix(&file, &package_prefix, 0).as_deref(),
             Some("scala")
         );
-        assert!(resolve_tuple_package_prefix(&file, &applied.tycon, 0).is_none());
+        assert!(resolve_scala_package_prefix(&file, &applied.tycon, 0).is_none());
         let term_tycon = RawTree::NatAst {
             tag: dotty_tasty::tasty::TERMREF_TAG,
             offset,
             value,
             child,
         };
-        assert!(resolve_tuple_package_prefix(&file, &term_tycon, 0).is_none());
+        assert!(resolve_scala_package_prefix(&file, &term_tycon, 0).is_none());
         let term_applied = AppliedTypeNode {
             tag: applied.tag,
             tycon: term_tycon,

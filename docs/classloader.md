@@ -545,6 +545,14 @@ arity; each unsupported argument lowers to an explicit `Type::Error` rather
 than erasing the whole parent view. This preserves supported sibling
 arguments while keeping the unsupported slot observable.
 
+In a TASTy parent list, the compiler-generated alias
+`scala.ImpureFunction1[A, B]` projects to the JVM trait `scala.Function1[A, B]`.
+The loader checks the package-qualified type constructor and its two arguments.
+For example, the `Function1` parent of `scala.collection.SetOps[A, CC, C]`
+retains that trait's own parameter `A` and the builtin `Boolean` result.
+This projection covers nominal inheritance. The alias's capture annotation
+remains outside the supported parent type model.
+
 The crate-private semantic TASTy path also completes the measured parameter-
 free linear hierarchy from one requested class by following its indexed
 parent references, selecting each unit through the ordered classpath, and

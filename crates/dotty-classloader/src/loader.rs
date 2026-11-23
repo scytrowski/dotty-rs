@@ -17215,6 +17215,50 @@ mod tests {
     }
 
     #[test]
+    fn set_ops_impure_function_parent_keeps_its_class_parameter_and_boolean_result() {
+        let set_ops = BinaryName::from_internal("scala/collection/SetOps");
+        let function = BinaryName::from_internal("scala/Function1");
+        let origin = ClassOrigin::Directory("fixture".into());
+        let mut resources = HashMap::new();
+        for name in [&set_ops, &function] {
+            let bytes =
+                dotty_tasty_fixture_bytes(&format!("scala3-library/{}.tasty", name.as_internal()));
+            resources.insert(name.clone(), (bytes, ClassFormat::Tasty, origin.clone()));
+        }
+        for dependency in [
+            "java/lang/Object",
+            "scala/collection/IterableOps",
+            "scala/caps/Pure",
+        ] {
+            resources.insert(
+                BinaryName::from_internal(dependency),
+                (
+                    synthetic_class(dependency, None),
+                    ClassFormat::Class,
+                    origin.clone(),
+                ),
+            );
+        }
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        let set_ops = loader.load_class(&set_ops).unwrap();
+        let function = loader.load_class(&function).unwrap();
+        let parameter = type_parameter_symbol(loader.store, set_ops, "A");
+        assert_eq!(loader.store.symbols.get(parameter).owner, Some(set_ops));
+        let parent = class_info(loader.store, set_ops).parents[2];
+        let Type::Applied { tycon, args } = loader.store.types.get(parent) else {
+            panic!("expected Function1[A, Boolean]");
+        };
+        assert_eq!(parent_symbol(loader.store, *tycon), function);
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            loader.store.types.get(args[0]).reference_symbol(),
+            Some(parameter)
+        );
+        assert_eq!(args[1], loader.definitions.boolean);
+    }
+
+    #[test]
     fn lowers_scala39_some_value_to_its_canonical_class_parameter() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
