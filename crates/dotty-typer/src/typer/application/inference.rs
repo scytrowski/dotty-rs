@@ -250,24 +250,25 @@ impl SourceTyper<'_> {
         request: PolyApplicationInference<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        self.infer_poly_application_with_defaults(request, None, &[], info_journal)
+        let inferred = self.collect_application_constraints(&request, None, &[], info_journal)?;
+        self.finish_application_inference(&request, inferred)
     }
 
-    pub(super) fn infer_poly_application_with_defaults(
+    pub(super) fn collect_application_constraints(
         &mut self,
-        request: PolyApplicationInference<'_>,
+        request: &PolyApplicationInference<'_>,
         named: Option<&[Option<NamedArgument>]>,
         defaults: &[TypeId],
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Vec<TypeId>, TyperError> {
+    ) -> Result<Vec<Option<TypeId>>, TyperError> {
         let PolyApplicationInference {
             binder,
             poly,
             arguments,
             application_kind,
             tree_index,
-            unused_covariant_parameter,
-        } = request;
+            ..
+        } = *request;
         let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
             return Err(TyperError::UnsupportedPolymorphicApplicationShape {
                 source: self.source,
@@ -304,8 +305,6 @@ impl SourceTyper<'_> {
         let mut inferred = vec![None; poly.params.len()];
         for (ordinal, parameter) in method.params.iter().enumerate() {
             let (argument_index, argument) = if let Some(slots) = named {
-                // Search runs after instantiation. A missing witness cannot
-                // constrain a still-free type parameter in this inference path.
                 let Some(arg) = &slots[ordinal] else { continue };
                 (arg.written, arguments[arg.written].widened_type)
             } else if let Some(arg) = arguments.get(ordinal) {
@@ -335,17 +334,63 @@ impl SourceTyper<'_> {
                 error
             })?;
         }
-        let mut type_arguments = Vec::with_capacity(poly.params.len());
+        Ok(inferred)
+    }
+
+    /// Keep unbound call parameters as references to the original binder while
+    /// substituting the constraints already established by earlier arguments.
+    pub(super) fn partially_inferred_formal(
+        &mut self,
+        call: &PolyApplicationInference<'_>,
+        ordinal: usize,
+        formal: TypeId,
+        inferred: &[Option<TypeId>],
+    ) -> Result<TypeId, TyperError> {
+        if inferred.iter().all(Option::is_none)
+            || !self.type_contains_param_ref(formal, call.binder)?
+        {
+            return Ok(formal);
+        }
+        let arguments: Vec<_> = inferred
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                arg.unwrap_or_else(|| {
+                    self.store.types.alloc(Type::ParamRef {
+                        binder: call.binder,
+                        index: index as u32,
+                    })
+                })
+            })
+            .collect();
+        let instance = dotty_core::types::instantiate_poly(self.store, call.binder, &arguments)
+            .map_err(TyperError::PolyInstantiation)?;
+        match self.store.types.get(instance.result) {
+            Type::Method(m) => Ok(m.params[ordinal].ty),
+            _ => Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index: call.tree_index,
+                binder: call.binder,
+            }),
+        }
+    }
+
+    pub(super) fn finish_application_inference(
+        &self,
+        request: &PolyApplicationInference<'_>,
+        inferred: Vec<Option<TypeId>>,
+    ) -> Result<Vec<TypeId>, TyperError> {
+        let mut type_arguments = Vec::with_capacity(inferred.len());
         for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {
             let Some(inferred_type) = inferred_type else {
-                if unused_covariant_parameter == Some(parameter_index) {
+                if request.unused_covariant_parameter == Some(parameter_index) {
                     type_arguments.push(self.definitions.nothing_type);
                     continue;
                 }
                 return Err(TyperError::UnconstrainedTypeParameter {
                     source: self.source,
-                    tree_index,
-                    binder,
+                    tree_index: request.tree_index,
+                    binder: request.binder,
                     parameter_index,
                 });
             };

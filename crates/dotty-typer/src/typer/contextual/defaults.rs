@@ -142,6 +142,15 @@ impl SourceTyper<'_> {
             .block(shared, expr, result, position)
     }
 
+    pub(in crate::typer) fn has_omitted_default(
+        &self,
+        function: TreeId<Typed>,
+        ordinal: usize,
+        expected: TypeId,
+    ) -> bool {
+        self.default_call(function, ordinal, expected).is_some()
+    }
+
     fn default_call(
         &self,
         mut tree: TreeId<Typed>,

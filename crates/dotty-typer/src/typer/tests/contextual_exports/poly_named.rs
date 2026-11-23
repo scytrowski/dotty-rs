@@ -148,19 +148,23 @@ fn inferred_type_drives_search_for_leading_middle_and_trailing_holes() {
 }
 
 #[test]
-fn omitted_evidence_alone_does_not_guess_unconstrained_type_parameters() {
+fn omitted_evidence_fixes_the_selected_method_type_argument() {
     let source = format!(
         "{LIB}\n  def fromSearch(using f: Fmt[Int], b: Box[Int]): Any = middle(using flag = true)"
     );
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(&source);
     let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
-    assert!(matches!(
-        client_result(&mut t, &parsed, "fromSearch"),
-        Err(TyperError::UnconstrainedTypeParameter {
-            parameter_index: 0,
-            ..
-        })
-    ));
+    let tree = client_result(&mut t, &parsed, "fromSearch").unwrap();
+    let app = call(&t, tree);
+    assert_eq!(result_arguments(&t, tree), [defs.int]);
+    assert_eq!(
+        qualified_name(&t, reference(&t, app.args[0])),
+        ("fromSearch", "b")
+    );
+    assert_eq!(
+        qualified_name(&t, reference(&t, app.args[1])),
+        ("fromSearch", "f")
+    );
 }
 
 fn type_application<'a>(

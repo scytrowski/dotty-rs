@@ -2,6 +2,7 @@ mod chained;
 mod clauses;
 mod inherited;
 mod named_using;
+mod omitted;
 mod poly_named;
 mod within;
 
