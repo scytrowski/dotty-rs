@@ -204,3 +204,53 @@ fn a_blocked_recursive_attempt_and_a_later_rejection_preserve_header_bindings() 
     assert_eq!(parent_roots(&bindings), [Some(good_root), Some(mid_root)]);
     assert_eq!(bindings.get(bad.source(), rejected.parents[0]), None);
 }
+
+#[test]
+fn selected_constructors_can_stop_or_continue_after_a_located_failure() {
+    use crate::core::SymbolInfo;
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let text = "class Bad(start: Missing); class Good(x: Int)";
+    let file = named(19, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let [bad, good] = file.classes() else {
+        panic!()
+    };
+    let roots = [bad.symbol, good.symbol];
+    let failure = sources
+        .prepare_class_constructors(roots, &mut store, defs, &packages)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+    assert_eq!(
+        (failure.source, failure.class),
+        (Some(file.source()), bad.symbol)
+    );
+    let ClassHeaderError::Typing(error) = failure.error else {
+        panic!()
+    };
+    assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
+    let range = error.location().unwrap().span().range();
+    assert_eq!(
+        &text[range.start() as usize..range.end() as usize],
+        "Missing"
+    );
+    assert_eq!(store.symbols.info(good.constructor), &SymbolInfo::Missing);
+    let results: Vec<_> = sources
+        .prepare_class_constructors(
+            [good.constructor, bad.symbol, good.symbol],
+            &mut store,
+            defs,
+            &packages,
+        )
+        .collect();
+    assert!(
+        matches!(&results[0], Err(e) if e.source.is_none() && matches!(e.error,ClassHeaderError::InvalidClass(s) if s == good.constructor))
+    );
+    assert!(matches!(&results[1], Err(e) if e.class == bad.symbol));
+    assert!(matches!(results[2], Ok(s) if s == good.symbol));
+    assert!(matches!(
+        store.symbols.info(good.constructor),
+        SymbolInfo::Complete(_)
+    ));
+}
