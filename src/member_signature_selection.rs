@@ -103,9 +103,40 @@ impl MemberSignatureSelection<'_, '_> {
     /// Whether this field or method belongs to a selected class. Actual
     /// cross-file dependencies also obey the typer's kind and visibility checks.
     pub fn contains(&self, member: SymbolId) -> bool {
+        self.declaration(member).is_some()
+    }
+
+    fn declaration(&self, member: SymbolId) -> Option<crate::SourceDeclaration> {
         self.sources
             .declarations()
             .member(member)
-            .is_some_and(|d| self.classes.contains(&d.class))
+            .filter(|d| self.classes.contains(&d.class))
+    }
+
+    /// Attempts one selected signature using its canonical file. Only a missing
+    /// eligible provider in this selection may become `BlockedOn`. A missing
+    /// provider outside the selection retains its typer error. Recursive work
+    /// within the declaring file follows the typer's ordinary completion rules.
+    /// Failed or blocked attempts roll back; previously committed signatures remain.
+    pub fn try_complete(
+        &self,
+        member: SymbolId,
+        store: &mut SemanticStore,
+        definitions: crate::core::Definitions,
+        packages: &crate::core::Packages,
+    ) -> Result<crate::typer::SignatureCompletion, crate::MemberSignatureError> {
+        let (file, _) = self
+            .sources
+            .declaration(member)
+            .ok_or(crate::MemberSignatureError::InvalidMember(member))?;
+        crate::member_signature::try_complete_selected_member(
+            member,
+            |id| self.declaration(id),
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+        )
     }
 }
