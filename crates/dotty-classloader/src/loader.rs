@@ -1065,6 +1065,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             selection.field_address = address;
         }
         let aliases_before = self.snapshot_open_builtin_aliases();
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = self.project_immutable_header_field_transaction(
@@ -1084,6 +1085,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.header_field_tasty_loaded.insert(name.clone(), field);
                 self.header_field_tasty_formals.insert(name.clone(), formal);
                 self.header_field_tasty_scopes.insert(name.clone(), scope);
+                self.repository.finish_transaction();
                 Ok(field)
             }
             Err((error, entered_class)) => {
@@ -1093,7 +1095,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.rollback_to(self.store, session_checkpoint);
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -1459,6 +1461,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })
             .collect::<Result<Vec<_>, SemanticTastyLoadError>>()?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let package_segments = requested
@@ -1698,6 +1701,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.repository.mark_loaded(name.clone(), symbol);
                     self.semantic_tasty_loaded.insert(name, symbol);
                 }
+                self.repository.finish_transaction();
                 Ok(self.semantic_tasty_loaded[requested])
             }
             Err(error) => {
@@ -1708,7 +1712,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2218,6 +2222,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .values()
             .copied()
             .collect::<HashSet<_>>();
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let object_before = self
@@ -2367,6 +2372,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.semantic_tasty_generic_symbols
                         .insert(name.clone(), symbols);
                 }
+                self.repository.finish_transaction();
                 Ok(class)
             }
             Err(error) => {
@@ -2382,7 +2388,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2466,6 +2472,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SemanticTastyLoadError::for_pair_unit(&base_name, &base_resource, error)
         })?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let pair_package_scope_before = self.snapshot_pair_package_scope();
@@ -2495,6 +2502,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.repository.mark_loaded(name.clone(), symbol);
                     self.semantic_tasty_loaded.insert(name.clone(), symbol);
                 }
+                self.repository.finish_transaction();
                 Ok(if requested == &base_name {
                     base
                 } else {
@@ -2509,7 +2517,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2558,6 +2566,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })?;
         Self::validate_option_get_or_else_unit_shape(&file, &name)?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let package_scope_before = self.snapshot_option_package_scope();
@@ -2615,6 +2624,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session
                     .record_origin(method, resource.origin().clone());
                 self.option_get_or_else_tasty_loaded = Some((root, method));
+                self.repository.finish_transaction();
                 Ok(method)
             }
             Err(error) => {
@@ -2622,7 +2632,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.rollback_to(self.store, session_checkpoint);
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -5477,6 +5487,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .active_load_profile
             .as_ref()
             .map_or(0, |profile| profile.nested_tasty_decode_ns);
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         self.resource_observations.clear();
@@ -5489,7 +5500,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
-            self.repository.discard_rolled_back_symbols(self.store);
+            self.repository.rollback(repository_checkpoint, self.store);
+        } else {
+            self.repository.finish_transaction();
         }
         if let (Some(started), Some(profile)) = (profile_started, self.active_load_profile.as_mut())
         {
@@ -6445,6 +6458,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// resource context.
     pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
         self.dependency_failure_context = None;
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = if self.collect_load_profiles {
@@ -6466,7 +6480,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
-            self.repository.discard_rolled_back_symbols(self.store);
+            self.repository.rollback(repository_checkpoint, self.store);
+        } else {
+            self.repository.finish_transaction();
         }
         result
     }
@@ -19253,6 +19269,21 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+    }
+
+    #[test]
+    fn missing_classes_do_not_revisit_cached_symbols_on_rollback() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        for i in 0..64 {
+            let name = BinaryName::from_internal(format!("absent/C{i}"));
+            for _ in 0..2 {
+                assert!(
+                    matches!(loader.load_class(&name), Err(ClassLoadError::NotFound(missing)) if missing == name)
+                );
+            }
+        }
+        assert_eq!(loader.repository.rollback_visits, 0);
     }
 
     #[test]
