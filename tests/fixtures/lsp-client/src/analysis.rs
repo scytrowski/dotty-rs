@@ -3,17 +3,17 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dotty::core::{
-    AstArena, Definitions, DiagnosticSeverity, DocumentText, NoResolver, Packages, SemanticStore,
-    SourceId, SourceSpan, SymbolId, TextRange, Typed,
+    AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
+    SymbolId, TextRange, Typed,
 };
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{ClassMember, DeclarationError};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
-    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassSource, SignatureBlockage,
-    SignatureCycle, SignatureDependencies, SignaturePhase, SourceDeclarationIndex,
-    SourceDiagnostic, SyntaxDiagnostic,
+    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassSource, NamedClassSources,
+    NamedClassSourcesError, SignatureBlockage, SignatureCycle, SignatureDependencies,
+    SignaturePhase, SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -26,6 +26,7 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Call(CallDiagnostic),
+    Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
     Naming(NamerDiagnostic),
     NamerFailure(NamerError),
@@ -55,20 +56,18 @@ impl From<SourceDiagnostic> for Problem {
     }
 }
 
-fn typing_problem(owner_file: usize, diagnostic: SourceDiagnostic) -> (usize, Problem) {
-    let file = diagnostic
-        .location
-        .map_or(owner_file, |span| span.source().index() as usize);
+fn typing_problem(owner_file: SourceId, diagnostic: SourceDiagnostic) -> (SourceId, Problem) {
+    let file = diagnostic.location.map_or(owner_file, |span| span.source());
     (file, diagnostic.into())
 }
 
 fn call_problem<E>(
-    owner_file: usize,
+    owner_file: SourceId,
     result: Result<CallDiagnostic, E>,
     fallback: impl FnOnce(E) -> SourceDiagnostic,
-) -> (usize, Problem) {
+) -> (SourceId, Problem) {
     match result {
-        Ok(call) => (call.source().index() as usize, Problem::Call(call)),
+        Ok(call) => (call.source(), Problem::Call(call)),
         Err(error) => typing_problem(owner_file, fallback(error)),
     }
 }
@@ -85,17 +84,6 @@ pub struct FileResult {
     pub syntax_diagnostics: Vec<SyntaxDiagnostic>,
     pub problems: Vec<Problem>,
     pub links: Vec<Link>,
-}
-
-impl FileResult {
-    fn error(&mut self, location: Option<SourceSpan>, message: String) {
-        self.problems.push(Problem::Reported(SourceDiagnostic {
-            code: None,
-            location,
-            message,
-            severity: DiagnosticSeverity::Error,
-        }));
-    }
 }
 
 fn name(
@@ -144,22 +132,19 @@ fn name(
 // Seed every eligible declaration once. Subsequent attempts come from completed providers.
 fn complete<E>(
     dependencies: &mut SignatureDependencies,
-    roots: &[(usize, SymbolId)],
-    mut attempt: impl FnMut(usize, SymbolId) -> Result<SignatureCompletion, E>,
-    mut report: impl FnMut(usize, SymbolId, E),
+    roots: &[SymbolId],
+    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, E>,
+    mut report: impl FnMut(SymbolId, E),
 ) {
-    let files: HashMap<_, _> = roots.iter().map(|&(file, symbol)| (symbol, file)).collect();
     let mut ready: VecDeque<_> = roots.iter().copied().collect();
-    while let Some((file, symbol)) = ready.pop_front() {
-        match attempt(file, symbol) {
+    while let Some(symbol) = ready.pop_front() {
+        match attempt(symbol) {
             Ok(outcome) => {
-                for waiter in dependencies.record(symbol, outcome) {
-                    ready.push_back((files[&waiter], waiter));
-                }
+                ready.extend(dependencies.record(symbol, outcome));
             }
             Err(error) => {
                 dependencies.record_failure(symbol);
-                report(file, symbol, error);
+                report(symbol, error);
             }
         }
     }
@@ -168,32 +153,40 @@ fn complete<E>(
 // Report one marker at each participant. A downstream waiter already has a provider report.
 fn report_blockages(
     dependencies: &SignatureDependencies,
-    roots: &[(usize, SymbolId)],
+    roots: &[SymbolId],
     declarations: &SourceDeclarationIndex,
     store: &SemanticStore,
-    results: &mut [FileResult],
+    results: &mut HashMap<SourceId, FileResult>,
 ) {
-    for (symbol, cause) in dependencies.blockages(roots.iter().map(|&(_, s)| s)) {
+    for (symbol, cause) in dependencies.blockages(roots.iter().copied()) {
         match cause {
             SignatureBlockage::CycleMember(cycle) if cycle.path()[0] == symbol => {
                 for (member, location) in cycle.declarations(store) {
-                    let file = declarations.get(member).unwrap().source.index() as usize;
-                    results[file].problems.push(Problem::Cycle {
-                        cycle: cycle.clone(),
-                        location,
-                    });
+                    let file = declarations.get(member).unwrap().source;
+                    results
+                        .get_mut(&file)
+                        .unwrap()
+                        .problems
+                        .push(Problem::Cycle {
+                            cycle: cycle.clone(),
+                            location,
+                        });
                 }
             }
             SignatureBlockage::Pending(provider) => {
-                let file = declarations.get(symbol).unwrap().source.index() as usize;
-                results[file].problems.push(Problem::Pending {
-                    provider,
-                    name: store
-                        .names
-                        .resolve(store.symbols.get(provider).name.text())
-                        .to_owned(),
-                    location: store.symbols.get(symbol).position,
-                });
+                let file = declarations.get(symbol).unwrap().source;
+                results
+                    .get_mut(&file)
+                    .unwrap()
+                    .problems
+                    .push(Problem::Pending {
+                        provider,
+                        name: store
+                            .names
+                            .resolve(store.symbols.get(provider).name.text())
+                            .to_owned(),
+                        location: store.symbols.get(symbol).position,
+                    });
             }
             SignatureBlockage::CycleMember(_)
             | SignatureBlockage::DependsOnCycle(_)
@@ -203,42 +196,54 @@ fn report_blockages(
 }
 
 pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
-    let mut results: Vec<_> = docs.keys().map(|_| FileResult::default()).collect();
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let uris: Vec<_> = docs.keys().cloned().collect();
-    let mut units = BTreeMap::new();
+    let mut uris = HashMap::new();
+    let mut results = HashMap::new();
+    let mut units = Vec::new();
     for (i, (uri, doc)) in docs.iter().enumerate() {
+        let source = SourceId::from_index(i as u32);
+        uris.insert(source, uri.as_str());
         if let Some(unit) = name(
             doc.text.as_str(),
-            SourceId::from_index(i as u32),
+            source,
             uri.rsplit('/').next().unwrap_or(uri),
             &mut store,
             &mut packages,
-            &mut results[i],
+            results.entry(source).or_default(),
         ) {
-            units.insert(i, unit);
+            units.push(unit);
         }
     }
-    let declarations = match SourceDeclarationIndex::from_classes(
-        &store,
-        units.values().flat_map(NamedClassSource::classes),
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            for f in &mut results {
-                f.error(None, e.to_string());
+    match NamedClassSources::new(&units, &store) {
+        Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &uris, &mut results),
+        Err(error) => {
+            for result in results.values_mut() {
+                result.problems.push(Problem::Sources(error));
             }
-            return uris.into_iter().zip(results).collect();
         }
-    };
+    }
+    results
+        .into_iter()
+        .map(|(id, file)| (uris[&id].to_owned(), file))
+        .collect()
+}
+
+fn analyze_sources(
+    sources: &NamedClassSources<'_>,
+    store: &mut SemanticStore,
+    defs: Definitions,
+    packages: &Packages,
+    uris: &HashMap<SourceId, &str>,
+    results: &mut HashMap<SourceId, FileResult>,
+) {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
     let mut unavailable = HashSet::new();
     let mut classes = Vec::new();
     let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| unit.ast());
+    let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
     let typer_problem = |file, error: TyperError| {
         call_problem(
             file,
@@ -246,17 +251,17 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             |error| SourceDiagnostic::from_typer(&error, ast_for),
         )
     };
-    for (&i, u) in &units {
-        let mut typer =
-            SourceTyper::new(u.ast(), u.source(), u.index(), &mut store, defs, &packages);
+    for u in sources.files() {
+        let source = u.source();
+        let mut typer = SourceTyper::new(u.ast(), u.source(), u.index(), store, defs, packages);
         for c in u.classes() {
             match typer.complete_symbol(c.constructor) {
-                Ok(_) => classes.push((i, c.symbol)),
+                Ok(_) => classes.push(c.symbol),
                 Err(e) => {
                     headers.record_failure(c.symbol);
                     unavailable.insert(c.symbol);
-                    let (file, problem) = typer_problem(i, e);
-                    results[file].problems.push(problem);
+                    let (file, problem) = typer_problem(source, e);
+                    results.get_mut(&file).unwrap().problems.push(problem);
                 }
             }
         }
@@ -264,45 +269,38 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     complete(
         &mut headers,
         &classes,
-        |i, symbol| {
-            let u = &units[&i];
-            dotty::try_complete_class_header(
+        |symbol| {
+            sources.try_complete_class_header(
                 symbol,
-                u.ast(),
-                u.index(),
-                &mut store,
+                store,
                 defs,
-                &packages,
+                packages,
                 &mut arena,
                 &mut bindings,
-                |id| declarations.get(id).is_some(),
             )
         },
-        |i, symbol, error| {
+        |symbol, error| {
+            let source = sources.declarations().get(symbol).unwrap().source;
             unavailable.insert(symbol);
-            let (file, problem) = typer_problem(i, error);
-            results[file].problems.push(problem);
+            let (file, problem) = typer_problem(source, error);
+            results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
     unavailable.extend(
         classes
             .iter()
-            .map(|&(_, s)| s)
+            .copied()
             .filter(|&s| headers.waiting_on(s).is_some()),
     );
-    report_blockages(&headers, &classes, &declarations, &store, &mut results);
+    report_blockages(&headers, &classes, sources.declarations(), store, results);
     let mut members = Vec::new();
-    for (&i, u) in &units {
-        for c in u.classes() {
-            if unavailable.contains(&c.symbol) {
-                continue;
-            }
-            for member in &c.members {
-                let d = match member {
-                    ClassMember::Field(d) | ClassMember::Method(d) => d,
-                };
-                members.push((i, d.symbol));
-            }
+    for (_, class) in sources.classes() {
+        if unavailable.contains(&class.symbol) {
+            continue;
+        }
+        for member in &class.members {
+            let (ClassMember::Field(d) | ClassMember::Method(d)) = member;
+            members.push(d.symbol);
         }
     }
     let mut signature_calls = HashSet::new();
@@ -310,20 +308,10 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     complete(
         &mut signatures,
         &members,
-        |i, s| {
-            let u = &units[&i];
-            dotty::try_complete_member_signature(
-                s,
-                &declarations,
-                u.ast(),
-                u.index(),
-                &mut store,
-                defs,
-                &packages,
-            )
-        },
-        |i, _, error| {
-            let (file, problem) = call_problem(i, error.into_call_diagnostic(ast_for), |e| {
+        |s| sources.try_complete_member_signature(s, store, defs, packages),
+        |s, error| {
+            let source = sources.declarations().get(s).unwrap().source;
+            let (file, problem) = call_problem(source, error.into_call_diagnostic(ast_for), |e| {
                 e.diagnostic(ast_for)
             });
             if let Problem::Call(call) = &problem
@@ -331,12 +319,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             {
                 signature_calls.insert(key);
             }
-            results[file].problems.push(problem);
+            results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
-    report_blockages(&signatures, &members, &declarations, &store, &mut results);
+    report_blockages(
+        &signatures,
+        &members,
+        sources.declarations(),
+        store,
+        results,
+    );
     let mut checks = HashMap::new();
-    for (&i, u) in &units {
+    for u in sources.files() {
+        let source = u.source();
         for c in u.classes() {
             if unavailable.contains(&c.symbol) {
                 continue;
@@ -345,14 +340,16 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 c,
                 u.ast(),
                 u.index(),
-                &mut store,
+                store,
                 defs,
-                &packages,
+                packages,
                 &mut arena,
                 NoResolver,
             );
             for (source, diagnostic) in check.diagnostics.drain(..) {
-                results[source.index() as usize]
+                results
+                    .get_mut(&source)
+                    .unwrap()
                     .problems
                     .push(Problem::TyperWarning { source, diagnostic });
             }
@@ -367,7 +364,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                         continue;
                     }
                     let (file, problem) =
-                        call_problem(i, error.into_call_diagnostic(ast_for), |e| {
+                        call_problem(source, error.into_call_diagnostic(ast_for), |e| {
                             e.diagnostic(ast_for)
                         });
                     if let Problem::Call(call) = &problem
@@ -377,20 +374,25 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                     {
                         continue;
                     }
-                    results[file].problems.push(problem);
+                    results.get_mut(&file).unwrap().problems.push(problem);
                 }
             }
             checks.insert(c.symbol, check);
         }
     }
-    for (&i, u) in &units {
+    for u in sources.files() {
+        let source = u.source();
         let calls = match u.navigation() {
             Ok(calls) => calls,
             Err(error) => {
-                results[i].problems.push(Problem::Declaration {
-                    error,
-                    location: error.location(u.ast()),
-                });
+                results
+                    .get_mut(&source)
+                    .unwrap()
+                    .problems
+                    .push(Problem::Declaration {
+                        error,
+                        location: error.location(u.ast()),
+                    });
                 continue;
             }
         };
@@ -399,24 +401,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 origin.start(),
                 u.ast(),
                 &arena,
-                &store,
+                store,
                 |s| checks.get(&s),
-                |id| {
-                    units
-                        .get(&(id.index() as usize))
-                        .and_then(|x| x.navigation().ok())
-                },
+                |id| sources.file(id).and_then(|x| x.navigation().ok()),
             ) {
-                results[i].links.push(Link {
+                results.get_mut(&source).unwrap().links.push(Link {
                     origin,
-                    uri: uris[t.source.index() as usize].clone(),
+                    uri: uris[&t.source].to_owned(),
                     declaration: t.declaration,
                     name: t.name,
                 });
             }
         }
     }
-    uris.into_iter().zip(results).collect()
 }
 
 #[cfg(test)]
@@ -581,7 +578,7 @@ mod tests {
             &text[range.start() as usize..range.end() as usize],
             "Missing"
         );
-        assert_eq!(problem.severity, DiagnosticSeverity::Error);
+        assert_eq!(problem.severity, dotty::core::DiagnosticSeverity::Error);
     }
 
     #[test]

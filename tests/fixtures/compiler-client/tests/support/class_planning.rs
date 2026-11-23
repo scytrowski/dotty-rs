@@ -1,6 +1,7 @@
 //! Class plans built through the single-dependency client's public API.
 use super::{
-    NamedUnit, SignatureSources, class_plans, complete_signatures, name_units, parsing, type_bodies,
+    NamedClassSources, NamedUnit, class_plans, complete_signatures, name_units, parsing,
+    type_bodies,
 };
 use crate::FixtureMethods;
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
@@ -94,7 +95,7 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
     use dotty::{MemberSignatureError, try_complete_member_signature};
 
     let (mut store, defs, packages, units) = body_units(VALID_B);
-    let sources = SignatureSources::new(&units, &store);
+    let sources = NamedClassSources::new(&units, &store).unwrap();
     super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
     let (a, b) = (&units[0], &units[1]);
     let seed = a.classes()[0].fields().next().unwrap().symbol;
@@ -108,7 +109,7 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
         ] {
             let error = try_complete_member_signature(
                 seed,
-                &sources.declarations,
+                sources.declarations(),
                 ast,
                 index,
                 &mut store,
@@ -127,7 +128,7 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
         assert_eq!(
             try_complete_member_signature(
                 seed,
-                &sources.declarations,
+                sources.declarations(),
                 a.ast(),
                 a.index(),
                 &mut store,
@@ -170,14 +171,13 @@ fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
 }
 
 fn assert_error_text(
-    sources: &SignatureSources<'_>,
+    sources: &NamedClassSources<'_>,
     error: &dotty::typer::TyperError,
     unit: &NamedUnit,
     text: &str,
     expected: &str,
 ) {
-    let span = sources
-        .error_span(error)
+    let span = dotty::typer_error_span_with(error, |id| sources.file(id).map(|u| u.ast()))
         .expect("source position for typer error");
     assert_eq!(span.source(), unit.source());
     assert_eq!(
@@ -198,8 +198,8 @@ fn name_error_at_last_use(text: &str, spelling: &str) -> dotty::typer::TyperErro
     else {
         panic!("expected a member typing error: {error:?}")
     };
-    let span = SignatureSources::new(units, &store)
-        .error_span(&error)
+    let sources = NamedClassSources::new(units, &store).unwrap();
+    let span = dotty::typer_error_span_with(&error, |id| sources.file(id).map(|u| u.ast()))
         .unwrap_or_else(|| panic!("missing position for {error:?}"));
     let start = text.rfind(spelling).unwrap() as u32;
     assert_eq!(span.source(), unit.source());
@@ -287,7 +287,7 @@ fn field_and_local_value_errors_locate_the_initializer() {
         };
         assert_eq!((actual, expected), (defs.boolean, defs.int));
         assert_error_text(
-            &SignatureSources::new(units, &store),
+            &NamedClassSources::new(units, &store).unwrap(),
             &error,
             &unit,
             text,
@@ -334,7 +334,7 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
         "{error:?}"
     );
     assert_error_text(
-        &SignatureSources::new(&units, &store),
+        &NamedClassSources::new(&units, &store).unwrap(),
         &error,
         unit,
         text,
@@ -847,7 +847,7 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
         let answer = fields[1].symbol;
         let value = provider.method_symbol();
         super::complete_headers(
-            &SignatureSources::new(&units, &store),
+            &NamedClassSources::new(&units, &store).unwrap(),
             &mut store,
             defs,
             &packages,
@@ -1155,7 +1155,7 @@ fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
         &mut packages,
     );
     super::complete_headers(
-        &SignatureSources::new(&units, &store),
+        &NamedClassSources::new(&units, &store).unwrap(),
         &mut store,
         defs,
         &packages,
@@ -1286,8 +1286,8 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         let super::SignatureError::Member(failure) = error else {
             panic!("expected a member signature error, got {error:?}");
         };
-        let sources = SignatureSources::new(&units, &store);
-        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| u.ast()));
+        let sources = NamedClassSources::new(&units, &store).unwrap();
+        let diagnostic = failure.diagnostic(|id| sources.file(id).map(|u| u.ast()));
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
         assert_eq!(failure.diagnostic(|_| Some(provider.ast())).location, None);
         let dotty::MemberSignatureError::Typing { member, error, .. } = failure else {
@@ -1341,9 +1341,9 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             &mut store,
             &mut packages,
         );
-        let sources = SignatureSources::new(&units, &store);
-        let consumer = sources.by_source[&consumer_file.0];
-        let provider = sources.by_source[&provider_file.0];
+        let sources = NamedClassSources::new(&units, &store).unwrap();
+        let consumer = sources.file(consumer_file.0).unwrap();
+        let provider = sources.file(provider_file.0).unwrap();
         let class = &consumer.classes()[0];
         let answer = class.fields().next().unwrap();
         let value = provider.method_symbol();
@@ -1375,7 +1375,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         let super::SignatureError::Member(failure) = error else {
             panic!("unexpected signature error for answer: {error:?}");
         };
-        let ast_for = |id| sources.by_source.get(&id).map(|u| u.ast());
+        let ast_for = |id| sources.file(id).map(|u| u.ast());
         let diagnostic = failure.diagnostic(ast_for);
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic.location.expect("source of the failed call");
@@ -1448,7 +1448,10 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             assert_eq!((*source, *tree_index), (consumer.source(), rhs.index()));
             assert_eq!(dotty::typer_error_span(&error, provider.ast()), None);
             assert_eq!((*expected, *actual), (0, 1));
-            assert_eq!(sources.error_span(&error), Some(span));
+            assert_eq!(
+                dotty::typer_error_span_with(&error, |id| sources.file(id).map(|u| u.ast())),
+                Some(span)
+            );
         }
     }
 }
@@ -1857,7 +1860,7 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
         );
         let mut attempts = Vec::new();
         super::complete_headers(
-            &SignatureSources::new(&units, &store),
+            &NamedClassSources::new(&units, &store).unwrap(),
             &mut store,
             defs,
             &packages,
@@ -2061,7 +2064,7 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         let child = &units[child_index].classes()[0];
         let parent = units[parent_index].classes()[0].symbol;
         let mut blocked = Vec::new();
-        let sources = SignatureSources::new(&units, &store);
+        let sources = NamedClassSources::new(&units, &store).unwrap();
         let error = super::complete_headers(
             &sources,
             &mut store,
@@ -2089,9 +2092,8 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let diagnostic = dotty::TypingDiagnostic::from_typer(&error, |id| {
-            sources.by_source.get(&id).map(|u| u.ast())
-        });
+        let diagnostic =
+            dotty::TypingDiagnostic::from_typer(&error, |id| sources.file(id).map(|u| u.ast()));
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic
@@ -2555,7 +2557,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
     let mut packages = Packages::new();
     let text = "class Provider { def value(): Int = 7; val seed = value(1) }";
     let units = field_signature_units(CONSUMER_OF_SEED, text, false, &mut store, &mut packages);
-    let sources = SignatureSources::new(&units, &store);
+    let sources = NamedClassSources::new(&units, &store).unwrap();
     super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
     let answer = units[0].classes()[0].fields().next().unwrap().symbol;
     let seed = units[1].classes()[0].fields().next().unwrap().symbol;
@@ -2564,7 +2566,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
         let u = &units[file];
         dotty::try_complete_member_signature(
             symbol,
-            &sources.declarations,
+            sources.declarations(),
             u.ast(),
             u.index(),
             &mut store,
@@ -2580,7 +2582,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
         [(answer, dotty::SignatureBlockage::Failed(seed))]
     );
     let report = failure
-        .into_call_diagnostic(|id| sources.by_source.get(&id).map(|u| u.ast()))
+        .into_call_diagnostic(|id| sources.file(id).map(|u| u.ast()))
         .unwrap();
     assert!(matches!(
         report.error(),

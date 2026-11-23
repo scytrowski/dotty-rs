@@ -328,13 +328,15 @@ fn parent_argument_diagnostic_tracks_an_unsaved_type_edit_in_either_file_order()
 
 #[test]
 fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
-    let uri = "file:///fixture/Outer.scala";
+    // This document sorts between A and B. While it is rejected, B is the
+    // third open document but only the second file in the semantic batch.
+    let uri = "file:///fixture/ARejected.scala";
     for (encoding, literal, qualifier) in [("utf-8", 46, 21), ("utf-16", 44, 19)] {
         let mut client = Client::start(encoding, vec![A, B]);
         client.open(A, &format!("class A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"));
-        let caller_line = "  def good(a: A): Int = a.take(false)";
+        let caller_line = "  def good(a: A): Int = /* 😀 */ a.take(false)";
         client.open(B, &format!("class B {{\n{caller_line}\n}}"));
-        let take = caller_line.find("take").unwrap();
+        let take = if encoding == "utf-8" { 37 } else { 35 };
         client.open(
             uri,
             "class Outer {\n  /* 😀 */ private[Missing] val hidden: Int 1\n}",

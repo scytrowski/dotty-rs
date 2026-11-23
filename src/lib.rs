@@ -51,6 +51,9 @@ pub use signature_dependencies::{
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
+mod named_class_sources;
+pub use named_class_sources::{NamedClassSources, NamedClassSourcesError};
+
 mod named_source;
 pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, NamedSource};
 
