@@ -6853,6 +6853,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             } else {
                 existing_symbol.visibility
             };
+            let links = existing_symbol.links;
             self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
                 name: symbol_name,
@@ -6864,7 +6865,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 origin: class_origin,
                 annotations: Vec::new(),
                 position: None,
-                links: SymbolLinks::default(),
+                links,
             };
             (symbol, class_origin)
         } else {
@@ -18527,6 +18528,50 @@ mod tests {
                 .lookup_all(&module_type_name),
             &[first.module_class]
         );
+    }
+
+    #[test]
+    fn completing_a_class_preserves_companion_links_in_both_load_orders() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        for module_first in [false, true] {
+            let mut store = SemanticStore::new();
+            let path = CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    name.clone(),
+                    semantic_unpickler_fixture_bytes("Both.tasty"),
+                )]))),
+                Box::new(InMemoryClassPath(HashMap::from([(
+                    BinaryName::from_internal("java/lang/Object"),
+                    synthetic_class("java/lang/Object", None),
+                )]))),
+            ]);
+            let mut loader = ClassLoader::new(path, &mut store);
+            let initial = module_first.then(|| loader.ensure_module_identity(&name).unwrap());
+            let class = loader.load_class(&name).unwrap();
+            let module = loader.ensure_module_identity(&name).unwrap();
+            if let Some(initial) = initial {
+                assert_eq!(module, initial);
+            }
+            assert_eq!(module.companion_class, Some(class));
+            assert_eq!(class_info(loader.store, class).class, class);
+            assert_eq!(
+                loader.store.symbols.get(class).links.companion,
+                Some(module.object)
+            );
+            assert_eq!(
+                loader.store.symbols.get(module.object).links.companion,
+                Some(class)
+            );
+            assert_eq!(
+                loader
+                    .store
+                    .symbols
+                    .get(module.module_class)
+                    .links
+                    .companion,
+                None
+            );
+        }
     }
 
     #[test]
