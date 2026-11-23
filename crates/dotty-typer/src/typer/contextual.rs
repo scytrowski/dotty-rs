@@ -38,7 +38,7 @@ struct Provider {
 }
 
 #[derive(Default)]
-struct SearchHistory {
+pub(super) struct SearchHistory {
     active: Vec<(ContextualRef, TypeId, usize)>,
     dictionary: Dictionary,
     by_name_depth: usize,
@@ -108,6 +108,11 @@ impl AdaptationSearch {
 struct ContextualScope {
     scope: ScopeId,
     imports: Vec<(TreeId<Untyped>, SourceContextId)>,
+}
+
+enum MethodComponent {
+    Parameter(TypeId),
+    Result(TypeId),
 }
 
 impl SourceTyper<'_> {
@@ -289,7 +294,9 @@ impl SourceTyper<'_> {
             }
             let (arguments, application_kind) = self.contextual_call_arguments(
                 &mut function,
+                callable,
                 &method,
+                Vec::new(),
                 context,
                 tree_index,
                 None,
@@ -373,9 +380,9 @@ impl SourceTyper<'_> {
                 .map_err(|_| deferred)?;
             arg_ty
         } else if self.type_contains_param_ref(result, binder)? {
-            self.instantiate_contextual_result(
+            self.instantiate_contextual_component(
                 binder,
-                result,
+                MethodComponent::Result(result),
                 args.iter().copied().map(Some),
                 tree_index,
             )?
@@ -388,12 +395,30 @@ impl SourceTyper<'_> {
         )
     }
 
-    /// An unavailable path matters only when the result actually refers to
-    /// that argument. The core rebinder checks this while substituting.
-    fn instantiate_contextual_result(
+    pub(super) fn contextual_parameter_type(
         &mut self,
         binder: TypeId,
-        result: TypeId,
+        formal: TypeId,
+        previous: &[TreeId<Typed>],
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        if !self.type_contains_param_ref(formal, binder)? {
+            return Ok(formal);
+        }
+        self.instantiate_contextual_component(
+            binder,
+            MethodComponent::Parameter(formal),
+            previous.iter().copied().map(Some),
+            tree_index,
+        )
+    }
+
+    /// An unavailable path matters only when the result actually refers to
+    /// that argument. The core rebinder checks this while substituting.
+    fn instantiate_contextual_component(
+        &mut self,
+        binder: TypeId,
+        component: MethodComponent,
         arguments: impl Iterator<Item = Option<TreeId<Typed>>>,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
@@ -408,22 +433,30 @@ impl SourceTyper<'_> {
             };
             paths.push(path);
         }
-        dotty_core::types::instantiate_method_result(self.store, binder, &paths).map_err(|error| {
-            match error {
-                dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
-                    TyperError::DependentMethodApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                        binder,
-                        result,
-                    }
-                }
-                error => TyperError::TypeRebinding {
+        let (result, instantiated) = match component {
+            MethodComponent::Parameter(ty) => (
+                ty,
+                dotty_core::types::instantiate_next_method_parameter(self.store, binder, &paths),
+            ),
+            MethodComponent::Result(ty) => (
+                ty,
+                dotty_core::types::instantiate_method_result(self.store, binder, &paths),
+            ),
+        };
+        instantiated.map_err(|error| match error {
+            dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
+                TyperError::DependentMethodApplicationDeferred {
                     source: self.source,
                     tree_index,
-                    error,
-                },
+                    binder,
+                    result,
+                }
             }
+            error => TyperError::TypeRebinding {
+                source: self.source,
+                tree_index,
+                error,
+            },
         })
     }
 
@@ -1347,7 +1380,9 @@ impl SourceTyper<'_> {
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             let (args, kind) = self.contextual_call_arguments(
                 &mut tree,
+                signature,
                 &method,
+                Vec::new(),
                 context,
                 tree_index,
                 Some(history),

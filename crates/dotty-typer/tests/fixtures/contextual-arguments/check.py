@@ -131,6 +131,7 @@ def main():
         check_chained_exports(toolchain, output, client_output, classpath)
         check_inherited_exports(toolchain, output, client_output, classpath)
         check_provider_export_clauses(toolchain, output, client_output, classpath)
+        check_within_clause(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -317,6 +318,28 @@ def check_provider_export_clauses(toolchain, output, client_output, classpath):
             "            /* ambiguous: both parameter right and parameter left match type multi.Tag[Boolean] */"
         )
     check_typer_output(toolchain, client_output, "ProviderExportErrors.scala", 1, required, classpath)
+
+
+def check_within_clause(toolchain, output, client_output, classpath):
+    check_typer_output(toolchain, output, "WithinClause.scala", 0, (
+        "this.curried(p)(v)", "def explicit(using p: within.Family, v: p.Out): p.Out =\n      this.read(using p, v)",
+        "this.read(p, v)", "this.need(within.Makers.product(p, v))",
+        "this.need(within.Api.product(p, v))", "this.need(within.Again.derived(p, v))",
+        "within.Api.product(using p, v)", "def partial(using p: within.Family, v: p.Out): p.Out = this.read(using p, v)",
+        "this.need(within.Legacy.old(p, v))", "this.need(within.Old.old(p, v))",
+        "within.Generic.lifted[Int](using p, v, tag)",
+        "within.Makers.product(f, v)", "within.Api.product(f, v)", "within.Makers.lifted[A](f, v, tag)",
+        "final implicit def old(implicit f: within.Family, implicit v: f.Out)",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "WithinClauseErrors.scala", 1, (
+        "[E007]", "Found:    (v : q.Out)", "Required: p.Out", "[E172]", "7 errors found",
+        "within.Api.product(/* missing */summon[within.Family], f.Out)",
+        "within.Api.product(p, /* missing */summon[p.Out])",
+        "within.Makers.product(p, /* missing */summon[p.Out])",
+        "within.Again.derived(p,\n            /* ambiguous: both parameter b and parameter a match type p.Out",
+        "this.read(using p, /* missing */summon[p.Out])",
+        "this.read(using p,\n        /* ambiguous: both parameter b and parameter a match type p.Out",
+    ), classpath)
 
 
 def check_typer_output(toolchain, output, source, code, required, classpath):

@@ -77,6 +77,13 @@ arguments, legacy implicit forwarding, and a renamed two-hop export.
 Rust checks the call site, ambiguous candidate names and rollback, while the
 Scala typer output also shows which dependency in the candidate was missing.
 
+`WithinClause.scala` and `WithinClauseErrors.scala` add eleven successful
+calls and seven diagnostics for stable path dependencies within a single
+contextual clause. The Rust fixtures inspect the selected arguments, generated
+parameters, dependent result prefix, error site and rollback. The pinned Scala
+fixtures compare inferred, explicit and partial calls, a curried control,
+generic and legacy providers, and a renamed re-export.
+
 The audit also runs three project controls for an ordinary `class Box[A: TC]`.
 The positive control checks the private witness used by `summon[TC[A]]` in
 the class and the caller's witness passed to `new Box[Int]`. Two negative

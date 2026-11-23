@@ -268,15 +268,6 @@ impl SourceTyper<'_> {
             {
                 return Err(unsupported());
             }
-            for formal in &clause.params {
-                if self.type_contains_param_ref(formal.ty, body)? {
-                    return Err(TyperError::UnsupportedExpression {
-                        source: self.source,
-                        tree_index,
-                        expression_kind: "contextual export with a dependency within a parameter clause",
-                    });
-                }
-            }
             depth += 1;
             body = clause.result;
         }
@@ -508,26 +499,34 @@ impl SourceTyper<'_> {
         let mut paths = Vec::new();
         let mut arguments = Vec::new();
         for formal in clause.params {
+            // Later formals can select a type on one of the parameters we
+            // just allocated for this forwarder.
+            let ty = if self.type_contains_param_ref(formal.ty, callable)? {
+                dotty_core::types::instantiate_next_method_parameter(self.store, callable, &paths)
+                    .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?
+            } else {
+                formal.ty
+            };
             let witness = self.export_parameter(
                 method,
                 *formal.name.as_name(),
                 SymbolKind::Parameter,
                 flags,
-                SymbolInfo::Complete(formal.ty),
+                SymbolInfo::Complete(ty),
             );
             let path = self
                 .store
                 .types
                 .alloc(Type::term_ref(self.definitions.no_prefix, witness));
             let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-            let tpt = builder.type_tree(formal.ty, position);
+            let tpt = builder.type_tree(ty, position);
             let ref_tree = builder.ident(*formal.name.as_name(), path, position);
 
             let param = self.typed_index.alloc_synthetic_definition(
                 &mut self.typed_arena,
                 witness,
                 Tree {
-                    ty: formal.ty,
+                    ty,
                     position,
                     kind: TreeKind::ValDef(ValDef {
                         name: formal.name,

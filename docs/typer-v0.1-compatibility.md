@@ -80,8 +80,9 @@ parameters and application. For example, an exported `curried[A,B](using
 k: Key[A])(using t: Tag[B])` supplies `Curried.curried[Int, Boolean](k)(t)`
 at the client. Its body selects the immediate target and forwards both clauses.
 Type parameter bounds and dependencies on earlier clauses use the forwarder's
-own parameters. A dependency between parameters of the same value clause is
-reported as unsupported during export completion.
+own parameters. In an exported `product(using f: Family, v: f.Out)`, the
+type of the generated `v` selects `Out` on the generated `f`. Each re-export
+introduces its own parameters and delegates to the immediately preceding method.
 
 For chained exports, each generated method selects its immediate delegate.
 When `Middle` exports `Leaf.ints` as `first` and `Public` exports
@@ -130,7 +131,16 @@ applications and the same set of nominal declarations rules out that branch.
 A concrete alternative can still supply the missing argument. Other type
 shapes continue to use the existing recursion and resource limits.
 
-Dependent clause application substitutes stable argument paths. Within a
+Dependent contextual arguments are checked in declaration order. For
+`read(using f: Family, v: f.Out): f.Out`, selecting a stable `p` as the first
+argument makes the second expected type and the result `p.Out`. A value of
+`q.Out` from another family does not satisfy this requirement. At an explicit
+`read(using p)` call the typer keeps the supplied prefix and fills the omitted
+suffix. An available default getter takes precedence for an omitted explicit
+using argument. The same path substitution applies when searching all arguments
+or materializing a conditional provider with an implicit or using clause.
+
+Within a
 simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.
 Higher-kinded inference and general proofs from opaque bounds remain open.

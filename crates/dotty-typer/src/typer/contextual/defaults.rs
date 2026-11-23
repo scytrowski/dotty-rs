@@ -10,20 +10,37 @@ struct DefaultCall {
 
 impl SourceTyper<'_> {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn contextual_call_arguments(
+    pub(in crate::typer) fn contextual_call_arguments(
         &mut self,
         function: &mut TreeId<Typed>,
+        binder: TypeId,
         method: &MethodType,
+        mut args: Vec<TreeId<Typed>>,
         context: ExpressionContext,
         tree_index: u32,
         mut history: Option<&mut SearchHistory>,
         shared: &mut Vec<TreeId<Typed>>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(Vec<TreeId<Typed>>, ApplyKind), TyperError> {
-        let mut args = Vec::with_capacity(method.params.len());
+        let supplied = args.len();
+        args.reserve(method.params.len() - supplied);
         let mut kind = ApplyKind::Regular;
-        for (ordinal, param) in method.params.iter().enumerate() {
+        for (ordinal, param) in method.params.iter().enumerate().skip(supplied) {
+            let param = dotty_core::MethodParam {
+                ty: self.contextual_parameter_type(binder, param.ty, &args, tree_index)?,
+                ..*param
+            };
             let default = self.default_call(*function, ordinal, param.ty);
+            // With an explicit using prefix Scala tries a default getter for
+            // the omitted argument before searching the caller's context.
+            if supplied != 0
+                && let Some(default) = default
+            {
+                args.push(self.apply_default_getter(
+                    default, function, shared, context, tree_index, journal,
+                )?);
+                continue;
+            }
             // A missing candidate may have opened a recursive dictionary before
             // reaching a missing dependency. Its symbols follow the probe's lifetime.
             let saved_dictionary = default
@@ -34,9 +51,9 @@ impl SourceTyper<'_> {
                     .as_deref_mut()
                 {
                     Some(h) => {
-                        typer.contextual_parameter_value(param, context, tree_index, h, nested)
+                        typer.contextual_parameter_value(&param, context, tree_index, h, nested)
                     }
-                    None => typer.search_contextual_argument(param, context, tree_index, nested),
+                    None => typer.search_contextual_argument(&param, context, tree_index, nested),
                 };
             let Some(default) = default else {
                 args.push(search(self, journal)?);
@@ -355,9 +372,9 @@ impl SourceTyper<'_> {
                             .iter()
                             .zip(&app.args)
                             .map(|(&copy, &arg)| (copy == arg).then_some(arg));
-                        self.instantiate_contextual_result(
+                        self.instantiate_contextual_component(
                             signature,
-                            previous.result,
+                            MethodComponent::Result(previous.result),
                             paths,
                             tree_index,
                         )?
