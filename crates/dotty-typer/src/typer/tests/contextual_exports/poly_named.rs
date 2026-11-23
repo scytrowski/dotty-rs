@@ -254,3 +254,37 @@ fn bounded_and_conflicting_constraints_restore_the_session_and_locate_the_confli
         "Dog"
     );
 }
+
+#[test]
+fn exported_and_legacy_calls_infer_on_the_selected_declaration() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, owner, name, result) in [
+        ("exported", "Api", "selected", "Tag"),
+        ("legacy", "Client", "old", "Box"),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let a = call(&t, tree);
+        let applied = type_application(&t, a.function);
+        assert_eq!(
+            qualified_name(&t, reference(&t, applied.function)),
+            (owner, name)
+        );
+        assert_eq!(applied.args.len(), 1);
+        assert_eq!(t.typed_ast().get(applied.args[0]).ty, defs.int);
+        let Type::Applied { tycon, args } = t.store.types.get(t.typed_ast().get(tree).ty) else {
+            panic!()
+        };
+        let class = t.store.types.get(*tycon).reference_symbol().unwrap();
+        assert_eq!(
+            t.store
+                .names
+                .resolve(t.store.symbols.get(class).name.text()),
+            result
+        );
+        assert_eq!(args, &[defs.int]);
+        for (&arg, expected) in a.args.iter().zip(["b", "f"]) {
+            assert_eq!(qualified_name(&t, reference(&t, arg)), (site, expected));
+        }
+    }
+}

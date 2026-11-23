@@ -836,18 +836,9 @@ impl SourceTyper<'_> {
             mut typed_arguments,
             is_constructor_application,
         } = request;
-        let mut named = None;
+        let named =
+            self.named_using_arguments(application_kind, callable, &argument_trees, tree_index)?;
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
-            if let Some(Type::Method(method)) = self.store.types.try_get(poly.result)
-                && application_kind_accepts(application_kind, method.kind)
-            {
-                named = self.named_using_arguments(
-                    application_kind,
-                    method,
-                    &argument_trees,
-                    tree_index,
-                )?;
-            }
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
@@ -1025,10 +1016,6 @@ impl SourceTyper<'_> {
                 application_kind,
                 method_kind: method.kind,
             });
-        }
-        if named.is_none() {
-            named =
-                self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
         }
         let mut shared = Vec::new();
         let partial_using = application_kind == ApplyKind::Using

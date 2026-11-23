@@ -149,9 +149,16 @@ An explicit clause selects an available default getter for an omitted slot and
 warns when a unique contextual argument would have been available (Scala E220).
 Unknown names, duplicate bindings and misplaced positional arguments are diagnosed
 at the offending argument. The NamedUsing fixtures cover source methods, an
-exported given alias and a legacy implicit method. Overload selection by argument
-name and inference of type arguments from named contextual operands are outside
-these controls.
+exported given alias and a legacy implicit method.
+
+For a selected polymorphic method, a named argument supplies constraints for its
+declared parameter. Given `choose[A](using value: Box[A], fmt: Fmt[A])` and a
+`b: Box[Int]`, `choose(using value = b)` infers `Int` and searches for
+`Fmt[Int]`, including in a context expecting `Any`. A default getter replays
+the inferred type arguments. The PolyNamed fixtures cover reordered operands,
+bounds, a generic given export and legacy implicit methods. Inferring a type
+parameter solely from omitted evidence and choosing overloads by argument name
+remain outside this subset.
 
 Within a
 simple source opaque alias's defining owner, contextual search can use its
