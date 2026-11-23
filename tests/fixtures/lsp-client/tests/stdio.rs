@@ -698,3 +698,64 @@ fn repairing_a_cross_file_header_cycle_clears_only_its_participants() {
         client.shutdown();
     }
 }
+
+#[test]
+fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() {
+    let seeds = "file:///fixture/Seeds.scala";
+    let prefix = "  /* 😀 */ val seed = ";
+    let middle_method = "  def take() = seeds.seed";
+    let caller = "  def read(m: Middle) = m.take()";
+    let bad = "  def bad(): Int = only(1)";
+    let call = caller.find("take").unwrap();
+    let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":call+1}});
+    let link = json!([{
+        "originSelectionRange":range(1,call,call+4), "targetUri":A,
+        "targetSelectionRange":range(1,6,10), "targetRange":range(1,2,middle_method.len())
+    }]);
+    let arity = |line, start, end| {
+        json!([{"range":range(line,start,end), "severity":1,
+        "source":"dotty","code":"typer.application_arity_mismatch","message":"Expected 0 arguments, got 1"}])
+    };
+    let independent = arity(3, bad.find("only").unwrap(), bad.len());
+    for (encoding, start) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+    ] {
+        let mut client = Client::start(encoding, vec![A, seeds]);
+        client.open(
+            seeds,
+            &format!("class Seeds {{\n  def value(): Int = 40\n{prefix}value()\n}}"),
+        );
+        client.open(
+            A,
+            &format!("class Middle(seeds: Seeds) {{\n{middle_method}\n}}"),
+        );
+        client.open(
+            B,
+            &format!("class Consumer {{\n{caller}\n  def only(): Int = 7\n{bad}\n}}"),
+        );
+        client.diagnostics(B, 1, independent.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            link
+        );
+
+        let argument = start + "value(".len();
+        client.edit(seeds, 2, range(2, argument, argument), "1");
+        client.diagnostics(B, 1, independent.clone());
+        client.diagnostics(seeds, 2, arity(2, start, start + "value(1)".len()));
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(seeds, 3, range(2, argument, argument + 1), "");
+        client.diagnostics(B, 1, independent.clone());
+        client.diagnostics(seeds, 3, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            link
+        );
+        client.shutdown();
+    }
+}
