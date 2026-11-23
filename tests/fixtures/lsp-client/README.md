@@ -29,9 +29,9 @@ already produced the same `CallErrorIdentity`. It renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 
-For constructor and header errors the fixture receives an owned report from
-`NamedClassSources::complete_constructor_signature` or
-`NamedClassSources::try_complete_class_header_reported`. A protocol test checks that the
+The fixture drives `ClassHeaderPhase` in queue order. Its final report supplies
+the classes eligible for member checking, dependency blockages and the original
+constructor and header errors. A protocol test checks that the
 marker on the parent argument clears after an unsaved change to its type.
 Another test opens a constructor with an unknown type after an emoji. It checks
 the range in both position encodings, repairs the type in memory and resolves

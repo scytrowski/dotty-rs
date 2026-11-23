@@ -48,6 +48,18 @@ pub struct ClassHeaderFailure {
     pub error: ClassHeaderError,
 }
 
+impl std::fmt::Display for ClassHeaderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ClassHeaderFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Source-to-typed bindings from successful class-header completions in one session.
 #[derive(Debug, Default)]
 pub struct ClassHeaderBindings {

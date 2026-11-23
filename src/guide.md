@@ -13,6 +13,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
 | Prepare one bound file and retain typed diagnostics | [`ParsedSource::prepare_classes`], [`ClassPreparation`], [`PreparationDiagnostic`] |
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource::into_classes`], [`NamedSource::project_classes`] |
+| Track constructor failures, header attempts and ready classes across files | [`ClassHeaderPhase`], [`ClassHeaderReport`] |
 | Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
@@ -265,6 +266,75 @@ Clients choose the order of attempts and which failures to report. Use
 [`SignatureDependencies`] to track multiple waiters and cycles. All semantic
 IDs, including supplied symbols, must come from the store used to name the
 files. Preserve the same typed arena and header bindings for later planning.
+
+## Select classes for member typing after header completion
+
+[`ClassHeaderPhase::prepare`] checks the constructors of the selected sources.
+An editor can then attempt all headers and queue the waiters released by each
+completion. A compiler can use [`ClassHeaderPhase::try_prepare`] to stop at the
+first rejected constructor, follow a blocked provider immediately and use
+[`ClassHeaderPhase::into_failure`] to take ownership of a rejected header.
+
+```rust
+use std::collections::VecDeque;
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::{SignatureCompletion, TyperError};
+use dotty::{ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, NamedClassSources, parse_source};
+
+let mut store = SemanticStore::new();
+let defs = Definitions::bootstrap(&mut store);
+let mut packages = Packages::new();
+let mut files = Vec::new();
+for (i, name, text) in [
+    (8, "Children.scala", "class Good(x: Int) extends Base(x) { def value() = 7 }; class Bad(y: Missing)"),
+    (2, "Base.scala", "class Base(seed: Int)"),
+] {
+    let parsed = parse_source(SourceId::from_index(i), text, Default::default())?
+        .bind(&mut store.names);
+    let (file, diagnostics) = parsed.prepare_classes(name, &mut store, &mut packages).into_parts();
+    assert!(diagnostics.is_empty());
+    files.push(file.expect("named ordinary classes"));
+}
+
+let sources = NamedClassSources::new(&files, &store)?;
+let mut arena = AstArena::new();
+let mut bindings = ClassHeaderBindings::default();
+let mut phase = ClassHeaderPhase::prepare(&sources, &mut store, defs, &packages, &mut arena, &mut bindings);
+let mut work: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
+while let Some(class) = work.pop_front() {
+    if let Ok(attempt) = phase.attempt(class) {
+        work.extend(attempt.retry);
+    }
+}
+let report = phase.finish();
+let good = &files[0].classes()[0];
+assert_eq!(report.ready, [good.symbol, files[1].classes()[0].symbol]);
+assert!(report.blockages.is_empty() && report.remaining.is_empty());
+let [failure] = report.failures.as_slice() else { panic!("expected the Bad constructor") };
+assert_eq!(failure.source, Some(files[0].source()));
+assert!(matches!(&failure.error, ClassHeaderError::Typing(e)
+    if matches!(e.error(), TyperError::TypeNameNotFound { .. })));
+
+for symbol in report.ready {
+    let (_, class) = sources.class(symbol).unwrap();
+    for method in class.methods() {
+        // This example has no dependencies between method signatures.
+        assert!(matches!(sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages)?,
+            SignatureCompletion::Complete(_)));
+    }
+}
+assert!(bindings.get(files[0].source(), good.parents[0]).is_some());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Keep the same typed arena and bindings for subsequent body typing and JVM
+planning. A header can recursively complete another class in its file. The phase
+includes these successes and wakes observed waiters. Blockages describe actual
+dependencies reported by the typer. When same-file recursive typing returns
+the original error directly for two requested classes, both attempts retain it.
+Clients choose how to publish these errors. Start a fresh session with new IDs,
+bindings and phase state after an edit. A retained error range refers to the
+source version that produced it.
 
 ## Prepare constructors, retry a header and retain an error
 
