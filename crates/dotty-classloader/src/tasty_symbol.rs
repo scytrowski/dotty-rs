@@ -306,6 +306,7 @@ pub(crate) enum DeclaredQualifier {
 /// One `ValDef` reconstructed from a class's `Template.stats`.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyField {
+    pub visibility: Option<DeclaredVisibility>,
     pub name: String,
     pub flags: FieldAccessFlags,
     pub contextual_flags: SymbolFlags,
@@ -318,6 +319,7 @@ pub(crate) struct DecodedTastyField {
 /// One `DefDef` reconstructed from a class's `Template.stats`.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyMethod {
+    pub visibility: Option<DeclaredVisibility>,
     /// Wire offset within the selected template, shared with default-getter sites.
     pub offset: usize,
     /// Original method offset and flattened term ordinal of a structural getter.
@@ -2385,6 +2387,7 @@ fn decode_constructor_accessor_fields(
         fields.push(DecodedTastyField {
             name: field_name,
             flags: decode_field_flags(&body.tail),
+            visibility: decode_visibility(file, &body.tail),
             contextual_flags: contextual_flags(&body.tail),
             declared_type: decode_tasty_member_type(
                 file,
@@ -3062,6 +3065,7 @@ fn decode_members(
                 fields.push(DecodedTastyField {
                     name: field_name,
                     flags: decode_field_flags(&tail),
+                    visibility: decode_visibility(file, &tail),
                     contextual_flags: contextual_flags(&tail),
                     declared_type: decode_tasty_member_type(
                         file,
@@ -3225,6 +3229,7 @@ fn decode_members(
                     default_for,
                     name: method_name,
                     flags: decode_method_flags(&body.tail),
+                    visibility: decode_visibility(file, &body.tail),
                     semantic_flags: source_flags
                         | symbol_flags(&body.tail).intersection(
                             SymbolFlags::GIVEN
@@ -3352,14 +3357,33 @@ fn decode_visibility(
 }
 
 fn decode_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>) -> DeclaredQualifier {
-    match tree {
-        RawTree::Leaf(term) if term.tag == TYPEREFPKG_TAG => match term.value {
-            TermValue::NameRef(name) => resolve_qualified_name(file, name)
-                .map_or(DeclaredQualifier::Other, DeclaredQualifier::Package),
-            _ => DeclaredQualifier::Other,
-        },
-        _ => DeclaredQualifier::Other,
+    // The compiler shares a package qualifier across members of one template.
+    let mut tree = tree;
+    let mut shared;
+    for _ in 0..128 {
+        match tree {
+            RawTree::Leaf(term) if term.tag == TYPEREFPKG_TAG => {
+                if let TermValue::NameRef(name) = term.value
+                    && let Some(package) = resolve_qualified_name(file, name)
+                {
+                    return DeclaredQualifier::Package(package);
+                }
+                break;
+            }
+            RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => {
+                let Some(next) = term
+                    .ast_ref()
+                    .and_then(|r| decode_shared_tree(file, r.address))
+                else {
+                    break;
+                };
+                shared = next;
+                tree = &shared;
+            }
+            _ => break,
+        }
     }
+    DeclaredQualifier::Other
 }
 
 /// Resolves a name-table reference into a `/`-joined qualified string,

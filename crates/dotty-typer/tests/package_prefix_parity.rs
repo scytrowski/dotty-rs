@@ -1204,3 +1204,76 @@ fn dotted_package_declaration_does_not_expose_synthetic_parent_for_imports() {
         Err(dotty_typer::TyperError::ImportQualifierNotFound { .. })
     ));
 }
+
+fn type_ledger_client(package: &str, expression: &str) -> Result<(), dotty_typer::TyperError> {
+    use dotty_classloader::classloader::{CompositeClassPath, DirectoryClassPath};
+    let text = format!(
+        "package {package}\nobject Client {{ def f(x: audits.Ledger): Int = {expression} }}"
+    );
+    let source = SourceId::from_index(1);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        ContextualScanner::new(&text).unwrap(),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Client.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let method = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(d) if store.names.resolve(d.name.as_name().text()) == "f" => {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-classloader/tests/fixtures/member_access");
+    let cp = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(path)),
+        Box::new(OpcodesFixturePath),
+    ]);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(ClasspathSymbolResolver::new(
+        cp,
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )));
+    typer.type_method_definition(method).map(|_| ())
+}
+
+#[test]
+fn tasty_package_qualified_members_respect_the_callers_package() {
+    for expression in ["x.read(1)", "x.amount", "x.check(1)"] {
+        type_ledger_client("audits", expression).unwrap();
+        type_ledger_client("audits.child", expression).unwrap();
+        assert!(
+            matches!(
+                type_ledger_client("foreign", expression),
+                Err(dotty_typer::TyperError::MemberNotFound { .. })
+            ),
+            "{expression}"
+        );
+    }
+    type_ledger_client("foreign", "x.open(1)").unwrap();
+}

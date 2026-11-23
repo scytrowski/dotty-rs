@@ -515,6 +515,9 @@ shape — reusing the very same format-agnostic `enter_field`/
 `enter_method` (built for `.class`, unmodified for `.tasty`) once
 `.tasty`'s own modifiers are translated into the same JVM-shaped
 `FieldAccessFlags`/`MethodAccessFlags` `.class` decoding produces.
+Qualified fields and methods retain their TASTy access boundary, including
+shared package qualifiers. Source member selection checks the caller’s
+owner chain against that canonical boundary.
 Case-class constructor `val`/`var` parameters are extracted from the
 primary constructor's own `term_params` (tagged `CASEACCESSOR_TAG`/
 `FIELDACCESSOR_TAG`) rather than `Template.stats`, since Scala's pickler

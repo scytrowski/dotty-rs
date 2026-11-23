@@ -5778,8 +5778,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                &identity.module_class_name,
+                field.visibility.as_ref(),
+                field.contextual_flags,
+            );
         }
         self.enter_tasty_methods(
             &identity.module_class_name,
@@ -7587,8 +7591,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                name,
+                field.visibility.as_ref(),
+                field.contextual_flags,
+            );
         }
         self.enter_tasty_methods(
             name,
@@ -7601,6 +7609,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         self.complete_class_with_parent_types(class_symbol, declarations, parents);
         Ok(class_symbol)
+    }
+
+    fn apply_tasty_member_modifiers(
+        &mut self,
+        symbol: SymbolId,
+        class: &BinaryName,
+        declared: Option<&tasty_symbol::DeclaredVisibility>,
+        flags: SymbolFlags,
+    ) {
+        let visibility = declared.map(|v| self.tasty_visibility(class, v));
+        let member = self.store.symbols.get_mut(symbol);
+        member.flags = member.flags | flags;
+        if let Some(visibility) = visibility {
+            member.visibility = visibility;
+        }
     }
 
     fn enter_tasty_methods(
@@ -7634,8 +7657,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 info,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | method.semantic_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                class_name,
+                method.visibility.as_ref(),
+                method.semantic_flags,
+            );
             if endpoints.contains(&method.offset) {
                 entries.insert(method.offset, (symbol, info, method));
             }

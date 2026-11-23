@@ -1034,7 +1034,14 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     ));
     let normalized_current_members = current[3].replace("Boolean", "scala.Boolean");
     let current_members = normalized_current_members.split(';').collect::<Vec<_>>();
-    let frozen_members = frozen[3].split(';').collect::<Vec<_>>();
+    // Only the legacy implicit overload is private[Option]. Its corrected
+    // visibility places it before the public parameterless overload in the report.
+    let expected_visibility = frozen[3].replace(
+        "orNull:Method:public:[A1:None:bounds(scala.Option.A,Any)]",
+        "orNull:Method:private:[A1:None:bounds(scala.Option.A,Any)]",
+    );
+    let mut frozen_members = expected_visibility.split(';').collect::<Vec<_>>();
+    frozen_members.sort_unstable();
     assert_eq!(current_members.len(), frozen_members.len());
     let changed_members = current_members
         .iter()
