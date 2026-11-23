@@ -218,6 +218,35 @@ impl<'a> NamedClassSources<'a> {
         )
     }
 
+    /// Checks all declared members of an ordinary class after signature completion.
+    /// Uses the canonical source bindings and the supplied session arena and resolver.
+    /// [`crate::check_class_body`] describes member rollback, warning order and
+    /// the retained bindings for successful siblings. A symbol outside the indexed
+    /// classes yields only [`crate::ClassBodyError::InvalidClass`], without typing.
+    pub fn check_class_body(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> crate::ClassBodyCheck {
+        let Some((file, view)) = self.class(class) else {
+            return crate::ClassBodyCheck::invalid(class);
+        };
+        crate::check_class_body(
+            view,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+            arena,
+            resolver,
+        )
+    }
+
     /// Finds the original named file by its session source ID, including empty files.
     pub fn file(&self, source: SourceId) -> Option<&'a NamedClassSource> {
         self.by_source.get(&source).copied()
@@ -546,5 +575,65 @@ mod tests {
             if owner == class.symbol && member == class.members[0] && actual == defs.boolean && expected == defs.int)
         );
         assert_eq!(before, (store.checkpoint(), arena.checkpoint()));
+    }
+
+    #[test]
+    fn checking_by_symbol_keeps_ordered_errors_committed_bindings_and_warnings() {
+        use crate::{ClassBodyError, core::NoResolver, typer::TyperWarning};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let file = named(
+            42,
+            "class C { def f(implicit n: Int): Int = n; val first: Int = false; def good(): Int = f(1); val last: Int = true }",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let class = &file.classes()[0];
+        let before = (store.checkpoint(), arena.checkpoint());
+        let invalid = sources.check_class_body(
+            class.constructor,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            NoResolver,
+        );
+        assert!(
+            matches!(invalid.body.as_ref().unwrap_err().as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
+        );
+        assert!(invalid.diagnostics.is_empty() && invalid.bindings().is_none());
+        assert_eq!(before, (store.checkpoint(), arena.checkpoint()));
+        let check = sources.check_class_body(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            NoResolver,
+        );
+        let errors = check.body.as_ref().unwrap_err();
+        assert_eq!(errors.len(), 2);
+        for (error, decl) in errors.iter().zip(class.fields()) {
+            assert!(
+                matches!(error, ClassBodyError::Member {class: owner, member: crate::source_declarations::ClassMember::Field(field),error:TyperError::ExpectedExpressionTypeMismatch{actual,expected,..}}
+                if *owner == class.symbol && field.symbol == decl.symbol && *actual == defs.boolean && *expected == defs.int)
+            );
+        }
+        let [(source, warning)] = check.diagnostics.as_slice() else {
+            panic!("expected one warning")
+        };
+        assert_eq!(*source, file.source());
+        assert_eq!(warning.issue(), &TyperWarning::ImplicitClauseWithoutUsing);
+        let good = class.methods().nth(1).unwrap();
+        assert!(
+            check
+                .bindings()
+                .unwrap()
+                .get(file.source(), good.tree)
+                .is_some()
+        );
     }
 }

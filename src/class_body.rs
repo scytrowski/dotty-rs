@@ -157,6 +157,14 @@ pub struct ClassBodyCheck {
 }
 
 impl ClassBodyCheck {
+    pub(crate) fn invalid(class: SymbolId) -> Self {
+        Self {
+            body: Err(vec![ClassBodyError::InvalidClass(class)]),
+            diagnostics: Vec::new(),
+            partial_bindings: None,
+        }
+    }
+
     /// Committed bindings for navigation, including successful siblings of a failed member.
     pub(crate) fn bindings(&self) -> Option<&SourceTypedIndex> {
         self.body
