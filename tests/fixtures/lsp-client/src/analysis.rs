@@ -9,9 +9,9 @@ use dotty::core::{
 use dotty::source_declarations::ClassMember;
 use dotty::typer::{SignatureCompletion, TyperDiagnostic};
 use dotty::{
-    ClassBodyError, ClassHeaderBindings, ClassHeaderError, MemberSignatureError, NamedClassSource,
-    NamedClassSources, NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError,
-    SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+    ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, MemberSignatureError,
+    NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
+    ReportedTyperError, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
     SourceDeclarationIndex,
 };
 
@@ -117,13 +117,12 @@ fn complete<E>(
 
 // Report one marker at each participant. A downstream waiter already has a provider report.
 fn report_blockages(
-    dependencies: &SignatureDependencies,
-    roots: &[SymbolId],
+    blockages: Vec<(SymbolId, SignatureBlockage)>,
     declarations: &SourceDeclarationIndex,
     store: &SemanticStore,
     results: &mut HashMap<SourceId, FileResult>,
 ) {
-    for (symbol, cause) in dependencies.blockages(roots.iter().copied()) {
+    for (symbol, cause) in blockages {
         match cause {
             SignatureBlockage::CycleMember(cycle) if cycle.path()[0] == symbol => {
                 for (member, location) in cycle.declarations(store) {
@@ -205,53 +204,25 @@ fn analyze_sources(
 ) {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
-    let mut unavailable = HashSet::new();
-    let mut classes = Vec::new();
-    let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-    let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
-    for (file, class) in sources.classes() {
-        match sources.complete_constructor_signature(class.symbol, store, defs, packages) {
-            Ok(_) => classes.push(class.symbol),
-            Err(error) => {
-                headers.record_failure(class.symbol);
-                unavailable.insert(class.symbol);
-                let (source, problem) = header_problem(file.source(), error);
-                results.get_mut(&source).unwrap().problems.push(problem);
-            }
+    let mut phase =
+        ClassHeaderPhase::prepare(sources, store, defs, packages, &mut arena, &mut bindings);
+    let mut queue: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
+    while let Some(symbol) = queue.pop_front() {
+        if let Ok(attempt) = phase.attempt(symbol) {
+            queue.extend(attempt.retry);
         }
     }
-    complete(
-        &mut headers,
-        &classes,
-        |symbol| {
-            sources.try_complete_class_header_reported(
-                symbol,
-                store,
-                defs,
-                packages,
-                &mut arena,
-                &mut bindings,
-            )
-        },
-        |symbol, error| {
-            let source = sources.declarations().get(symbol).unwrap().source;
-            unavailable.insert(symbol);
-            let (file, problem) = header_problem(source, error);
-            results.get_mut(&file).unwrap().problems.push(problem);
-        },
-    );
-    unavailable.extend(
-        classes
-            .iter()
-            .copied()
-            .filter(|&s| headers.waiting_on(s).is_some()),
-    );
-    report_blockages(&headers, &classes, sources.declarations(), store, results);
+    let headers = phase.finish();
+    for failure in headers.failures {
+        let owner = failure.source.expect("attempted an indexed class");
+        let (source, problem) = header_problem(owner, failure.error);
+        results.get_mut(&source).unwrap().problems.push(problem);
+    }
+    report_blockages(headers.blockages, sources.declarations(), store, results);
+    let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
     let mut members = Vec::new();
-    for (_, class) in sources.classes() {
-        if unavailable.contains(&class.symbol) {
-            continue;
-        }
+    for &symbol in &headers.ready {
+        let (_, class) = sources.class(symbol).unwrap();
         for member in &class.members {
             let (ClassMember::Field(d) | ClassMember::Method(d)) = member;
             members.push(d.symbol);
@@ -278,18 +249,15 @@ fn analyze_sources(
         },
     );
     report_blockages(
-        &signatures,
-        &members,
+        signatures.blockages(members.iter().copied()),
         sources.declarations(),
         store,
         results,
     );
     let mut bodies = HashMap::new();
-    for (file, c) in sources.classes() {
+    for symbol in headers.ready {
+        let (file, c) = sources.class(symbol).unwrap();
         let source = file.source();
-        if unavailable.contains(&c.symbol) {
-            continue;
-        }
         let (body, report) = sources
             .check_class_body(c.symbol, store, defs, packages, &mut arena, NoResolver)
             .into_parts();
