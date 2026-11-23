@@ -367,7 +367,7 @@ fn rejected_signature_leaves_only_the_independent_class_emittable() {
                     bodies.record(full).unwrap();
                 }
                 dotty::CheckedClassBody::Partial(_) => assert_eq!(c.symbol, b.symbol),
-                dotty::CheckedClassBody::Invalid => panic!("selected class rejected"),
+                dotty::CheckedClassBody::Invalid(_) => panic!("selected class rejected"),
             }
         }
         assert_eq!(

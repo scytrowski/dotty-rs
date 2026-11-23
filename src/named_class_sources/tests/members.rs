@@ -460,9 +460,10 @@ fn skipped_only_body_is_partial_and_preserves_committed_warning_order() {
         &mut arena,
         crate::core::NoResolver,
     );
-    let CheckedClassBody::Partial(bindings) = body else {
+    let CheckedClassBody::Partial(partial) = body else {
         panic!("skipped field forbids planning")
     };
+    let bindings = partial.bindings();
     assert!(report.errors.is_empty());
     assert_eq!(store.symbols.info(later.symbol), &SymbolInfo::Missing);
     assert!(bindings.get(file.source(), later.tree).is_none());
@@ -540,7 +541,7 @@ fn blocked_body_creates_no_trees_and_unselected_class_is_invalid() {
         &mut arena,
         crate::core::NoResolver,
     );
-    assert!(matches!(body,CheckedClassBody::Partial(index) if index.is_empty()));
+    assert!(matches!(body,CheckedClassBody::Partial(body) if body.bindings().is_empty()));
     assert!(report.errors.is_empty() && report.diagnostics.is_empty());
     let (invalid, report) = work.check(
         other.symbol,
@@ -550,9 +551,51 @@ fn blocked_body_creates_no_trees_and_unselected_class_is_invalid() {
         &mut arena,
         crate::core::NoResolver,
     );
-    assert!(matches!(invalid, CheckedClassBody::Invalid));
+    assert!(matches!(invalid, CheckedClassBody::Invalid(_)));
     assert!(
         matches!(report.errors.as_slice(),[crate::ClassBodyError::InvalidClass(id)] if *id==other.symbol)
     );
     assert_eq!((arena.checkpoint(), store.checkpoint()), before);
+}
+
+#[test]
+fn checked_bodies_keep_their_original_same_file_owners_after_reporting() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(
+        8,
+        "class A { def value(): Int = 40 }; class B { def value(): Int = false }",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let [a, b] = file.classes() else { panic!() };
+    let selection = sources
+        .member_signatures([a.symbol, b.symbol], &store)
+        .unwrap();
+    let mut phase = crate::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    for &member in selection.members() {
+        let _ = phase.attempt(member).unwrap();
+    }
+    let (_, work) = phase.finish_with_body_work();
+    let mut arena = AstArena::new();
+    for class in [b, a] {
+        let (body, report) = work.check(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        );
+        assert_eq!(report.errors.len(), usize::from(class.symbol == b.symbol));
+        drop(report);
+        assert_eq!(body.class(), class.symbol);
+        assert_eq!(
+            matches!(body, crate::CheckedClassBody::Complete(_)),
+            class.symbol == a.symbol
+        );
+    }
 }

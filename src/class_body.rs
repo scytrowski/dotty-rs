@@ -182,6 +182,7 @@ pub struct ClassBodyCheck {
     /// Their ranges are byte offsets into that file, in emission order. Match
     /// the payload or use [`crate::SourceDiagnostic::from_typer_warning`] for presentation.
     pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
+    class: SymbolId,
     partial_bindings: Option<SourceTypedIndex>,
 }
 
@@ -194,6 +195,20 @@ pub struct ClassBodyReport {
     pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
 }
 
+/// Committed mappings from a partially checked class, identified by its original symbol.
+#[derive(Debug)]
+pub struct PartialClassBody {
+    class: SymbolId,
+    index: SourceTypedIndex,
+}
+
+impl PartialClassBody {
+    /// Mappings for successful members in this class's original source and typed arenas.
+    pub fn bindings(&self) -> &SourceTypedIndex {
+        &self.index
+    }
+}
+
 /// Semantic data retained after a class check, for use with its original session arena.
 #[derive(Debug)]
 pub enum CheckedClassBody {
@@ -201,19 +216,28 @@ pub enum CheckedClassBody {
     Complete(TypedClassBody),
     /// A valid class had rejected or skipped members. Only committed source-to-typed
     /// mappings survive, including when all attempted members succeeded.
-    Partial(SourceTypedIndex),
-    /// Class validation failed before typing began.
-    Invalid,
+    Partial(PartialClassBody),
+    /// Class validation failed before typing began for the requested symbol.
+    Invalid(SymbolId),
 }
 
 impl CheckedClassBody {
+    /// Original owner, or the requested symbol for an invalid check. IDs are session-local.
+    pub fn class(&self) -> SymbolId {
+        match self {
+            Self::Complete(body) => body.class(),
+            Self::Partial(body) => body.class,
+            Self::Invalid(class) => *class,
+        }
+    }
+
     /// Borrows the committed mappings for direct-call navigation after diagnostics have
     /// been consumed. A rejected class has no mappings. Use the original source and typed arenas.
     pub fn bindings(&self) -> Option<&SourceTypedIndex> {
         match self {
             Self::Complete(body) => Some(body.bindings()),
-            Self::Partial(index) => Some(index),
-            Self::Invalid => None,
+            Self::Partial(body) => Some(body.bindings()),
+            Self::Invalid(_) => None,
         }
     }
 }
@@ -227,7 +251,12 @@ impl ClassBodyCheck {
             Ok(body) => (CheckedClassBody::Complete(body), Vec::new()),
             Err(errors) => (
                 self.partial_bindings
-                    .map_or(CheckedClassBody::Invalid, CheckedClassBody::Partial),
+                    .map_or(CheckedClassBody::Invalid(self.class), |index| {
+                        CheckedClassBody::Partial(PartialClassBody {
+                            class: self.class,
+                            index,
+                        })
+                    }),
                 errors,
             ),
         };
@@ -242,6 +271,7 @@ impl ClassBodyCheck {
 
     pub(crate) fn invalid(class: SymbolId) -> Self {
         Self {
+            class,
             body: Err(vec![ClassBodyError::InvalidClass(class)]),
             diagnostics: Vec::new(),
             partial_bindings: None,
@@ -369,6 +399,7 @@ pub(crate) fn visit_class_body(
         Ok(body)
     };
     ClassBodyCheck {
+        class: class.symbol,
         body,
         diagnostics,
         partial_bindings,

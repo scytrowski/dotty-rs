@@ -340,10 +340,10 @@ assert!(bodies.members(good.symbol).unwrap().any(|(id, reason)|
     id == broken.symbol && reason == Some(&dotty::BodySkipReason::Rejected)));
 let (body, body_report) = bodies.check(good.symbol, &mut store, defs, &packages,
     &mut arena, dotty::core::NoResolver);
-let dotty::CheckedClassBody::Partial(index) = body else { panic!("skipped field") };
+let dotty::CheckedClassBody::Partial(partial) = body else { panic!("skipped field") };
 assert!(body_report.errors.is_empty());
-assert!(index.get(files[0].source(), value.tree).is_some());
-assert!(index.get(files[0].source(), broken.tree).is_none());
+assert!(partial.bindings().get(files[0].source(), value.tree).is_some());
+assert!(partial.bindings().get(files[0].source(), broken.tree).is_none());
 let [(source, warning)] = body_report.diagnostics.as_slice() else { panic!("one committed warning") };
 assert_eq!(*source, files[0].source());
 assert_eq!(warning.issue(), &dotty::typer::TyperWarning::ImplicitClauseWithoutUsing);

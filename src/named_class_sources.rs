@@ -859,7 +859,7 @@ mod tests {
                 NoResolver,
             )
             .into_parts();
-        assert!(matches!(invalid, CheckedClassBody::Invalid));
+        assert!(matches!(invalid, CheckedClassBody::Invalid(_)));
         assert!(invalid.bindings().is_none());
         assert!(
             matches!(report.errors.as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
