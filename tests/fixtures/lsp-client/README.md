@@ -29,12 +29,15 @@ already produced the same `CallErrorIdentity`. It renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 
-For a header error in `extends Base(start)`, the fixture captures the typer
-failure with `ReportedTyperError::from_class`. A protocol test checks that the
+For constructor and header errors the fixture receives an owned report from
+`NamedClassSources::complete_constructor_signature` or
+`NamedClassSources::try_complete_class_header_reported`. A protocol test checks that the
 marker on the parent argument clears after an unsaved change to its type.
 Another test opens a constructor with an unknown type after an emoji. It checks
 the range in both position encodings, repairs the type in memory and resolves
 a call to the same overload in a separate file before and after the repair.
+A class waiting on the broken constructor stays free of secondary diagnostics.
+Its own call becomes navigable once the base class is repaired.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 

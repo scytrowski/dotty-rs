@@ -4,9 +4,57 @@ use crate::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceDefinition, SourceSemanticIndex,
     SymbolId, SymbolKind, Typed, Untyped,
 };
-use crate::jvm_class_plan::ClassHeaderBindings;
+use crate::core::{ConflictingTypedTree, SourceId, SourceTypedIndex, TreeId};
 use crate::source_declarations::named_class_template;
 use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
+
+/// Failure while preparing the constructor or header of an indexed source class.
+#[derive(Debug)]
+pub enum ClassHeaderError {
+    /// The requested symbol does not identify a class in the selected named sources.
+    InvalidClass(SymbolId),
+    /// The typer rejected a selected class. The report preserves the original
+    /// failure and any location resolved against this analysis.
+    Typing(Box<crate::ReportedTyperError>),
+}
+
+impl std::fmt::Display for ClassHeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidClass(id) => write!(f, "invalid source class {id:?}"),
+            Self::Typing(report) => report.error().fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ClassHeaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidClass(_) => None,
+            Self::Typing(report) => Some(report.error()),
+        }
+    }
+}
+
+/// Source-to-typed bindings from successful class-header completions in one session.
+#[derive(Debug, Default)]
+pub struct ClassHeaderBindings {
+    pub(crate) index: SourceTypedIndex,
+}
+
+impl ClassHeaderBindings {
+    /// Retains all bindings from a successful attempt, including recursively
+    /// completed headers. Continue typing into the arena returned by that typer.
+    /// On a conflicting mapping, all previously recorded bindings are preserved.
+    pub fn record(&mut self, index: SourceTypedIndex) -> Result<(), ConflictingTypedTree> {
+        self.index.merge(index)
+    }
+
+    /// Looks up the exact typed node recorded for a tree in its source file.
+    pub fn get(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.index.get(source, tree)
+    }
+}
 
 /// Attempts one ordinary named class header, recording all typed parent applications
 /// produced by the attempt (including recursively completed classes in this source).

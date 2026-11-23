@@ -145,6 +145,7 @@ impl Workspace {
                 for problem in &file.problems {
                     let report = match problem {
                         Problem::Typing(error) => &error.render(),
+                        Problem::Header(error) => &unlocated_error(error),
                         Problem::MemberSignature(error) => &unlocated_error(error),
                         Problem::Body(error) => &unlocated_error(error),
                         Problem::Naming(d) => &SourceDiagnostic::from_namer(d),

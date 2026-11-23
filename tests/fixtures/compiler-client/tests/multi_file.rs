@@ -13,15 +13,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use dotty::ClassHeaderBindings;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{
-    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
-};
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
@@ -361,15 +360,15 @@ struct TypedHeaders {
 
 #[derive(Debug)]
 enum SignatureError {
-    Typing(TyperError),
+    Header(dotty::ClassHeaderError),
     Field(dotty::ClassFieldSignatureError),
     Member(dotty::MemberSignatureError),
     Cycle(std::sync::Arc<dotty::SignatureCycle>),
 }
 
-impl From<TyperError> for SignatureError {
-    fn from(error: TyperError) -> Self {
-        Self::Typing(error)
+impl From<dotty::ClassHeaderError> for SignatureError {
+    fn from(error: dotty::ClassHeaderError) -> Self {
+        Self::Header(error)
     }
 }
 
@@ -409,12 +408,8 @@ fn complete_headers(
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    // Parent applications need the declaring file's constructor signature.
-    for unit in sources.files() {
-        let mut typer = unit.typer(store, definitions, packages);
-        for class in unit.classes() {
-            typer.complete_symbol(class.constructor)?;
-        }
+    for (_, class) in sources.classes() {
+        sources.complete_constructor_signature(class.symbol, store, definitions, packages)?;
     }
     let mut headers = TypedHeaders::default();
     for (_, root) in sources.classes() {
@@ -426,7 +421,7 @@ fn complete_headers(
             dotty::SignaturePhase::Headers,
             None,
             |symbol| {
-                let completion = sources.try_complete_class_header(
+                let completion = sources.try_complete_class_header_reported(
                     symbol,
                     store,
                     definitions,

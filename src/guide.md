@@ -12,6 +12,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
+| Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
@@ -109,8 +110,8 @@ The same lookup supplies the original AST for a diagnostic in either file.
 
 ```rust
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, Typed};
-use dotty::jvm_class_plan::ClassHeaderBindings;
-use dotty::typer::{SignatureCompletion, SourceTyper};
+use dotty::ClassHeaderBindings;
+use dotty::typer::SignatureCompletion;
 use dotty::{NamedClassSources, parse_source};
 
 let mut store = SemanticStore::new();
@@ -129,12 +130,11 @@ for (id, name, text) in [
 let sources = NamedClassSources::new(&files, &store)?;
 let mut arena = AstArena::<Typed>::new();
 let mut bindings = ClassHeaderBindings::default();
-for (file, class) in sources.classes() {
-    SourceTyper::new(file.ast(), file.source(), file.index(), &mut store, defs, &packages)
-        .complete_symbol(class.constructor)?;
+for (_, class) in sources.classes() {
+    sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
 }
 for (_, class) in sources.classes() {
-    let outcome = sources.try_complete_class_header(
+    let outcome = sources.try_complete_class_header_reported(
         class.symbol, &mut store, defs, &packages, &mut arena, &mut bindings,
     )?;
     assert!(matches!(outcome, SignatureCompletion::Complete(_)));
@@ -157,6 +157,69 @@ Clients choose the order of attempts and which failures to report. Use
 [`SignatureDependencies`] to track multiple waiters and cycles. All semantic
 IDs, including supplied symbols, must come from the store used to name the
 files. Preserve the same typed arena and header bindings for later planning.
+
+## Prepare constructors, retry a header and retain an error
+
+Call [`NamedClassSources::complete_constructor_signature`] for each eligible
+class first. A child header can still need its parent's class information.
+Here two classes in the same file extend a base declared in a second file.
+The client retries a blocked child and retains the other child's rejected
+parent argument for publication after the session ends.
+
+```rust
+use dotty::{ClassHeaderBindings, ClassHeaderError, NamedClassSources, parse_source};
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::{SignatureCompletion, TyperError};
+
+let text = "class Good(x: Int) extends Base(x); class Bad(start: Boolean) extends Base(start)";
+let source = SourceId::from_index(7);
+let report = {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let mut files = Vec::new();
+    for (id, name, content) in [(source, "Children.scala", text),
+                                (SourceId::from_index(42), "Base.scala", "class Base(seed: Int)")] {
+        files.push(parse_source(id, content, Default::default())?.bind(&mut store.names)
+            .name(name, &mut store, &mut packages)?.into_classes(&store)?);
+    }
+    let sources = NamedClassSources::new(&files, &store)?;
+    for (_, class) in sources.classes() {
+        sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
+    }
+    let mut arena = AstArena::new();
+    let mut bindings = ClassHeaderBindings::default();
+    let mut attempt = |class| sources.try_complete_class_header_reported(
+        class, &mut store, defs, &packages, &mut arena, &mut bindings,
+    );
+    let good = files[0].classes()[0].symbol;
+    let SignatureCompletion::BlockedOn(parent) = attempt(good)? else {
+        return Err("expected a dependency on Base".into());
+    };
+    assert_eq!(parent, files[1].classes()[0].symbol);
+    assert!(matches!(attempt(parent)?, SignatureCompletion::Complete(_)));
+    assert!(matches!(attempt(good)?, SignatureCompletion::Complete(_)));
+    match attempt(files[0].classes()[1].symbol) {
+        Err(ClassHeaderError::Typing(report)) => report,
+        other => return Err(format!("expected a parent argument failure, got {other:?}").into()),
+    }
+};
+
+assert!(matches!(report.error(), TyperError::ApplicationArgumentTypeMismatch { argument_index: 0, .. }));
+let location = report.location().ok_or("expected a parent argument location")?;
+assert_eq!(location.source(), source);
+let range = location.span().range();
+let argument = &text[range.start() as usize..range.end() as usize];
+assert_eq!(format!("Check the type of {argument}"), "Check the type of start");
+assert_eq!(report.render().message, "Expected Int, found Boolean");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+An invalid class selection yields [`ClassHeaderError::InvalidClass`]. A
+[`ClassHeaderError::Typing`] report identifies the requested class. Constructor
+failures also identify its primary constructor. Use the report's location to
+find the failing expression when a parent is completed recursively.
+A lower-level typer caller can use [`ReportedTyperError::from_class`] directly.
 
 ## Report a typer error after analysis
 
@@ -307,8 +370,9 @@ successful sibling's definition link available.
 ```rust
 use dotty::{CheckedClassBody, ClassBodyError, NamedClassSources, parse_source};
 use dotty::core::{AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId};
-use dotty::jvm_class_plan::{ClassHeaderBindings, JvmClassPlanner};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
+use dotty::ClassHeaderBindings;
+use dotty::jvm_class_plan::JvmClassPlanner;
+use dotty::typer::{SignatureCompletion, TyperError};
 
 # let mut store = SemanticStore::new();
 # let defs = Definitions::bootstrap(&mut store);
@@ -321,11 +385,10 @@ let sources = NamedClassSources::new([&file], &store)?;
 let mut arena = AstArena::new();
 # let mut headers = ClassHeaderBindings::default();
 # for (_, class) in sources.classes() {
-#     SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages)
-#         .complete_symbol(class.constructor)?;
+#     sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
 # }
 # for (_, class) in sources.classes() {
-#     assert!(matches!(sources.try_complete_class_header(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
+#     assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
 #     for method in class.methods() {
 #         assert!(matches!(sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages)?, SignatureCompletion::Complete(_)));
 #     }
@@ -374,8 +437,8 @@ This example tries `Leaf` before `Base`, then inspects a separate two-file cycle
 ```rust
 use dotty::{NamedClassSources, SignatureBlockage, SignatureDependencies, SignaturePhase};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
-use dotty::jvm_class_plan::ClassHeaderBindings;
-use dotty::typer::{SignatureCompletion, SourceTyper};
+use dotty::ClassHeaderBindings;
+use dotty::typer::SignatureCompletion;
 
 let files = [
     ("Leaf.scala", "class Leaf(x: Int) extends Base(x)"),
@@ -393,15 +456,14 @@ let files = [
 #     let file = parsed.name(filename, &mut store, &mut packages)?.into_classes(&store)?;
 #     units.push(file);
 # }
-# for file in &units {
-#     SourceTyper::new(file.ast(), file.source(), file.index(), &mut store, defs, &packages)
-#         .complete_symbol(file.classes()[0].constructor)?;
+let sources = NamedClassSources::new(&units, &store)?;
+# for (_, class) in sources.classes() {
+#     sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
 # }
 # let mut arena = AstArena::new();
 # let mut bindings = ClassHeaderBindings::default();
-let sources = NamedClassSources::new(&units, &store)?;
 let mut attempt = |symbol| {
-    sources.try_complete_class_header(symbol, &mut store, defs, &packages, &mut arena, &mut bindings)
+    sources.try_complete_class_header_reported(symbol, &mut store, defs, &packages, &mut arena, &mut bindings)
 };
 let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
 let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);

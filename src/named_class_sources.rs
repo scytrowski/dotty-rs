@@ -1,11 +1,11 @@
 //! Ordered access to the named class sources selected by the caller.
 use std::{collections::HashMap, fmt};
 
-use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
+use crate::core::{AstArena, Definitions, Packages, SymbolKind, TypeId, Typed};
 use crate::core::{SemanticStore, SourceId, SymbolId};
-use crate::jvm_class_plan::ClassHeaderBindings;
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
+use crate::{ClassHeaderBindings, ClassHeaderError, ReportedTyperError};
 use crate::{
     MemberSignatureError, NamedClassSource, SourceDeclaration, SourceDeclarationIndex,
     SourceDeclarationIndexError,
@@ -121,6 +121,50 @@ impl<'a> NamedClassSources<'a> {
         Some((self.file(declaration.source)?, declaration))
     }
 
+    /// Completes the primary constructor of the supplied class in its declaring
+    /// file. Supply the naming session's store, definitions and packages. The
+    /// returned type belongs to that store. Prepare the constructors of eligible
+    /// classes before attempting their headers.
+    ///
+    /// An ineligible class yields [`ClassHeaderError::InvalidClass`] before
+    /// typing. A rejected constructor rolls back its attempt and retains both the
+    /// class and constructor symbols in the report.
+    pub fn complete_constructor_signature(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> Result<TypeId, ClassHeaderError> {
+        let (file, view) = self
+            .class(class)
+            .ok_or(ClassHeaderError::InvalidClass(class))?;
+        crate::typer::SourceTyper::new(
+            file.ast(),
+            file.source(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+        )
+        .complete_symbol(view.constructor)
+        .map_err(|error| self.header_error(class, Some(view.constructor), error))
+    }
+
+    fn header_error(
+        &self,
+        class: SymbolId,
+        member: Option<SymbolId>,
+        error: TyperError,
+    ) -> ClassHeaderError {
+        ClassHeaderError::Typing(Box::new(ReportedTyperError::from_class(
+            error,
+            class,
+            member,
+            |id| self.file(id).map(NamedClassSource::ast),
+        )))
+    }
+
     /// Attempts one header using the declaring file and the indexed classes
     /// as eligible dependencies. Prepare constructor signatures first. Reuse the
     /// same session store, typed arena and bindings on every attempt, including
@@ -160,6 +204,31 @@ impl<'a> NamedClassSources<'a> {
                     .is_some_and(|d| d.kind == SymbolKind::Class)
             },
         )
+    }
+
+    /// Attempts the header under the same contract as [`Self::try_complete_class_header`],
+    /// capturing any typer failure before the source session ends. The report
+    /// identifies the requested class and carries the actual failure's optional
+    /// byte span, including for a recursively checked parent. No member is
+    /// attributed to a header attempt. An ineligible symbol yields
+    /// [`ClassHeaderError::InvalidClass`] without changing the session.
+    pub fn try_complete_class_header_reported(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        bindings: &mut ClassHeaderBindings,
+    ) -> Result<SignatureCompletion, ClassHeaderError> {
+        self.try_complete_class_header(class, store, definitions, packages, arena, bindings)
+            .map_err(|error| {
+                if self.class(class).is_some() {
+                    self.header_error(class, None, error)
+                } else {
+                    ClassHeaderError::InvalidClass(class)
+                }
+            })
     }
 
     /// Attempts one field or method signature after header completion. The
@@ -361,6 +430,8 @@ mod tests {
         );
         assert!(sources.class(other.classes()[0].symbol).is_none());
     }
+
+    mod headers;
 
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,
