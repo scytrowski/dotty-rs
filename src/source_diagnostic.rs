@@ -133,10 +133,15 @@ impl SourceDiagnostic {
                 };
                 format!("Expected {expected} {noun}, got {actual}")
             }
+            TyperError::TypeNameNotFound { .. } => "Unknown type name".into(),
+            TyperError::TermNameNotFound { .. } => "Unknown term name".into(),
+            TyperError::ExpectedExpressionTypeMismatch { .. } => {
+                "Expression does not conform to the expected type".into()
+            }
             _ => error.to_string(),
         };
         Self {
-            code: error.call_error_code(),
+            code: error.diagnostic_code(),
             ..Self::error(message, location)
         }
     }

@@ -48,6 +48,17 @@ impl ReportedTyperError {
         Self { failure }
     }
 
+    /// Stable category when the typer assigns one. Always inspect [`Self::error`]
+    /// for the full payload, including for variants without a code.
+    pub fn code(&self) -> Option<&'static str> {
+        self.error().diagnostic_code()
+    }
+
+    /// Builds the default presentation on demand without consulting session stores.
+    pub fn render(&self) -> crate::SourceDiagnostic {
+        crate::SourceDiagnostic::typer_at(self.error(), self.location())
+    }
+
     /// Borrows the original ADT, including any context owned by the typer.
     pub fn error(&self) -> &TyperError {
         match &self.failure {
@@ -122,6 +133,11 @@ mod tests {
                 matches!(report.error(),TyperError::TypeNameNotFound { source,.. } if *source == id)
             );
             assert_eq!(report.source(), Some(id));
+            assert_eq!(report.code(), Some("typer.type_name_not_found"));
+            let rendered = report.render();
+            assert_eq!(rendered.code, report.code());
+            assert_eq!(rendered.location, report.location());
+            assert_eq!(rendered.message, "Unknown type name");
             assert_eq!(
                 report.location().map(|s| {
                     assert_eq!(s.source(), id);
@@ -130,6 +146,75 @@ mod tests {
                 }),
                 (available == Some(id)).then_some("Missing")
             );
+        }
+    }
+
+    #[test]
+    fn body_error_codes_are_available_without_rendering() {
+        use crate::core::NoResolver;
+        for (expr, code, message) in [
+            (
+                "missingValue",
+                "typer.term_name_not_found",
+                "Unknown term name",
+            ),
+            (
+                "false",
+                "typer.expected_expression_type_mismatch",
+                "Expression does not conform to the expected type",
+            ),
+        ] {
+            let id = SourceId::from_index(42);
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let file = crate::parse_source(
+                id,
+                &format!("class C {{ def n: Int = {expr} }}"),
+                Default::default(),
+            )
+            .unwrap()
+            .bind(&mut store.names)
+            .name("C.scala", &mut store, &mut packages)
+            .unwrap()
+            .into_classes(&store)
+            .unwrap();
+            let class = &file.classes()[0];
+            let mut typer =
+                SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages);
+            for s in [
+                class.constructor,
+                class.symbol,
+                class.methods().next().unwrap().symbol,
+            ] {
+                typer.complete_symbol(s).unwrap();
+            }
+            drop(typer);
+            let failure = crate::check_class_body(
+                class,
+                file.ast(),
+                file.index(),
+                &mut store,
+                defs,
+                &packages,
+                &mut AstArena::new(),
+                NoResolver,
+            )
+            .body
+            .unwrap_err()
+            .pop()
+            .unwrap();
+            let crate::ClassBodyError::Member { error, .. } = failure else {
+                panic!("expected a typing failure")
+            };
+            let report = ReportedTyperError::from_typer(error, |_| Some(file.ast()));
+            assert!(matches!(
+                (expr, report.error()),
+                ("false", TyperError::ExpectedExpressionTypeMismatch { .. })
+                    | ("missingValue", TyperError::TermNameNotFound { .. })
+            ));
+            assert_eq!(report.code(), Some(code));
+            assert_eq!(report.render().message, message);
         }
     }
 }
