@@ -1,8 +1,8 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
-use crate::zip_archive::ZipArchive;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::zip_archive::{ArchivePackages, ZipArchive};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,7 +46,7 @@ pub struct JarClassPath {
     archive: ZipArchive,
     release_version: u16,
     multi_release: bool,
-    package_prefixes: HashSet<String>,
+    packages: ArchivePackages,
     profile: JarResourceProfileCounters,
     resource_cache: Mutex<JarResourceCache>,
 }
@@ -81,17 +81,14 @@ impl JarClassPath {
             Some(manifest_bytes) => manifest::declares_multi_release(&manifest_bytes),
             None => false,
         };
-        let mut package_prefixes = archive.package_prefixes_under("");
-        if multi_release {
-            package_prefixes.extend(archive.versioned_package_prefixes(release_version));
-        }
+        let packages = archive.package_index("", multi_release.then_some(release_version));
 
         Ok(Self {
             path,
             archive,
             release_version,
             multi_release,
-            package_prefixes,
+            packages,
             profile: JarResourceProfileCounters::default(),
             resource_cache: Mutex::new(JarResourceCache::default()),
         })
@@ -218,31 +215,14 @@ impl ClassPathEntry for JarClassPath {
         if !super::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        let path = package.join("/");
-        let base_prefix = if path.is_empty() {
-            String::new()
-        } else {
-            format!("{path}/")
-        };
-        if self.archive.contains_package(&base_prefix) {
-            return Ok(true);
-        }
-        if self.multi_release {
-            for version in MIN_VERSIONED_DIRECTORY..=self.release_version {
-                let prefix = format!("META-INF/versions/{version}/{base_prefix}");
-                if self.archive.contains_package(&prefix) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        Ok(self.packages.direct.contains(&package.join("/")))
     }
 
     fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         if !super::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        Ok(self.package_prefixes.contains(&package.join("/")))
+        Ok(self.packages.prefixes.contains(&package.join("/")))
     }
 }
 
@@ -576,17 +556,26 @@ pub(crate) mod tests {
             ),
             ("META-INF/versions/11/a/b/FromV11.class", b"v11".as_slice()),
             ("META-INF/versions/17/x/y/FromV17.tasty", b"v17".as_slice()),
+            ("META-INF/versions/17/Root.class", b"root".as_slice()),
         ];
         let jar_path = write_temp_jar("package_prefix_mr", &minimal_stored_zip(&entries));
 
         let below = JarClassPath::new(&jar_path, 10).unwrap();
+        assert!(!below.contains_package(&["a", "b"]).unwrap());
+        assert!(!below.contains_package(&[]).unwrap());
         assert!(!below.contains_package_prefix(&["a"]).unwrap());
         assert!(!below.contains_package_prefix(&["x"]).unwrap());
         let at_v11 = JarClassPath::new(&jar_path, 11).unwrap();
+        assert!(!at_v11.contains_package(&["a"]).unwrap());
+        assert!(at_v11.contains_package(&["a", "b"]).unwrap());
+        assert!(!at_v11.contains_package(&["x", "y"]).unwrap());
         assert!(at_v11.contains_package_prefix(&["a"]).unwrap());
         assert!(at_v11.contains_package_prefix(&["a", "b"]).unwrap());
         assert!(!at_v11.contains_package_prefix(&["x"]).unwrap());
         let at_v17 = JarClassPath::new(&jar_path, 17).unwrap();
+        assert!(at_v17.contains_package(&["a", "b"]).unwrap());
+        assert!(at_v17.contains_package(&["x", "y"]).unwrap());
+        assert!(at_v17.contains_package(&[]).unwrap());
         assert!(at_v17.contains_package_prefix(&["x"]).unwrap());
         assert!(at_v17.contains_package_prefix(&["x", "y"]).unwrap());
 
@@ -612,6 +601,7 @@ pub(crate) mod tests {
             let jar_path = write_temp_jar(name, &minimal_stored_zip(&entries));
             let class_path = JarClassPath::new(&jar_path, 21).unwrap();
 
+            assert!(!class_path.contains_package(&["a", "b"]).unwrap());
             assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
 
             std::fs::remove_file(&jar_path).unwrap();

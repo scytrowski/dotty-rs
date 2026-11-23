@@ -1,7 +1,6 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
-use crate::zip_archive::ZipArchive;
-use std::collections::HashSet;
+use crate::zip_archive::{ArchivePackages, ZipArchive};
 use std::io::{self, Read};
 use std::path::PathBuf;
 
@@ -19,7 +18,7 @@ const JMOD_MAGIC: [u8; 4] = [0x4A, 0x4D, 0x01, 0x00];
 pub struct JmodClassPath {
     path: PathBuf,
     archive: ZipArchive,
-    package_prefixes: HashSet<String>,
+    packages: ArchivePackages,
 }
 
 impl JmodClassPath {
@@ -46,12 +45,12 @@ impl JmodClassPath {
         }
 
         let archive = ZipArchive::open_file_handle(file, JMOD_MAGIC.len() as u64)?;
-        let package_prefixes = archive.package_prefixes_under("classes/");
+        let packages = archive.package_index("classes/", None);
 
         Ok(Self {
             path,
             archive,
-            package_prefixes,
+            packages,
         })
     }
 
@@ -88,20 +87,14 @@ impl ClassPathEntry for JmodClassPath {
         if !crate::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        let path = package.join("/");
-        let prefix = if path.is_empty() {
-            "classes/".to_owned()
-        } else {
-            format!("classes/{path}/")
-        };
-        Ok(self.archive.contains_package(&prefix))
+        Ok(self.packages.direct.contains(&package.join("/")))
     }
 
     fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         if !crate::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        Ok(self.package_prefixes.contains(&package.join("/")))
+        Ok(self.packages.prefixes.contains(&package.join("/")))
     }
 }
 
@@ -188,6 +181,8 @@ mod tests {
         );
         let class_path = JmodClassPath::new(&path).unwrap();
 
+        assert!(!class_path.contains_package(&[]).unwrap());
+        assert!(!class_path.contains_package(&["outside"]).unwrap());
         assert!(!class_path.contains_package(&["a"]).unwrap());
         assert!(class_path.contains_package(&["a", "b", "c"]).unwrap());
         assert!(class_path.contains_package_prefix(&[]).unwrap());

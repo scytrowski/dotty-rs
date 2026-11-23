@@ -161,10 +161,11 @@ resolution.
   Package-prefix evidence is based on logical `.class`/`.tasty` resource
   names; it does not decode resource bytes, create package symbols, or prove
   that the package has a direct class, module, or package-object term.
-  Directory entries must be files within the classpath root; archive package
-  prefixes are indexed from resource names, not ZIP directory records.
-  Multi-release JAR entries contribute to this query only when the manifest
-  declares `Multi-Release: true`, and only for versions from 9 through the
+  Directory entries must be files within the classpath root. JAR and JMOD
+  entries index direct resource directories and logical package prefixes when
+  opened, so repeated queries use the central-directory snapshot.
+  Versioned entries contribute their logical package paths only when the main
+  section of the JAR manifest declares `Multi-Release: true`, and only for versions from 9 through the
   configured effective release. JMOD resources are considered only under
   their `classes/` root. The empty path represents the unnamed/default
   package boundary, while `_root_` is a Scala source lookup marker; these

@@ -511,13 +511,19 @@ impl ZipStorage {
     }
 }
 
+/// Direct resource directories and logical package prefixes for one classpath entry.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArchivePackages {
+    pub(crate) direct: HashSet<String>,
+    pub(crate) prefixes: HashSet<String>,
+}
+
 /// A ZIP archive indexed by its central directory. Its bytes are either
 /// retained in memory (JARs and test fixtures) or fetched from a
 /// synchronized file handle in bounded ranges.
 pub(crate) struct ZipArchive {
     storage: ZipStorage,
     entries: HashMap<String, CentralDirectoryEntry>,
-    class_resource_names: Vec<String>,
 }
 
 impl ZipArchive {
@@ -603,18 +609,7 @@ impl ZipArchive {
             .into_iter()
             .map(|entry| (entry.name.clone(), entry))
             .collect();
-        let mut class_resource_names = entries
-            .keys()
-            .filter(|name| name.ends_with(".class") || name.ends_with(".tasty"))
-            .cloned()
-            .collect::<Vec<_>>();
-        class_resource_names.sort();
-
-        Ok(Self {
-            storage,
-            entries,
-            class_resource_names,
-        })
+        Ok(Self { storage, entries })
     }
 
     #[cfg(test)]
@@ -623,11 +618,6 @@ impl ZipArchive {
             .values()
             .map(|entry| entry.name.len() + std::mem::size_of::<CentralDirectoryEntry>())
             .sum::<usize>()
-            + self
-                .class_resource_names
-                .iter()
-                .map(String::len)
-                .sum::<usize>()
     }
 
     #[cfg(test)]
@@ -656,53 +646,32 @@ impl ZipArchive {
         Ok(Some(decompressed))
     }
 
-    /// Whether the archive has a direct class or TASTy file below this
-    /// directory prefix. File contents are not needed to establish package
-    /// evidence, so this only inspects the already-validated central index.
-    pub(crate) fn contains_package(&self, prefix: &str) -> bool {
-        self.entries.keys().any(|name| {
-            let Some(file) = name.strip_prefix(prefix) else {
-                return false;
-            };
-            !file.is_empty()
-                && !file.contains('/')
-                && (file.ends_with(".class") || file.ends_with(".tasty"))
-        })
-    }
-
-    /// Returns the indexed logical package paths proved by class or TASTy
-    /// resources under `archive_root`. Resource names were selected from the
-    /// validated central directory when this archive was opened; no entry is
-    /// decompressed for this query.
-    pub(crate) fn package_prefixes_under(&self, archive_root: &str) -> HashSet<String> {
-        let mut packages = HashSet::new();
-        for resource in &self.class_resource_names {
-            if let Some(logical_path) = resource.strip_prefix(archive_root) {
-                add_resource_package_prefixes(logical_path, &mut packages);
-            }
-        }
-        packages
-    }
-
-    /// Returns the logical package paths proved by eligible multi-release
-    /// resources at or below `release_version`. The caller decides whether
-    /// the archive's manifest enables multi-release lookup.
-    pub(crate) fn versioned_package_prefixes(&self, release_version: u16) -> HashSet<String> {
-        let mut packages = HashSet::new();
-        for resource in &self.class_resource_names {
-            let Some(versioned_path) = resource.strip_prefix("META-INF/versions/") else {
+    /// Indexes both package queries from central-directory names without reading
+    /// entry contents. An enabled JAR release also contributes logical paths
+    /// from eligible version directories.
+    pub(crate) fn package_index(
+        &self,
+        archive_root: &str,
+        release: Option<u16>,
+    ) -> ArchivePackages {
+        let mut packages = ArchivePackages::default();
+        for name in self.entries.keys() {
+            let Some(resource) = name.strip_prefix(archive_root) else {
                 continue;
             };
-            let Some((version_name, logical_path)) = versioned_path.split_once('/') else {
-                continue;
-            };
-            let Ok(version) = version_name.parse::<u16>() else {
-                continue;
-            };
-            if version.to_string() != version_name || !(9..=release_version).contains(&version) {
+            if !resource.ends_with(".class") && !resource.ends_with(".tasty") {
                 continue;
             }
-            add_resource_package_prefixes(logical_path, &mut packages);
+            packages.insert_resource(resource);
+            if let Some(release) = release
+                && let Some(versioned) = resource.strip_prefix("META-INF/versions/")
+                && let Some((version_name, path)) = versioned.split_once('/')
+                && let Ok(version) = version_name.parse::<u16>()
+                && (9..=release).contains(&version)
+                && version.to_string() == version_name
+            {
+                packages.insert_resource(path);
+            }
         }
         packages
     }
@@ -789,31 +758,35 @@ impl ZipArchive {
     }
 }
 
-fn add_resource_package_prefixes(resource: &str, packages: &mut HashSet<String>) {
-    if resource.starts_with('/') || resource.ends_with('/') {
-        return;
-    }
-    if !resource.ends_with(".class") && !resource.ends_with(".tasty") {
-        return;
-    }
-    if resource.contains('\\') || resource.contains(':') || resource.contains('\0') {
-        return;
-    }
-
-    let segments = resource.split('/').collect::<Vec<_>>();
-    if segments
-        .iter()
-        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
-        || segments
-            .first()
-            .is_some_and(|segment| *segment == "META-INF")
-    {
-        return;
-    }
-
-    packages.insert(String::new());
-    for length in 1..segments.len() {
-        packages.insert(segments[..length].join("/"));
+impl ArchivePackages {
+    fn insert_resource(&mut self, resource: &str) {
+        if resource.starts_with('/') {
+            return;
+        }
+        let package = resource.rsplit_once('/').map_or("", |(parent, _)| parent);
+        // Direct queries address resource directories. Prefix queries use only
+        // logical package names, excluding metadata and malformed paths.
+        if !self.direct.contains(package) {
+            self.direct.insert(package.to_owned());
+        }
+        if resource.contains(['\\', ':', '\0'])
+            || resource
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+            || resource.starts_with("META-INF/")
+        {
+            return;
+        }
+        // Each new prefix also proves its parent, up to the unnamed root.
+        // Once a prefix exists, all its ancestors are already indexed.
+        let mut prefix = package;
+        while !self.prefixes.contains(prefix) {
+            self.prefixes.insert(prefix.to_owned());
+            if prefix.is_empty() {
+                break;
+            }
+            prefix = prefix.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
     }
 }
 
@@ -1130,15 +1103,12 @@ mod tests {
             memory.read_entry("absent.class"),
             file_backed.read_entry("absent.class")
         );
-        for prefix in ["", "pkg/", "pkg/nested/"] {
-            assert_eq!(
-                memory.contains_package(prefix),
-                file_backed.contains_package(prefix)
-            );
-        }
+        let packages = memory.package_index("", None);
+        assert_eq!(packages, file_backed.package_index("", None));
+        assert_eq!(packages.direct, HashSet::from(["pkg/nested".to_owned()]));
         assert_eq!(
-            memory.package_prefixes_under(""),
-            file_backed.package_prefixes_under("")
+            packages.prefixes,
+            HashSet::from([String::new(), "pkg".to_owned(), "pkg/nested".to_owned()])
         );
     }
 
@@ -1146,21 +1116,26 @@ mod tests {
     fn memory_and_file_backings_match_for_versioned_package_evidence() {
         let bytes = crate::jar_class_path::tests::minimal_stored_zip(&[
             ("pkg/Base.class", b"base"),
-            ("META-INF/versions/11/pkg/Versioned.class", b"versioned"),
+            (
+                "META-INF/versions/11/only/v11/Versioned.class",
+                b"versioned",
+            ),
         ]);
         let (memory, file_backed, _file) = open_memory_and_file(&bytes);
 
         for release in [8, 11, 17, u16::MAX] {
             assert_eq!(
-                memory.versioned_package_prefixes(release),
-                file_backed.versioned_package_prefixes(release)
+                memory.package_index("", Some(release)),
+                file_backed.package_index("", Some(release))
             );
         }
-        assert_eq!(memory.versioned_package_prefixes(10), HashSet::new());
-        assert_eq!(
-            memory.versioned_package_prefixes(11),
-            HashSet::from([String::new(), "pkg".to_owned()])
-        );
+        let below = memory.package_index("", Some(10));
+        assert!(!below.direct.contains("only/v11"));
+        assert!(!below.prefixes.contains("only"));
+        let eligible = memory.package_index("", Some(11));
+        assert!(eligible.direct.contains("only/v11"));
+        assert!(!eligible.direct.contains("only"));
+        assert!(eligible.prefixes.contains("only"));
     }
 
     #[test]
