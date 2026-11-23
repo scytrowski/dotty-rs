@@ -5492,7 +5492,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Member signature references establish identities only; they do not
     /// recursively complete the referenced classes. Repeated calls in a
     /// shared loading session return the same module identity without adding
-    /// another declarations scope.
+    /// another declarations scope. Completing a missing shell from a different
+    /// classpath origin returns [`ClassLoadError::IdentityConflict`].
     pub fn complete_module(&mut self, name: &BinaryName) -> Result<ModuleIdentity, ClassLoadError> {
         self.complete_module_with_tasty_cache(name, &mut HashMap::new())
             .0
@@ -5688,6 +5689,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return Err(ClassLoadError::IdentityConflict {
                 name: name.clone(),
                 reason: "a classfile cannot complete a Scala module class".to_owned(),
+            });
+        }
+        if self.session.origins.get(&identity.module_class) != Some(resource.origin()) {
+            return Err(ClassLoadError::IdentityConflict {
+                name: identity.module_class_name,
+                reason: "the Scala module pair belongs to a different origin".to_owned(),
             });
         }
         if self.collect_resource_observations {
@@ -17964,6 +17971,47 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn module_completion_rejects_a_different_origin_and_can_retry() {
+        let object = BinaryName::from_internal("audits/Single");
+        let binary = BinaryName::from_internal("audits/Single$");
+        let first = ClassOrigin::Jar("first.jar".into());
+        let path = |origin: &ClassOrigin| {
+            ResourceClassPath(resources_for_module_pair(&object, &binary, origin))
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            path(&first),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let pair = loader.ensure_module_identity(&object).unwrap();
+        let session = loader.into_session();
+        let mut other = ClassLoader::with_definitions(
+            path(&ClassOrigin::Jar("second.jar".into())),
+            &mut store,
+            definitions,
+            session,
+        );
+        assert!(matches!(other.complete_module(&object),
+            Err(ClassLoadError::IdentityConflict { name, .. }) if name == binary));
+        assert_eq!(other.origin(pair.module_class), Some(&first));
+        assert_eq!(
+            other.store.symbols.get(pair.module_class).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            other.store.symbols.get(pair.object).info,
+            SymbolInfo::Missing
+        );
+        let session = other.into_session();
+        let mut retry =
+            ClassLoader::with_definitions(path(&first), &mut store, definitions, session);
+        assert_eq!(retry.complete_module(&object).unwrap(), pair);
     }
 
     #[test]
