@@ -36,7 +36,7 @@ pub use dotty_classloader::classloader;
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
 mod class_header;
-pub use class_header::try_complete_class_header;
+pub use class_header::{ClassHeaderBindings, try_complete_class_header};
 
 mod class_field_signatures;
 pub use class_field_signatures::{

@@ -4,9 +4,29 @@ use crate::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceDefinition, SourceSemanticIndex,
     SymbolId, SymbolKind, Typed, Untyped,
 };
-use crate::jvm_class_plan::ClassHeaderBindings;
+use crate::core::{ConflictingTypedTree, SourceId, SourceTypedIndex, TreeId};
 use crate::source_declarations::named_class_template;
 use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
+
+/// Source-to-typed bindings from successful class-header completions in one session.
+#[derive(Debug, Default)]
+pub struct ClassHeaderBindings {
+    pub(crate) index: SourceTypedIndex,
+}
+
+impl ClassHeaderBindings {
+    /// Retains all bindings from a successful attempt, including recursively
+    /// completed headers. Continue typing into the arena returned by that typer.
+    /// On a conflicting mapping, all previously recorded bindings are preserved.
+    pub fn record(&mut self, index: SourceTypedIndex) -> Result<(), ConflictingTypedTree> {
+        self.index.merge(index)
+    }
+
+    /// Looks up the exact typed node recorded for a tree in its source file.
+    pub fn get(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.index.get(source, tree)
+    }
+}
 
 /// Attempts one ordinary named class header, recording all typed parent applications
 /// produced by the attempt (including recursively completed classes in this source).

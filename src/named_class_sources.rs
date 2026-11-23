@@ -1,9 +1,9 @@
 //! Ordered access to the named class sources selected by the caller.
 use std::{collections::HashMap, fmt};
 
+use crate::ClassHeaderBindings;
 use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
 use crate::core::{SemanticStore, SourceId, SymbolId};
-use crate::jvm_class_plan::ClassHeaderBindings;
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
 use crate::{

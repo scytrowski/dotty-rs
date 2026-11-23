@@ -13,15 +13,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use dotty::ClassHeaderBindings;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{
-    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
-};
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};

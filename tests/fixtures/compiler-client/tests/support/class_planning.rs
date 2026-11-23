@@ -2007,6 +2007,13 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
             &packages,
             headers,
         );
+        let roots = [leaf, mid].map(|class| {
+            output
+                .bindings
+                .get(derived.0, class.parents[0])
+                .expect("completed parent application")
+        });
+        assert_ne!(roots[0], roots[1]);
         // Plan Mid before Leaf using the same retained header and body bindings.
         let classes = super::named_classes(&units)
             .rev()
