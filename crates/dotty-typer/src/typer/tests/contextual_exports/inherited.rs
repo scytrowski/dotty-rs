@@ -1,0 +1,277 @@
+use super::*;
+
+const LIB: &str =
+    include_str!("../../../../tests/fixtures/contextual-arguments/InheritedExports.scala");
+
+fn stable_path(typer: &mut SourceTyper<'_>, symbol: SymbolId) -> (SymbolId, SymbolId) {
+    let tree = typer.type_export_forwarder_definition(symbol).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
+        panic!("exported method")
+    };
+    let rhs = def.rhs.unwrap();
+    let TreeKind::Select(sel) = &typer.typed_ast().get(rhs).kind else {
+        panic!("stable delegation")
+    };
+    assert_eq!(
+        typer.store.symbols.info(symbol),
+        &SymbolInfo::Complete(typer.typed_ast().get(rhs).ty)
+    );
+    (reference(typer, sel.qualifier), reference(typer, rhs))
+}
+
+#[test]
+fn named_inherited_export_preserves_receiver_and_original_declaration() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "named").unwrap();
+    let alias = reference(&typer, call);
+    assert_eq!(qualified_name(&typer, alias), ("Named", "selected"));
+    let (receiver, original) = stable_path(&mut typer, alias);
+    assert_eq!(qualified_name(&typer, receiver).1, "Ints");
+    assert_eq!(qualified_name(&typer, original), ("Base", "key"));
+    let tree = client_result(&mut typer, &parsed, "direct").unwrap();
+    assert_eq!(reference(&typer, tree), original);
+    let call = client_result(&mut typer, &parsed, "directSearch").unwrap();
+    assert_eq!(reference(&typer, evidence(&typer, call)), original);
+}
+
+const BAD: &str =
+    include_str!("../../../../tests/fixtures/contextual-arguments/InheritedErrors.scala");
+
+fn with_client(client: &str) -> NamedTestUnit {
+    parse_and_name(&format!(
+        "{LIB}\n{}",
+        client.strip_prefix("package inheritexport\n").unwrap()
+    ))
+}
+
+#[test]
+fn an_exported_given_has_the_priority_of_its_public_owner() {
+    let (parsed, mut store, packages, defs, index, source) = with_client(BAD);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (method, expected) in [("all", ("Api", "key")), ("rankedControl", ("High", "high"))] {
+        let call = client_result(&mut typer, &parsed, method).unwrap();
+        assert_eq!(
+            qualified_name(&typer, reference(&typer, evidence(&typer, call))),
+            expected
+        );
+    }
+    for (method, expected) in [
+        ("clash", [("Api", "key"), ("Rival", "other")]),
+        ("ranked", [("Ranked", "high"), ("Ranked", "low")]),
+    ] {
+        let TyperError::AmbiguousContextualArgument {
+            candidate_names, ..
+        } = rejected_call(&mut typer, &parsed, method)
+        else {
+            panic!("expected ambiguity at {method}")
+        };
+        let mut names: Vec<_> = candidate_names
+            .iter()
+            .map(|(owner, name)| {
+                (
+                    typer
+                        .store
+                        .names
+                        .resolve(owner.unwrap().text())
+                        .trim_end_matches('$'),
+                    typer.store.names.resolve(name.text()),
+                )
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, expected);
+    }
+}
+
+#[test]
+fn bounded_exports_project_the_same_parent_declaration_on_each_receiver() {
+    for order in [["typed", "bool"], ["bool", "typed"]] {
+        let (parsed, mut store, packages, defs, index, source) = with_client(BAD);
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let original = val_symbol(&parsed, typer.store(), &index, source, "key").0;
+        for method in order {
+            let (exporter, module) = if method == "typed" {
+                ("Only", "Ints")
+            } else {
+                ("BoolOnly", "Bools")
+            };
+            let call = client_result(&mut typer, &parsed, method).unwrap();
+            let id = reference(&typer, evidence(&typer, call));
+            assert_eq!(qualified_name(&typer, id), (exporter, "key"));
+            let (receiver, member) = stable_path(&mut typer, id);
+            assert_eq!(qualified_name(&typer, receiver).1, module);
+            assert_eq!(member, original);
+        }
+        for method in ["wrong", "hidden"] {
+            assert!(
+                matches!(
+                    rejected_call(&mut typer, &parsed, method),
+                    TyperError::MissingContextualArgument { .. }
+                ),
+                "{method}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bound_that_only_matches_another_instantiation_publishes_no_witness() {
+    let input = LIB.replace("export Ints.given TC[Int]", "export Ints.given TC[Boolean]");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&input);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    assert!(matches!(
+        rejected_call(&mut typer, &parsed, "typed"),
+        TyperError::MissingContextualArgument { .. }
+    ));
+}
+
+#[test]
+fn legacy_wildcard_collapses_the_diamond_and_respects_a_plain_override() {
+    let (parsed, mut store, packages, defs, index, source) = with_client(BAD);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "diamond").unwrap();
+    let id = reference(&typer, evidence(&typer, call));
+    assert_eq!(qualified_name(&typer, id), ("Both", "old"));
+    let entry = typer.store.symbols.get(id);
+    assert!(
+        entry
+            .flags
+            .contains(SymbolFlags::IMPLICIT | SymbolFlags::EXPORTED)
+    );
+    let scope = index.scope_of(entry.owner.unwrap()).unwrap();
+    assert_eq!(typer.store.scopes.get(scope).lookup_all(&entry.name), &[id]);
+    let (receiver, member) = stable_path(&mut typer, id);
+    assert_eq!(qualified_name(&typer, receiver).1, "Diamond");
+    assert_eq!(qualified_name(&typer, member), ("OldBase", "old"));
+    assert!(matches!(
+        rejected_call(&mut typer, &parsed, "masked"),
+        TyperError::MissingContextualArgument { .. }
+    ));
+}
+
+#[test]
+fn common_parent_members_survive_wildcard_export_but_cannot_be_aliased() {
+    let client =
+        include_str!("../../../../tests/fixtures/contextual-arguments/InheritedSharedNamed.scala");
+    let (parsed, mut store, packages, defs, index, source) = with_client(client);
+    let find_site = |name| {
+        parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, _)| index.export_site_at(source, tree))
+            .find(|site| {
+                store
+                    .names
+                    .resolve(store.symbols.get(site.owner).name.text())
+                    .trim_end_matches('$')
+                    == name
+            })
+            .unwrap()
+    };
+    let shared = find_site("Shared").owner;
+    let bad = find_site("SharedNamed");
+    let original = val_symbol(&parsed, &store, &index, source, "key").0;
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for warm in [false, true] {
+        if warm {
+            let call = client_result(&mut typer, &parsed, "use").unwrap();
+            let path = evidence(&typer, call);
+            assert_eq!(reference(&typer, path), original);
+            let TreeKind::Select(sel) = &typer.typed_ast().get(path).kind else {
+                panic!("qualified inherited witness")
+            };
+            assert_eq!(
+                qualified_name(&typer, reference(&typer, sel.qualifier)).1,
+                "Shared"
+            );
+            let scope = typer.store.scopes.get(index.scope_of(shared).unwrap());
+            assert!(scope.entered_symbols().all(|s| {
+                !typer
+                    .store
+                    .symbols
+                    .get(s)
+                    .flags
+                    .contains(SymbolFlags::EXPORTED)
+            }));
+        }
+        let checkpoint = typer.store.checkpoint();
+        for _ in 0..2 {
+            let error = typer.complete_symbol(bad.owner).unwrap_err();
+            assert!(
+                matches!(error,TyperError::InheritedContextualExport { source: s, tree_index, member } if s == source && tree_index == bad.tree.index() && member == original),
+                "{error:?}"
+            );
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+            let scope = typer.store.scopes.get(index.scope_of(bad.owner).unwrap());
+            assert!(scope.entered_symbols().all(|s| {
+                !typer
+                    .store
+                    .symbols
+                    .get(s)
+                    .flags
+                    .contains(SymbolFlags::EXPORTED)
+            }));
+        }
+    }
+}
+
+#[test]
+fn generic_inherited_export_projects_the_parent_and_rebinds_method_parameters() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "poly").unwrap();
+    let TreeKind::Apply(app) = &typer.typed_ast().get(evidence(&typer, call)).kind else {
+        panic!("provider application")
+    };
+    assert_eq!(
+        qualified_name(&typer, reference(&typer, app.args[0])),
+        ("Api", "key")
+    );
+    let TreeKind::TypeApply(ta) = &typer.typed_ast().get(app.function).kind else {
+        panic!("inferred provider type argument")
+    };
+    assert_eq!(typer.typed_ast().get(ta.args[0]).ty, defs.int);
+    let provider = reference(&typer, ta.function);
+    assert_eq!(qualified_name(&typer, provider), ("Api", "pair"));
+    let original = provider_delegate(&mut typer, provider);
+    assert_eq!(qualified_name(&typer, original), ("Base", "pair"));
+    let target = typer.store.export_target(provider).unwrap();
+    let Type::TermRef { prefix, .. } = typer.store.types.get(target) else {
+        panic!("qualified target")
+    };
+    assert_eq!(
+        qualified_name(
+            &typer,
+            typer.store.types.get(*prefix).reference_symbol().unwrap()
+        )
+        .1,
+        "Ints"
+    );
+
+    let SymbolInfo::Complete(signature) = *typer.store.symbols.info(provider) else {
+        panic!()
+    };
+    let Type::Poly(poly) = typer.store.types.get(signature) else {
+        panic!()
+    };
+    let Type::Method(clause) = typer.store.types.get(poly.result) else {
+        panic!()
+    };
+    let Type::Applied { args, .. } = typer.store.types.get(clause.result) else {
+        panic!("TC[Pair[Int,B]]")
+    };
+    let Type::Applied { args, .. } = typer.store.types.get(args[0]) else {
+        panic!("Pair[Int,B]")
+    };
+    assert_eq!(args[0], defs.int);
+    assert!(
+        matches!(typer.store.types.get(args[1]),Type::ParamRef {binder,index:0} if *binder==signature)
+    );
+
+    let call = client_result(&mut typer, &parsed, "chain").unwrap();
+    let second = reference(&typer, evidence(&typer, call));
+    assert_eq!(qualified_name(&typer, second), ("Second", "key"));
+    let (_, middle) = stable_path(&mut typer, second);
+    assert_eq!(qualified_name(&typer, middle), ("Api", "key"));
+}

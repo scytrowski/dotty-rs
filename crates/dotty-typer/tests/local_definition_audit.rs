@@ -20666,6 +20666,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ThisOwnerNotEnclosing { .. } => "ThisOwnerNotEnclosing",
         TyperError::ThisOwnerCycle { .. } => "ThisOwnerCycle",
         TyperError::TermNameNotFound { .. } => "TermNameNotFound",
+        TyperError::InheritedContextualExport { .. } => "InheritedContextualExport",
         TyperError::AmbiguousTermReference { .. } => "AmbiguousTermReference",
         TyperError::OverloadedReferenceDeferred { .. } => "OverloadedReferenceDeferred",
         TyperError::ObjectTermReferenceDeferred { .. } => "ObjectTermReferenceDeferred",

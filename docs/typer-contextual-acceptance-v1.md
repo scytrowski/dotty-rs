@@ -62,6 +62,14 @@ checks the missing witness on a cycle of two empty exports. The Rust tests also
 check declaration order, precompleted modules, rollback and retry. The existing
 contextual CI job runs both the Rust tests and pinned Scala controls.
 
+The inherited-export fixtures add eleven successful sites and six rejections.
+`InheritedExports.scala` compares the projected member type, public evidence
+path, generic delegation, diamond, and shared-parent wildcard with Scala.
+`InheritedErrors.scala` checks three missing witnesses and two ambiguities.
+`InheritedSharedNamed.scala` checks a rejection at the renamed export itself.
+The corresponding Rust tests inspect the declaration and qualifier separately,
+as well as rollback after rejected completion.
+
 The audit also runs three project controls for an ordinary `class Box[A: TC]`.
 The positive control checks the private witness used by `summon[TC[A]]` in
 the class and the caller's witness passed to `new Box[Int]`. Two negative

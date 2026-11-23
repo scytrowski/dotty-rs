@@ -1,4 +1,5 @@
 mod chained;
+mod inherited;
 
 use super::*;
 
@@ -12,6 +13,19 @@ fn unit(client: &str) -> NamedTestUnit {
         "{LIBRARY}\n{}",
         client.strip_prefix("package exportsprint\n").unwrap()
     ))
+}
+
+fn qualified_name<'a>(typer: &'a SourceTyper<'_>, id: SymbolId) -> (&'a str, &'a str) {
+    let entry = typer.store.symbols.get(id);
+    let owner = typer.store.symbols.get(entry.owner.unwrap());
+    (
+        typer
+            .store
+            .names
+            .resolve(owner.name.text())
+            .trim_end_matches('$'),
+        typer.store.names.resolve(entry.name.text()),
+    )
 }
 
 fn reference(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> SymbolId {
