@@ -7,7 +7,7 @@ use dotty::core::{
     SymbolId, TextRange, Typed,
 };
 use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{ClassMember, DeclarationError};
+use dotty::source_declarations::{ClassMember, DeclarationDiagnostic};
 use dotty::typer::{SignatureCompletion, TyperDiagnostic};
 use dotty::{
     ClassBodyError, ClassHeaderBindings, ClassHeaderError, MemberSignatureError, NameSourceError,
@@ -33,10 +33,7 @@ pub enum Problem {
     Scan(dotty::lexer::RawLexerError),
     Naming(NamerDiagnostic),
     NamerFailure(NamerError),
-    Declaration {
-        error: DeclarationError,
-        location: Option<SourceSpan>,
-    },
+    Declaration(DeclarationDiagnostic),
     Cycle {
         cycle: Arc<SignatureCycle>,
         location: Option<SourceSpan>,
@@ -112,15 +109,20 @@ fn name(
     result
         .problems
         .extend(named.diagnostics().iter().cloned().map(Problem::Naming));
-    named
-        .into_classes(store)
-        .map_err(|failure| {
-            result.problems.push(Problem::Declaration {
-                error: failure.error,
-                location: failure.error.location(&failure.named.syntax().ast),
-            });
-        })
-        .ok()
+    match named.project_classes(store) {
+        Ok(projection) => {
+            result
+                .problems
+                .extend(projection.rejections.into_iter().map(Problem::Declaration));
+            Some(projection.file)
+        }
+        Err(failure) => {
+            result.problems.push(Problem::Declaration(
+                failure.error.diagnostic(&failure.named.syntax().ast),
+            ));
+            None
+        }
+    }
 }
 
 // Seed every eligible declaration once. Subsequent attempts come from completed providers.
@@ -363,10 +365,7 @@ fn analyze_sources(
                     .get_mut(&source)
                     .unwrap()
                     .problems
-                    .push(Problem::Declaration {
-                        error,
-                        location: error.location(u.ast()),
-                    });
+                    .push(Problem::Declaration(error.diagnostic(u.ast())));
                 continue;
             }
         };
@@ -420,10 +419,10 @@ mod tests {
             matches!(d.issue(),dotty::namer::NamerIssue::InvalidVisibilityQualifier {qualifier,..} if qualifier == "Missing")
         );
         let [
-            Problem::Declaration {
-                error: DeclarationError::Unsupported { source, .. },
+            Problem::Declaration(DeclarationDiagnostic {
+                error: dotty::source_declarations::DeclarationError::Unsupported { source, .. },
                 location: Some(span),
-            },
+            }),
         ] = results["T.scala"].problems.as_slice()
         else {
             panic!("expected a located projection failure")

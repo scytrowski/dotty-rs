@@ -152,8 +152,8 @@ impl Workspace {
                         Problem::Sources(error) => &unlocated_error(error),
                         Problem::Scan(error) => &unlocated_error(error),
                         Problem::NamerFailure(error) => &unlocated_error(error),
-                        Problem::Declaration { error, location } => {
-                            let (code, message) = match error {
+                        Problem::Declaration(diagnostic) => {
+                            let (code, message) = match diagnostic.error {
                                 dotty::source_declarations::DeclarationError::Unsupported {
                                     ..
                                 } => (
@@ -170,7 +170,7 @@ impl Workspace {
                             &SourceDiagnostic {
                                 code: Some(code),
                                 message: message.into(),
-                                location: *location,
+                                location: diagnostic.location,
                                 severity: DiagnosticSeverity::Error,
                             }
                         }

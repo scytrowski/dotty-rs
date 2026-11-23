@@ -1,8 +1,9 @@
 //! Source-ordered declarations of ordinary top-level classes after naming.
 
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped, Visibility,
+    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceSpan,
+    SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped,
+    Visibility,
 };
 use std::fmt;
 
@@ -103,7 +104,33 @@ pub enum DeclarationError {
     },
 }
 
+/// An owned declaration error and its byte span captured against the original
+/// parse. Tree IDs in the error belong to that parse. Apply the span only to
+/// the same version of the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclarationDiagnostic {
+    /// Original rejection, suitable for matching before choosing message text.
+    pub error: DeclarationError,
+    /// Offending tree's position when available in the original source.
+    pub location: Option<SourceSpan>,
+}
+
 impl DeclarationError {
+    /// ID of the file being projected, including when a tree has no position.
+    pub fn source_id(&self) -> SourceId {
+        let (Self::Unsupported { source, .. } | Self::InvalidBinding { source, .. }) = *self;
+        source
+    }
+
+    /// Captures the location while the original parse is available. The report
+    /// can be retained after the arena is dropped without formatting the error.
+    pub fn diagnostic(self, ast: &AstArena<Untyped>) -> DeclarationDiagnostic {
+        DeclarationDiagnostic {
+            error: self,
+            location: self.location(ast),
+        }
+    }
+
     /// Position of the rejected declaration in the original untyped arena.
     /// Returns `None` for a missing tree or an absent or foreign source position.
     pub fn location(&self, ast: &AstArena<Untyped>) -> Option<crate::core::SourceSpan> {
@@ -132,6 +159,19 @@ pub fn source_classes(
     index: &SourceSemanticIndex,
     store: &SemanticStore,
 ) -> Result<Vec<SourceClass>, DeclarationError> {
+    read_source_classes(ast, root, source, index, store, Err)
+}
+
+// A callback can retain one unsupported site per package statement. A malformed
+// root or inconsistent binding always rejects the complete projection.
+pub(crate) fn read_source_classes(
+    ast: &AstArena<Untyped>,
+    root: TreeId<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+    mut unsupported: impl FnMut(DeclarationError) -> Result<(), DeclarationError>,
+) -> Result<Vec<SourceClass>, DeclarationError> {
     let reader = Reader {
         ast,
         source,
@@ -148,11 +188,15 @@ pub fn source_classes(
             store.symbols.contains(id) && store.symbols.get(id).kind == SymbolKind::Package
         })
         .ok_or(DeclarationError::InvalidBinding { source, tree: root })?;
-    package
-        .stats
-        .iter()
-        .map(|&tree| reader.class(tree, owner))
-        .collect()
+    let mut classes = Vec::new();
+    for &tree in &package.stats {
+        match reader.class(tree, owner) {
+            Ok(class) => classes.push(class),
+            Err(error @ DeclarationError::Unsupported { .. }) => unsupported(error)?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(classes)
 }
 
 // The same identity check is used when a JVM planner receives individual inputs.

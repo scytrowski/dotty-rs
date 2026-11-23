@@ -381,6 +381,37 @@ fn repairing_an_unknown_type_clears_the_marker_and_preserves_overload_navigation
 }
 
 #[test]
+fn adding_and_repairing_a_trait_keeps_a_later_class_navigable() {
+    let prefix = "/* 😀 */ ";
+    for (encoding, column) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+    ] {
+        let mut client = Client::start(encoding, vec![A, B]);
+        client.open(
+            A,
+            &format!("class First\n{prefix}\nclass A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"),
+        );
+        let caller = "  def read(a: A): Int = a.take(false)";
+        client.open(B, &format!("class B {{\n{caller}\n}}"));
+        let take = caller.find("take").unwrap();
+        client.definition(take, 4, BOOL_METHOD);
+
+        client.edit(A, 2, range(1, column, column), "trait T");
+        client.diagnostics(A, 2, json!([{
+            "source": "dotty", "severity": 1, "range": range(1, column, column + 7),
+            "code": "declaration.unsupported", "message": "Unsupported declaration in the ordinary-class view"
+        }]));
+        client.definition(take, 4, BOOL_METHOD);
+
+        client.edit(A, 3, range(1, column, column + 5), "class");
+        client.diagnostics(A, 3, json!([]));
+        client.definition(take, 4, BOOL_METHOD);
+        client.shutdown();
+    }
+}
+
+#[test]
 fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
     // This document sorts between A and B. While it is rejected, B is the
     // third open document but only the second file in the semantic batch.

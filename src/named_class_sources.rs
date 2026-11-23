@@ -620,6 +620,70 @@ mod tests {
     }
 
     #[test]
+    fn projected_classes_navigate_past_an_omitted_owner() {
+        use crate::core::{NoResolver, TreeKind};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class A { def value() = 40 }; class Dropped { def value() = 2; value() }; class B { def value(): Int = 7 }";
+        let model = crate::parse_source(SourceId::from_index(7), text, Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("Model.scala", &mut store, &mut packages)
+            .unwrap()
+            .project_classes(&store)
+            .unwrap();
+        let file = &model.file;
+        assert_eq!(model.rejections.len(), 1);
+        let caller_text = "class Caller { def read(b: B): Int = b.value() }";
+        let caller = named(42, caller_text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&caller, file], &store).unwrap();
+        let TreeKind::PackageDef(pkg) = &file.ast().get(file.named().syntax().root).kind else {
+            panic!()
+        };
+        let omitted = pkg.stats[1];
+        let TreeKind::TypeDef(def) = &file.ast().get(omitted).kind else {
+            panic!()
+        };
+        let TreeKind::Template(template) = &file.ast().get(def.rhs).kind else {
+            panic!()
+        };
+        for tree in [omitted, template.constructor, template.body[0]] {
+            let symbol = file.index().symbol_at(file.source(), tree).unwrap();
+            assert!(sources.declaration(symbol).is_none());
+        }
+
+        let target_class = &file.classes()[1];
+        let method = target_class.methods().next().unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let owner = caller.classes()[0].symbol;
+        let body =
+            sources.check_class_body(owner, &mut store, defs, &packages, &mut arena, NoResolver);
+        let calls = caller.navigation().unwrap();
+        let offset = caller_text.find("value").unwrap() as u32;
+        assert_eq!(
+            calls.checked_method_at(offset, caller.ast(), &arena, &store, |_| Some(&body)),
+            Some(method.symbol)
+        );
+        let target = calls
+            .definition_at(
+                offset,
+                caller.ast(),
+                &arena,
+                &store,
+                |_| Some(&body),
+                |source| sources.file(source)?.navigation().ok(),
+            )
+            .unwrap();
+        assert_eq!(target.source, file.source());
+        assert_eq!(target.name.start() as usize, text.rfind("value").unwrap());
+        assert_eq!(
+            sources.declaration(method.symbol).unwrap().1.class,
+            target_class.symbol
+        );
+    }
+
+    #[test]
     fn body_by_symbol_stops_at_the_first_field_and_rejects_an_omitted_class() {
         use crate::{ClassBodyError, core::NoResolver};
         let mut store = SemanticStore::new();
