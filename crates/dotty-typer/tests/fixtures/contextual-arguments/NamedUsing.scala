@@ -12,3 +12,7 @@ class Client:
   def effects(): Int = legacy(using flag = tickBool(), n = tickInt())
   def hole(using i: Int, t: Tag): Int = pick(using flag = true)
   def mixed(t: Tag)(using b: Boolean): Int = pick(using 7, text = t)
+  def fallback(using n: Int = 3, flag: Boolean): Int = n
+  def useDefault(): Int = fallback(using flag = true)
+  def preferGiven(using i: Int): Int = fallback(using flag = true)
+  def overrideDefault(using i: Int): Int = fallback(using flag = true, n = i)

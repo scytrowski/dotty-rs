@@ -1075,7 +1075,11 @@ impl SourceTyper<'_> {
                 ..
             }) if self.is_any_ref_identity_symbol(*symbol)
         );
-        let count = named.as_ref().map_or(argument_trees.len(), Vec::len);
+        let count = if partial_using {
+            method.params.len()
+        } else {
+            argument_trees.len()
+        };
         for (argument_index, parameter) in method.params.iter().take(count).enumerate() {
             let formal_ty = if method.kind == MethodKind::Plain {
                 parameter.ty
@@ -1083,22 +1087,26 @@ impl SourceTyper<'_> {
                 self.contextual_parameter_type(callable, parameter.ty, &arguments, tree_index)?
             };
             let slot = named.as_ref().and_then(|s| s[argument_index].as_ref());
-            let (written, argument_tree) = match (slot, &named) {
-                (Some(a), _) => (a.written, &a.value),
-                (None, Some(_)) => {
+            let (written, argument_tree) = match slot {
+                Some(a) => (a.written, &a.value),
+                None if named.is_some() || argument_index >= argument_trees.len() => {
                     let parameter = dotty_core::MethodParam {
                         ty: formal_ty,
                         ..*parameter
                     };
-                    arguments.push(self.search_contextual_argument(
+                    arguments.push(self.omitted_using_argument(
+                        &mut function,
+                        argument_index,
                         &parameter,
                         context,
                         tree_index,
+                        position,
+                        &mut shared,
                         info_journal,
                     )?);
                     continue;
                 }
-                (None, None) => (argument_index, &argument_trees[argument_index]),
+                None => (argument_index, &argument_trees[argument_index]),
             };
             let expected_type = match self.store.types.try_get(formal_ty) {
                 Some(Type::ByName { result }) => *result,
@@ -1257,19 +1265,6 @@ impl SourceTyper<'_> {
             ));
         }
         if method.kind != MethodKind::Plain {
-            if partial_using && named.is_none() {
-                (arguments, _) = self.contextual_call_arguments(
-                    &mut function,
-                    callable,
-                    &method,
-                    arguments,
-                    context,
-                    tree_index,
-                    None,
-                    &mut shared,
-                    info_journal,
-                )?;
-            }
             let call = self.finish_contextual_call(
                 function,
                 callable,

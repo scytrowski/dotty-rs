@@ -15,32 +15,20 @@ impl SourceTyper<'_> {
         function: &mut TreeId<Typed>,
         binder: TypeId,
         method: &MethodType,
-        mut args: Vec<TreeId<Typed>>,
         context: ExpressionContext,
         tree_index: u32,
         mut history: Option<&mut SearchHistory>,
         shared: &mut Vec<TreeId<Typed>>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(Vec<TreeId<Typed>>, ApplyKind), TyperError> {
-        let supplied = args.len();
-        args.reserve(method.params.len() - supplied);
+        let mut args = Vec::with_capacity(method.params.len());
         let mut kind = ApplyKind::Regular;
-        for (ordinal, param) in method.params.iter().enumerate().skip(supplied) {
+        for (ordinal, param) in method.params.iter().enumerate() {
             let param = dotty_core::MethodParam {
                 ty: self.contextual_parameter_type(binder, param.ty, &args, tree_index)?,
                 ..*param
             };
             let default = self.default_call(*function, ordinal, param.ty);
-            // With an explicit using prefix Scala tries a default getter for
-            // the omitted argument before searching the caller's context.
-            if supplied != 0
-                && let Some(default) = default
-            {
-                args.push(self.apply_default_getter(
-                    default, function, shared, context, tree_index, journal,
-                )?);
-                continue;
-            }
             // A missing candidate may have opened a recursive dictionary before
             // reaching a missing dependency. Its symbols follow the probe's lifetime.
             let saved_dictionary = default
@@ -74,6 +62,41 @@ impl SourceTyper<'_> {
             }
         }
         Ok((args, kind))
+    }
+
+    /// Explicit using prefers the selected default, even when a given would succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::typer) fn omitted_using_argument(
+        &mut self,
+        function: &mut TreeId<Typed>,
+        ordinal: usize,
+        param: &dotty_core::MethodParam,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        shared: &mut Vec<TreeId<Typed>>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(default) = self.default_call(*function, ordinal, param.ty) else {
+            return self.search_contextual_argument(param, context, tree_index, journal);
+        };
+        let getter =
+            self.apply_default_getter(default, function, shared, context, tree_index, journal)?;
+        if let Some(span) = position
+            && self
+                .semantic_attempt(None, |t, j| {
+                    t.search_contextual_argument(param, context, tree_index, j)
+                        .map(|_| ())
+                })
+                .is_ok()
+        {
+            self.diagnostics.push(TyperDiagnostic::with_issue(
+                dotty_core::DiagnosticSeverity::Warning,
+                span.span().range(),
+                TyperWarning::DefaultShadowsGiven { name: param.name },
+            ));
+        }
+        Ok(getter)
     }
 
     /// Fill omitted trailing arguments using the selected getter and its earlier clauses.

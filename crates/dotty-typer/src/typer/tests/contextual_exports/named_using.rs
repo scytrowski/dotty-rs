@@ -159,3 +159,35 @@ fn searches_only_unfilled_slots_and_reports_the_failed_goal() {
         assert_eq!(t.store.checkpoint(), checkpoint);
     }
 }
+
+#[test]
+fn default_getter_warns_only_when_it_shadows_unique_evidence() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for site in ["useDefault", "preferGiven", "overrideDefault"] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let actual = qualified_name(&t, reference(&t, args(&t, tree)[0]));
+        if site == "overrideDefault" {
+            assert_eq!(actual, (site, "i"))
+        } else {
+            assert_eq!(actual, ("Client", "fallback$default$1"))
+        }
+        let warnings = t.take_diagnostics();
+        if site == "preferGiven" {
+            let [warning] = &warnings[..] else {
+                panic!("one E220")
+            };
+            let TyperWarning::DefaultShadowsGiven { name } = warning.issue() else {
+                panic!()
+            };
+            assert_eq!(t.store.names.resolve(name.as_name().text()), "n");
+            let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, site);
+            assert_eq!(
+                warning.span(),
+                parsed.ast.get(rhs).position.unwrap().span().range()
+            );
+        } else {
+            assert!(warnings.is_empty())
+        }
+    }
+}
