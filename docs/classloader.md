@@ -543,7 +543,10 @@ name or scope iteration order. A parent whose generic arguments include a
 shape outside the supported TASTy subset keeps its applied constructor and
 arity; each unsupported argument lowers to an explicit `Type::Error` rather
 than erasing the whole parent view. This preserves supported sibling
-arguments while keeping the unsupported slot observable.
+arguments while keeping the unsupported slot observable. For a superclass
+constructed without value arguments, the loader reads the instantiated
+receiver type when the constructor selection and receiver name the same
+resolved superclass.
 
 In a TASTy parent list, the compiler-generated alias
 `scala.ImpureFunction1[A, B]` projects to the JVM trait `scala.Function1[A, B]`.

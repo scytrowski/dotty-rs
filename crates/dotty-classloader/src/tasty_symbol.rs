@@ -2779,6 +2779,19 @@ fn decode_tasty_parent_type(
             )
             .map(Some);
         }
+        if let Some(receiver) =
+            applied_constructor_receiver(file, &application.function, resolved_name, package)
+        {
+            return decode_tasty_parent_type(
+                file,
+                &receiver,
+                resolved_name,
+                package,
+                class_type_parameters,
+                resolve_bare,
+                depth + 1,
+            );
+        }
         return Ok(Some(DecodedTastyType::Named(resolved_name.clone())));
     }
     if let RawTree::Ast { tag, child, .. } | RawTree::NatAst { tag, child, .. } = tree
@@ -2842,6 +2855,44 @@ fn decode_tasty_parent_type(
         tycon: Box::new(DecodedTastyType::Named(resolved_name.clone())),
         arguments,
     }))
+}
+
+/// Recovers the instantiated receiver of a polymorphic superclass constructor.
+fn applied_constructor_receiver<'a>(
+    file: &TastyFile<'a>,
+    function: &RawTree<'a>,
+    parent: &BinaryName,
+    package: &str,
+) -> Option<RawTree<'a>> {
+    let StructuredTree::Length(StructuredNode::TypeApply(call)) =
+        function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::SelectIn(select)) =
+        call.function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::AstChild(new) = select.qualifier.decode_structured().ok()? else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+        new.child.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let is_parent = |tree| {
+        matches!(resolve_reference_name_in_package(file, tree, Some(package)),
+        ReferenceResolution::Resolved(name) if &name == parent)
+    };
+    (select.tag == SELECTIN_TAG
+        && render_member_name(file, select.name).as_deref() == Some("<init>")
+        && new.tag == NEW_TAG
+        && call.type_arguments.len() == applied.arguments.len()
+        && is_parent(&select.underlying_type)
+        && is_parent(&applied.tycon))
+    .then_some(new.child)
 }
 
 fn decode_option_parent_type_application(
@@ -7301,6 +7352,30 @@ mod tests {
                 "{package}, arity {arity}"
             );
         }
+    }
+
+    #[test]
+    fn constructor_parent_preserves_concrete_and_class_parameter_arguments() {
+        let child = decode_with_resolvers(
+            include_bytes!("../tests/fixtures/scala_module_parents/AppliedChild.tasty"),
+            &BinaryName::from_internal("parents/AppliedChild"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(child.type_parameters[0].name, "T");
+        assert_eq!(
+            child.parent_types,
+            vec![Some(DecodedTastyType::Applied {
+                tycon: Box::new(DecodedTastyType::Named(BinaryName::from_internal(
+                    "parents/Base"
+                ))),
+                arguments: vec![
+                    DecodedTastyType::Named(BinaryName::from_internal("parents/Element")),
+                    DecodedTastyType::ClassParamRef(0),
+                ],
+            })]
+        );
     }
 
     #[test]
