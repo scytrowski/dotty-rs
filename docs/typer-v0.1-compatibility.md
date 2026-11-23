@@ -74,6 +74,15 @@ method has its own binder. A caller importing `All.given` obtains
 `Instances.boxed[A](e)`. Use `SourceTyper::type_export_forwarder_definition`
 with the selected method symbol to inspect that definition in the same session.
 
+A conditional provider can be monomorphic or take a leading type parameter
+clause. Each nonempty `using` or legacy `implicit` clause retains its own
+parameters and application. For example, an exported `curried[A,B](using
+k: Key[A])(using t: Tag[B])` supplies `Curried.curried[Int, Boolean](k)(t)`
+at the client. Its body selects the immediate target and forwards both clauses.
+Type parameter bounds and dependencies on earlier clauses use the forwarder's
+own parameters. A dependency between parameters of the same value clause is
+reported as unsupported during export completion.
+
 For chained exports, each generated method selects its immediate delegate.
 When `Middle` exports `Leaf.ints` as `first` and `Public` exports
 `Middle.given`, a call requiring `TC[Int]` after importing `Public.given` selects
@@ -99,7 +108,7 @@ Exceeding this limit returns a typing error and restores the enclosing transacti
 
 The regression fixtures exercise source typing and compare it with Scala 3.9.0
 typer output. Binary export targets, arbitrary stable qualifiers,
-general overloaded or multi-clause forwarding, and emission of these methods
+overload groups, interleaved type parameters, ordinary value clauses, and emission of these methods
 in Rust-produced TASTy or JVM classes remain outside this contract.
 
 When a receiver's instantiated method type has a contextual clause, term

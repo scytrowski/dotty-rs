@@ -130,6 +130,7 @@ def main():
         check_contextual_exports(toolchain, output, client_output, classpath)
         check_chained_exports(toolchain, output, client_output, classpath)
         check_inherited_exports(toolchain, output, client_output, classpath)
+        check_provider_export_clauses(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -289,6 +290,33 @@ def check_inherited_exports(toolchain, output, client_output, classpath):
         "1 error found", "no eligible member key at inheritexport.Ints",
         "inheritexport.Ints.key cannot be exported because it is already a member of object SharedNamed",
     ), classpath)
+
+
+def check_provider_export_clauses(toolchain, output, client_output, classpath):
+    check_typer_output(toolchain, output, "ProviderExports.scala", 0, (
+        "this.need[multi.Pair[Int, Int]](multi.Records.mono(k))",
+        "multi.Records.flat[Int](k, t)", "multi.Records.poly[Int, Boolean](k, t)",
+        "multi.Records.curried[Int, Boolean](k)(t)", "multi.Legacy.old[Int, Boolean](k, t)",
+        "this.need[multi.Pair[Int, Int]](multi.Mono.mono(k))", "multi.Flat.flat[Int](k, t)",
+        "multi.Poly.poly[Int, Boolean](k, t)", "multi.Curried.curried[Int, Boolean](k)(t)",
+        "multi.Again.derived[Int, Boolean](k)(t)", "multi.Old.old[Int, Boolean](k, t)",
+        "final given def mono(using k: multi.Key[Int]): multi.Pair[Int, Int] =\n      multi.Records.mono(k)",
+        "multi.Records.flat[A](k, t)", "multi.Records.poly[A, B](k, t)",
+        "multi.Records.curried[A, B](k)(t)", "multi.Curried.curried[A, B](k)(t)",
+        "final implicit def old[A, B]", "multi.Legacy.old[A, B](k, t)",
+    ), toolchain.classpath)
+    required = ["[E172]", "6 errors found"]
+    for method in ("multi.Curried.curried", "multi.Records.curried"):
+        required.extend((
+            f"{method}[Int, Boolean](/* missing */summon[multi.Key[Int]])",
+            f"{method}[Int, Boolean](k)(/* missing */summon[multi.Tag[Boolean]])",
+        ))
+    for method in ("multi.Again.derived", "multi.Records.curried"):
+        required.append(
+            f"{method}[Int, Boolean](k)(\n"
+            "            /* ambiguous: both parameter right and parameter left match type multi.Tag[Boolean] */"
+        )
+    check_typer_output(toolchain, client_output, "ProviderExportErrors.scala", 1, required, classpath)
 
 
 def check_typer_output(toolchain, output, source, code, required, classpath):
