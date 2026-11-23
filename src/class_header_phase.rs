@@ -1,7 +1,9 @@
 //! Stateful attempts for the ordinary-class headers in a collection of named sources.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::core::{AstArena, Definitions, Packages, SemanticStore, SymbolId, SymbolInfo, Typed};
+use crate::core::{
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, Typed,
+};
 use crate::typer::SignatureCompletion;
 use crate::{
     ClassHeaderBindings, ClassHeaderFailure, NamedClassSources, SignatureDependencies,
@@ -14,8 +16,25 @@ use crate::{
 pub struct ClassHeaderAttempt {
     /// Actual completion or the provider requested by the typer.
     pub completion: SignatureCompletion,
-    /// Previously blocked classes to retry, once each in registration order.
+    /// Unresolved waiters to retry once. Direct waiters come first in registration
+    /// order. When the typer completes other providers in the same file, their
+    /// waiters follow in provider observation order and then registration order.
     pub retry: Vec<SymbolId>,
+}
+
+/// Owned outcome when the caller stops attempting headers.
+/// IDs, types and byte ranges refer to the same session and source versions.
+#[derive(Debug)]
+pub struct ClassHeaderReport {
+    /// Usable classes in input file and declaration order, including recursive completions.
+    pub ready: Vec<SymbolId>,
+    /// Direct rejections in observation order, beginning with constructor failures.
+    pub failures: Vec<ClassHeaderFailure>,
+    /// Unresolved dependencies in input file and declaration order.
+    pub blockages: Vec<(SymbolId, crate::SignatureBlockage)>,
+    /// Classes still requiring an initial attempt or an already released retry,
+    /// in input file and declaration order.
+    pub remaining: Vec<SymbolId>,
 }
 
 /// Header completion for one immutable collection of named files in one session.
@@ -30,6 +49,9 @@ pub struct ClassHeaderPhase<'s, 'file> {
     arena: &'s mut AstArena<Typed>,
     bindings: &'s mut ClassHeaderBindings,
     dependencies: SignatureDependencies,
+    // Only providers actually requested across files can have waiters to wake.
+    watched: HashSet<SymbolId>,
+    providers: HashMap<SourceId, Vec<SymbolId>>,
     failures: Vec<ClassHeaderFailure>,
     failure_indices: HashMap<SymbolId, usize>,
 }
@@ -79,6 +101,8 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
             arena,
             bindings,
             dependencies: SignatureDependencies::new(SignaturePhase::Headers),
+            providers: HashMap::new(),
+            watched: HashSet::new(),
             failures: Vec::new(),
             failure_indices: HashMap::new(),
         }
@@ -123,10 +147,44 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
             self.arena,
             self.bindings,
         ) {
-            Ok(completion) => Ok(ClassHeaderAttempt {
-                completion,
-                retry: self.dependencies.record(class, completion),
-            }),
+            Ok(completion) => {
+                let mut retry = self.dependencies.record(class, completion);
+                match completion {
+                    SignatureCompletion::BlockedOn(provider) => {
+                        if self.watched.insert(provider) {
+                            // The typer only identifies indexed foreign classes as providers.
+                            let (file, _) = self.sources.class(provider).unwrap();
+                            self.providers
+                                .entry(file.source())
+                                .or_default()
+                                .push(provider);
+                        }
+                    }
+                    SignatureCompletion::Complete(_) => {
+                        let (file, _) = self.sources.class(class).unwrap();
+                        if let Some(providers) = self.providers.get_mut(&file.source()) {
+                            providers.retain(|provider| {
+                                let SymbolInfo::Complete(ty) = *self.store.symbols.info(*provider)
+                                else {
+                                    return true;
+                                };
+                                self.watched.remove(provider);
+                                if class != *provider
+                                    && !self.failure_indices.contains_key(provider)
+                                {
+                                    retry.extend(
+                                        self.dependencies
+                                            .record(*provider, SignatureCompletion::Complete(ty)),
+                                    );
+                                }
+                                false
+                            });
+                        }
+                        retry.retain(|&waiter| !self.is_ready(waiter));
+                    }
+                }
+                Ok(ClassHeaderAttempt { completion, retry })
+            }
             Err(error) => {
                 let source = self.sources.class(class).map(|(file, _)| file.source());
                 let index = self.record_failure(ClassHeaderFailure {
@@ -136,6 +194,31 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
                 });
                 Err(&self.failures[index])
             }
+        }
+    }
+
+    /// Ends this phase and releases its borrows of the session. Classification
+    /// reads the canonical store and the recorded graph and runs no further
+    /// typing. Direct errors move into the result with their original payloads.
+    pub fn finish(self) -> ClassHeaderReport {
+        let classes = || self.sources.classes().map(|(_, c)| c.symbol);
+        let blockages = self.dependencies.blockages(classes());
+        let mut ready = Vec::new();
+        let mut remaining = Vec::new();
+        for class in classes() {
+            if self.is_ready(class) {
+                ready.push(class);
+            } else if !self.failure_indices.contains_key(&class)
+                && self.dependencies.waiting_on(class).is_none()
+            {
+                remaining.push(class);
+            }
+        }
+        ClassHeaderReport {
+            ready,
+            remaining,
+            blockages,
+            failures: self.failures,
         }
     }
 }

@@ -41,7 +41,7 @@ pub use class_header::{
 };
 
 mod class_header_phase;
-pub use class_header_phase::{ClassHeaderAttempt, ClassHeaderPhase};
+pub use class_header_phase::{ClassHeaderAttempt, ClassHeaderPhase, ClassHeaderReport};
 
 mod class_field_signatures;
 pub use class_field_signatures::{

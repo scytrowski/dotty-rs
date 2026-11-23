@@ -297,6 +297,121 @@ fn completing_a_shared_base_wakes_both_siblings_once_in_observed_order() {
     drop(phase);
     for class in [a, b] {
         let target = bindings.get(siblings.source(), class.parents[0]).unwrap();
-        assert_eq!(arena.get(target).position.unwrap().source(), siblings.source());
+        assert_eq!(
+            arena.get(target).position.unwrap().source(),
+            siblings.source()
+        );
     }
+}
+
+#[test]
+fn a_recursive_same_file_completion_releases_an_external_waiter() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let external = named(
+        4,
+        "class External(x: Int) extends Mid(x)",
+        &mut store,
+        &mut packages,
+    );
+    let pair = named(
+        9,
+        "class Leaf(x: Int) extends Mid(x); class Mid(x: Int)",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&external, &pair], &store).unwrap();
+    let mut arena = AstArena::new();
+    let mut bindings = ClassHeaderBindings::default();
+    let mut phase = crate::ClassHeaderPhase::prepare(
+        &sources,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        &mut bindings,
+    );
+    let external = external.classes()[0].symbol;
+    let [leaf, mid] = pair.classes() else {
+        panic!()
+    };
+    assert_eq!(
+        phase.attempt(external).unwrap().completion,
+        SignatureCompletion::BlockedOn(mid.symbol)
+    );
+    assert_eq!(phase.attempt(leaf.symbol).unwrap().retry, [external]);
+    assert!(phase.is_ready(mid.symbol));
+    assert!(matches!(
+        phase.attempt(external).unwrap().completion,
+        SignatureCompletion::Complete(_)
+    ));
+    assert!(phase.finish().blockages.is_empty());
+}
+
+#[test]
+fn header_report_distinguishes_cycles_unvisited_and_failed_providers() {
+    use crate::SignatureBlockage;
+    use std::sync::Arc;
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let texts = [
+        "class A(x: Int) extends B(x)",
+        "class B(x: Int) extends A(x)",
+        "class C(x: Int) extends A(x)",
+        "class Good",
+        "class Bad(x: Missing)",
+        "class Child(x: Int) extends Bad(x)",
+        "class New(x: Int)",
+        "class Waiting(x: Int) extends New(x)",
+    ];
+    let files: Vec<_> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| named(i as u32, t, &mut store, &mut packages))
+        .collect();
+    let ids: Vec<_> = files.iter().map(|f| f.classes()[0].symbol).collect();
+    let sources = NamedClassSources::new(&files, &store).unwrap();
+    let mut arena = AstArena::new();
+    let mut bindings = ClassHeaderBindings::default();
+    let mut phase = crate::ClassHeaderPhase::prepare(
+        &sources,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        &mut bindings,
+    );
+    for i in [2, 0, 1, 3, 5, 7] {
+        let _ = phase.attempt(ids[i]).unwrap();
+    }
+    assert!(phase.attempt(ids[4]).is_err());
+    let result = phase.finish();
+    assert_eq!(result.ready, [ids[3]]);
+    assert_eq!(result.remaining, [ids[6]]);
+    let [failure] = result.failures.as_slice() else {
+        panic!()
+    };
+    assert_eq!(failure.class, ids[4]);
+    assert!(
+        matches!(&failure.error, ClassHeaderError::Typing(e) if matches!(e.error(),TyperError::TypeNameNotFound { .. }))
+    );
+    let causes = result.blockages;
+    assert_eq!(
+        causes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [ids[0], ids[1], ids[2], ids[5], ids[7]]
+    );
+    let (
+        SignatureBlockage::CycleMember(a),
+        SignatureBlockage::CycleMember(b),
+        SignatureBlockage::DependsOnCycle(c),
+    ) = (&causes[0].1, &causes[1].1, &causes[2].1)
+    else {
+        panic!()
+    };
+    assert!(Arc::ptr_eq(a, b) && Arc::ptr_eq(a, c));
+    assert_eq!(a.path(), [ids[0], ids[1], ids[0]]);
+    assert_eq!(causes[3].1, SignatureBlockage::Failed(ids[4]));
+    assert_eq!(causes[4].1, SignatureBlockage::Pending(ids[6]));
 }
