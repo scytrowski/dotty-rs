@@ -5825,16 +5825,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.symbols.get_mut(identity.module_class).visibility = visibility;
         }
 
-        let super_class =
-            self.load_dependency(&identity.module_class_name, decoded.super_class, ancestry)?;
-        let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
-        for dependency in decoded.interfaces {
-            interfaces.push(self.load_dependency(
-                &identity.module_class_name,
-                dependency,
-                ancestry,
-            )?);
-        }
+        let parents =
+            self.load_tasty_parents(&identity.module_class_name, &decoded, &[], ancestry)?;
 
         let origin = self.store.symbols.get(identity.module_class).origin;
         let package = self
@@ -5947,12 +5939,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .enter(name, alias_symbol);
         }
 
-        self.complete_class(
-            identity.module_class,
-            declarations,
-            Some(super_class),
-            interfaces,
-        );
+        self.complete_class_with_parent_types(identity.module_class, declarations, parents);
         let object_type = self.type_ref(identity.module_class);
         self.session
             .record_symbol_update(self.store, identity.object);
@@ -7086,26 +7073,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         Ok((class_symbol, declarations, class_origin))
     }
 
-    /// Resolves `super_class`/`interfaces` into `Type::TypeRef`s and
-    /// completes `class_symbol`'s `SymbolInfo`. `declarations` was already
-    /// allocated by [`Self::enter_class`] and populated (for a `.class`
-    /// symbol) by the field/method decode loop by the time this runs.
-    fn complete_class(
+    fn load_tasty_parents(
         &mut self,
-        class_symbol: SymbolId,
-        declarations: ScopeId,
-        super_class: Option<SymbolId>,
-        interfaces: Vec<SymbolId>,
-    ) {
-        let mut parents = Vec::with_capacity(interfaces.len() + 1);
-        if let Some(parent) = super_class {
-            parents.push(self.type_ref(parent));
+        name: &BinaryName,
+        decoded: &tasty_symbol::DecodedTastyClass,
+        class_type_parameters: &[TypeId],
+        ancestry: &mut Vec<BinaryName>,
+    ) -> Result<Vec<TypeId>, ClassLoadError> {
+        let names = std::iter::once(&decoded.super_class).chain(&decoded.interfaces);
+        let mut symbols = Vec::with_capacity(1 + decoded.interfaces.len());
+        for parent in names {
+            symbols.push(self.load_dependency(name, parent.clone(), ancestry)?);
         }
-        for parent in interfaces {
-            parents.push(self.type_ref(parent));
-        }
-
-        self.complete_class_with_parent_types(class_symbol, declarations, parents);
+        Ok(symbols
+            .into_iter()
+            .enumerate()
+            .map(|(i, symbol)| {
+                if let Some(Some(tasty_symbol::DecodedTastyType::Applied { arguments, .. })) =
+                    decoded.parent_types.get(i)
+                {
+                    let tycon = self.type_ref(symbol);
+                    let args = arguments
+                        .iter()
+                        .map(|argument| {
+                            self.lower_tasty_type(name, Some(argument), &[], class_type_parameters)
+                        })
+                        .collect();
+                    self.store.types.alloc(Type::Applied { tycon, args })
+                } else {
+                    self.type_ref(symbol)
+                }
+            })
+            .collect())
     }
 
     fn complete_class_with_parent_types(
@@ -7732,41 +7731,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             origin,
         );
 
-        let super_class =
-            self.load_dependency(name, decoded.super_class.clone(), inheritance_ancestry)?;
-        let mut parents = Vec::with_capacity(decoded.interfaces.len() + 1);
-        let mut parent_symbols = Vec::with_capacity(decoded.interfaces.len() + 1);
-        parent_symbols.push(super_class);
-        for dependency in decoded.interfaces.iter().cloned() {
-            parent_symbols.push(self.load_dependency(name, dependency, inheritance_ancestry)?);
-        }
-        for (index, parent) in decoded
-            .parent_types
-            .iter()
-            .take(parent_symbols.len())
-            .enumerate()
-        {
-            let fallback = parent_symbols.get(index).copied();
-            let parent_type = parent
-                .as_ref()
-                .map(|parent| {
-                    self.lower_tasty_type(name, Some(parent), &[], &class_type_parameters)
-                })
-                .filter(|parent_type| !matches!(self.store.types.get(*parent_type), Type::Error(_)))
-                .or_else(|| fallback.map(|symbol| self.type_ref(symbol)));
-            if let Some(parent_type) = parent_type {
-                parents.push(parent_type);
-            }
-        }
-        if parents.len() != parent_symbols.len() {
-            parents.extend(
-                parent_symbols
-                    .iter()
-                    .skip(parents.len())
-                    .copied()
-                    .map(|symbol| self.type_ref(symbol)),
-            );
-        }
+        let parents =
+            self.load_tasty_parents(name, &decoded, &class_type_parameters, inheritance_ancestry)?;
 
         // `.tasty` annotation decoding is not built yet (unlike `.class`'s
         // `resolve_annotations`/`enter_annotations`), so every field/method
@@ -18070,6 +18036,70 @@ mod tests {
             );
         }
         resources
+    }
+
+    #[test]
+    fn module_parent_retains_its_type_argument_through_both_entry_points() {
+        let name = BinaryName::from_internal("parents/AppliedModule");
+        let binary = BinaryName::from_internal("parents/AppliedModule$");
+        let origin = ClassOrigin::Jar("library.jar".into());
+        for binary_first in [false, true] {
+            let mut resources = HashMap::from([
+                (
+                    name.clone(),
+                    (
+                        include_bytes!(
+                            "../tests/fixtures/scala_module_parents/AppliedModule.tasty"
+                        )
+                        .to_vec(),
+                        ClassFormat::Tasty,
+                        origin.clone(),
+                    ),
+                ),
+                (
+                    binary.clone(),
+                    (
+                        include_bytes!(
+                            "../tests/fixtures/scala_module_parents/AppliedModule$.class"
+                        )
+                        .to_vec(),
+                        ClassFormat::Class,
+                        origin.clone(),
+                    ),
+                ),
+            ]);
+            for dep in ["java/lang/Object", "parents/Carrier", "parents/Element"] {
+                resources.insert(
+                    BinaryName::from_internal(dep),
+                    (
+                        synthetic_class(dep, None),
+                        ClassFormat::Class,
+                        origin.clone(),
+                    ),
+                );
+            }
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+            let id = if binary_first {
+                loader.load_class(&binary).unwrap()
+            } else {
+                loader.complete_module(&name).unwrap().module_class
+            };
+            let carrier = loader
+                .ensure_class_identity(&BinaryName::from_internal("parents/Carrier"))
+                .unwrap();
+            let element = loader
+                .ensure_class_identity(&BinaryName::from_internal("parents/Element"))
+                .unwrap();
+            let parents = &class_info(loader.store, id).parents;
+            assert_eq!(parents.len(), 2);
+            let Type::Applied { tycon, args } = loader.store.types.get(parents[1]) else {
+                panic!("expected Carrier[Element]")
+            };
+            assert_eq!(parent_symbol(loader.store, *tycon), carrier);
+            assert_eq!(args.len(), 1);
+            assert_eq!(parent_symbol(loader.store, args[0]), element);
+        }
     }
 
     #[test]

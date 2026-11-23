@@ -980,7 +980,9 @@ reuse the same `SymbolId`s.
 place. It selects the `OBJECT`-marked `ObjectClass` `TypeDef` from the same
 TASTy package, publishes its real hierarchy and declared fields/methods in a
 `ClassInfo` whose `class` is the canonical module-class symbol, and gives the
-object term a `TypeRef` to that same symbol. Member type references establish
+object term a `TypeRef` to that same symbol. Applied trait parents retain
+their type arguments on both object lookup and direct JVM module lookup.
+Member type references establish
 only identity shells; only parents and interfaces are eagerly loaded. A
 successful completion is cached in the shared session, so repeating it in
 this or a later loader keeps the same declaration scope. A failed completion
