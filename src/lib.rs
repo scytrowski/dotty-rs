@@ -55,7 +55,9 @@ mod named_class_sources;
 pub use named_class_sources::{NamedClassSources, NamedClassSourcesError};
 
 mod named_source;
-pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, NamedSource};
+pub use named_source::{
+    ClassProjection, ClassProjectionError, NameSourceError, NamedClassSource, NamedSource,
+};
 
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};

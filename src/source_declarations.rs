@@ -1,8 +1,9 @@
 //! Source-ordered declarations of ordinary top-level classes after naming.
 
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped, Visibility,
+    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceSpan,
+    SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped,
+    Visibility,
 };
 use std::fmt;
 
@@ -103,7 +104,33 @@ pub enum DeclarationError {
     },
 }
 
+/// An owned declaration error and its byte span captured against the original
+/// parse. Tree IDs in the error belong to that parse. Apply the span only to
+/// the same version of the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclarationDiagnostic {
+    /// Original rejection, suitable for matching before choosing message text.
+    pub error: DeclarationError,
+    /// Offending tree's position when available in the original source.
+    pub location: Option<SourceSpan>,
+}
+
 impl DeclarationError {
+    /// ID of the file being projected, including when a tree has no position.
+    pub fn source_id(&self) -> SourceId {
+        let (Self::Unsupported { source, .. } | Self::InvalidBinding { source, .. }) = *self;
+        source
+    }
+
+    /// Captures the location while the original parse is available. The report
+    /// can be retained after the arena is dropped without formatting the error.
+    pub fn diagnostic(self, ast: &AstArena<Untyped>) -> DeclarationDiagnostic {
+        DeclarationDiagnostic {
+            error: self,
+            location: self.location(ast),
+        }
+    }
+
     /// Position of the rejected declaration in the original untyped arena.
     /// Returns `None` for a missing tree or an absent or foreign source position.
     pub fn location(&self, ast: &AstArena<Untyped>) -> Option<crate::core::SourceSpan> {

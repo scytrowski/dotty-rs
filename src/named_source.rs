@@ -5,7 +5,9 @@ use crate::namer::{
     name_compilation_unit_with_diagnostics,
 };
 use crate::parser::ParseResult;
-use crate::source_declarations::{DeclarationError, SourceClass, source_classes};
+use crate::source_declarations::{
+    DeclarationDiagnostic, DeclarationError, SourceClass, read_source_classes, source_classes,
+};
 use crate::{ParsedSource, SourceFileCalls, SyntaxDiagnostic};
 use std::sync::{Arc, OnceLock};
 
@@ -147,6 +149,18 @@ impl NamedClassSource {
     }
 }
 
+/// Complete ordinary classes and the declarations omitted from the same named file.
+#[derive(Debug)]
+#[must_use = "inspect rejections before treating the file as completely projected"]
+pub struct ClassProjection {
+    /// Original named file with its supported classes in source order. This can
+    /// be empty even when naming has committed declarations to the store.
+    pub file: NamedClassSource,
+    /// One diagnostic per omitted top-level statement in source order, at its
+    /// first unsupported tree. A rejected class contributes no members.
+    pub rejections: Vec<DeclarationDiagnostic>,
+}
+
 /// A rejected ordinary-class projection. Naming has already committed successfully.
 #[derive(Debug)]
 pub struct ClassProjectionError {
@@ -176,13 +190,52 @@ impl NamedSource {
         self,
         store: &SemanticStore,
     ) -> Result<NamedClassSource, ClassProjectionError> {
-        match source_classes(
+        let classes = source_classes(
             &self.syntax.ast,
             self.syntax.root,
             self.source(),
             &self.index,
             store,
-        ) {
+        );
+        self.with_classes(classes)
+    }
+
+    /// Projects complete ordinary classes and retains one typed rejection for
+    /// each unsupported top-level declaration. An unsupported member excludes
+    /// its entire enclosing class. Supply the store used for naming.
+    ///
+    /// A rejected package root or an encountered invalid binding returns the
+    /// original named file in [`ClassProjectionError`], without a partial view.
+    /// Projection leaves the store and naming index intact, including the symbols
+    /// of omitted declarations. Inclusion by itself does not establish that
+    /// a class's dependencies can be typed or emitted.
+    pub fn project_classes(
+        self,
+        store: &SemanticStore,
+    ) -> Result<ClassProjection, ClassProjectionError> {
+        let mut rejections = Vec::new();
+        let classes = read_source_classes(
+            &self.syntax.ast,
+            self.syntax.root,
+            self.source(),
+            &self.index,
+            store,
+            |error| {
+                rejections.push(error.diagnostic(&self.syntax.ast));
+                Ok(())
+            },
+        );
+        Ok(ClassProjection {
+            file: self.with_classes(classes)?,
+            rejections,
+        })
+    }
+
+    fn with_classes(
+        self,
+        classes: Result<Vec<SourceClass>, DeclarationError>,
+    ) -> Result<NamedClassSource, ClassProjectionError> {
+        match classes {
             Ok(classes) => Ok(NamedClassSource {
                 named: self,
                 classes,

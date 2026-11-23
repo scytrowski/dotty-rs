@@ -116,5 +116,66 @@ fn a_wrong_owner_aborts_even_after_a_valid_class_and_an_unsupported_declaration(
     )
     .unwrap_err();
     assert_eq!(error, DeclarationError::InvalidBinding { source, tree });
+    let failure = file.project_classes(&store).unwrap_err();
+    assert_eq!(failure.error, error);
+    assert_eq!(failure.named.index().symbol_at(source, tree), Some(member));
+    assert_eq!(store.checkpoint(), before);
+}
+
+#[test]
+fn an_empty_view_distinguishes_an_empty_file_from_an_omitted_trait() {
+    for text in ["", "trait T"] {
+        let mut store = SemanticStore::new();
+        let named = named(&mut store, text);
+        let original = Arc::clone(&named.syntax);
+        let before = store.checkpoint();
+        let ClassProjection { file, rejections } = named.project_classes(&store).unwrap();
+        assert!(file.classes().is_empty());
+        assert!(std::ptr::eq(file.ast(), &original.ast));
+        if text.is_empty() {
+            assert!(rejections.is_empty());
+        } else {
+            let [report] = rejections.as_slice() else {
+                panic!("expected one rejection")
+            };
+            let DeclarationError::Unsupported { source, tree } = report.error else {
+                panic!()
+            };
+            assert_eq!(report.error.source_id(), file.source());
+            let symbol = file.index().symbol_at(source, tree).unwrap();
+            assert_eq!(
+                store.symbols.get(symbol).kind,
+                crate::core::SymbolKind::Trait
+            );
+            drop(file);
+            drop(original);
+            let span = report.location.unwrap();
+            assert_eq!(span.source(), source);
+            assert_eq!(
+                span.span().range(),
+                crate::core::TextRange::new(0, 7).unwrap()
+            );
+        }
+        assert_eq!(store.checkpoint(), before);
+    }
+}
+
+#[test]
+fn a_missing_package_binding_returns_the_original_named_file() {
+    let mut store = SemanticStore::new();
+    let mut file = named(&mut store, "class A; trait T");
+    let original = Arc::clone(&file.syntax);
+    let source = file.source();
+    file.index = Box::default();
+    let before = store.checkpoint();
+    let failure = file.project_classes(&store).unwrap_err();
+    assert_eq!(
+        failure.error,
+        DeclarationError::InvalidBinding {
+            source,
+            tree: original.root
+        }
+    );
+    assert!(Arc::ptr_eq(&original, &failure.named.syntax));
     assert_eq!(store.checkpoint(), before);
 }
