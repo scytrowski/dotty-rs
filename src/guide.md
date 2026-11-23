@@ -16,6 +16,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
+| Keep a typed failure and its original byte range for later publication | [`ReportedTyperError`], [`ClassBodyError::into_reported_error`], [`MemberSignatureError::into_reported_error`] |
 | Plan source methods and classes for the JVM | [`jvm_method_plan`], [`jvm_class_plan`], [`jvm`] |
 | Read or write structural TASTy | [`tasty::TastyFile`], [`tasty::TastyFileBuilder`] |
 | Project decoded TASTy into shared semantics | [`tasty_unpickler`] |
@@ -156,6 +157,56 @@ Clients choose the order of attempts and which failures to report. Use
 [`SignatureDependencies`] to track multiple waiters and cycles. All semantic
 IDs, including supplied symbols, must come from the store used to name the
 files. Preserve the same typed arena and header bindings for later planning.
+
+## Report a typer error after analysis
+
+Capture a [`ReportedTyperError`] while the original untyped tree is available.
+A client can then match the original [`typer::TyperError`] and use its own
+wording or request the default presentation. This example keeps just the
+report and the matching source text after checking a constructor parameter.
+
+```rust
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::{SourceTyper, TyperError};
+use dotty::{ReportedTyperError, parse_source};
+
+let text = "class Broken(start: Missing)";
+let source = SourceId::from_index(7);
+let report = {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = parse_source(source, text, Default::default())?
+        .bind(&mut store.names)
+        .name("Broken.scala", &mut store, &mut packages)?
+        .into_classes(&store)?;
+    let class = &file.classes()[0];
+    let mut typer = SourceTyper::new(
+        file.ast(), source, file.index(), &mut store, definitions, &packages,
+    );
+    let error = typer.complete_symbol(class.constructor).expect_err("unknown parameter type");
+    ReportedTyperError::from_class(error, class.symbol, Some(class.constructor), |id| {
+        (id == source).then_some(file.ast())
+    })
+};
+
+assert!(matches!(report.error(), TyperError::TypeNameNotFound { .. }));
+assert_eq!(report.code(), Some("typer.type_name_not_found"));
+let location = report.location().ok_or("expected a type name location")?;
+assert_eq!(location.source(), source);
+let range = location.span().range();
+let spelling = &text[range.start() as usize..range.end() as usize];
+assert_eq!(format!("No type named {spelling}"), "No type named Missing");
+assert_eq!(report.render().message, "Unknown type name");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Apply byte ranges only to the original document version. Semantic IDs belong
+to their original session and a failed typing attempt may roll back type slots.
+If the tree is unavailable, clients can still inspect the error and its code.
+[`ClassBodyError::into_reported_error`], [`MemberSignatureError::into_reported_error`]
+and [`ClassFieldSignatureError::into_reported_error`] retain the enclosing symbols
+for wrapped typer failures and return structural errors to the caller intact.
 
 ## Type named methods and retain a call error
 
