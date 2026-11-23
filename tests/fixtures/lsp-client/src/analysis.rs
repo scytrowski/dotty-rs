@@ -511,6 +511,29 @@ mod tests {
     }
 
     #[test]
+    fn constructor_failure_keeps_an_independent_class_navigable() {
+        let text =
+            "class Bad(x: Missing); class Good { def get(): Int = 7; def use(): Int = get() }";
+        let uri = "Good.scala";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new(text.into()).unwrap()),
+        };
+        let results = analyze(&[(uri.to_owned(), doc)].into());
+        let file = &results[uri];
+        let [Problem::Typing(error)] = file.problems.as_slice() else {
+            panic!("expected only the Bad constructor error");
+        };
+        assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
+        let [link] = file.links.as_slice() else {
+            panic!("expected Good.use to resolve Good.get")
+        };
+        assert_eq!(link.uri, uri);
+        assert_eq!(link.origin.start() as usize, text.rfind("get").unwrap());
+        assert_eq!(link.name.start() as usize, text.find("get").unwrap());
+    }
+
+    #[test]
     fn unknown_constructor_parameter_type_points_to_its_name() {
         let uri = "file:///Broken.scala";
         let text = "class Broken(start: Missing)";

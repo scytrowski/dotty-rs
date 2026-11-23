@@ -1902,7 +1902,7 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
             &mut packages,
         );
         let mut attempts = Vec::new();
-        super::complete_headers(
+        let headers = super::complete_headers(
             &NamedClassSources::new(&units, &store).unwrap(),
             &mut store,
             defs,
@@ -1932,6 +1932,13 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
             );
         } else {
             assert_eq!(attempts, [(first, None), (mid, None), (last, None)]);
+        }
+
+        for unit in &units {
+            let class = &unit.classes()[0];
+            for parent in &class.parents {
+                assert!(headers.bindings.get(unit.source(), *parent).is_some());
+            }
         }
 
         let artifacts = super::compile(files);
