@@ -1277,3 +1277,12 @@ fn tasty_package_qualified_members_respect_the_callers_package() {
     }
     type_ledger_client("foreign", "x.open(1)").unwrap();
 }
+
+#[test]
+fn scala_parameterless_method_selection_conforms_to_its_declared_result() {
+    type_ledger_client("foreign", "x.nullary").unwrap();
+    assert!(matches!(
+        type_ledger_client("foreign", "x.nullary()"),
+        Err(dotty_typer::TyperError::ApplicationCalleeNotMethod { .. })
+    ));
+}
