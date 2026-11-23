@@ -223,9 +223,19 @@ fn exercise(encoding: &str, take_column: usize) {
     );
     client.definition(take_column, 2, BOOL_METHOD);
 
+    let only_position = json!({"textDocument": {"uri": B}, "position": {"line":3, "character":20}});
+    assert_eq!(
+        client.request("textDocument/definition", only_position.clone()),
+        Value::Null
+    );
     client.edit(B, 4, range(3, 24, 29), "1");
     client.diagnostics(B, 4, json!([]));
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(
+        client.request("textDocument/definition", only_position),
+        json!([{ "originSelectionRange":range(3,19,23), "targetUri": B,
+            "targetSelectionRange":range(2,6,10), "targetRange":range(2,2,"  def only(n: Int): Int = n".len()) }])
+    );
     client.shutdown();
 }
 

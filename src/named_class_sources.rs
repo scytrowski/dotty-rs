@@ -45,6 +45,7 @@ pub struct NamedClassSources<'a> {
     declarations: SourceDeclarationIndex,
     files: Vec<&'a NamedClassSource>,
     by_source: HashMap<SourceId, &'a NamedClassSource>,
+    by_class: HashMap<SymbolId, (&'a NamedClassSource, &'a SourceClass)>,
 }
 
 impl<'a> NamedClassSources<'a> {
@@ -69,7 +70,16 @@ impl<'a> NamedClassSources<'a> {
         let declarations =
             SourceDeclarationIndex::from_classes(store, ordered.iter().flat_map(|f| f.classes()))
                 .map_err(NamedClassSourcesError::Declaration)?;
+        let by_class = ordered
+            .iter()
+            .flat_map(|&file| {
+                file.classes()
+                    .iter()
+                    .map(move |class| (class.symbol, (file, class)))
+            })
+            .collect();
         Ok(Self {
+            by_class,
             declarations,
             files: ordered,
             by_source,
@@ -87,6 +97,13 @@ impl<'a> NamedClassSources<'a> {
     ) -> impl DoubleEndedIterator<Item = (&'a NamedClassSource, &'a SourceClass)> + '_ {
         self.files()
             .flat_map(|file| file.classes().iter().map(move |class| (file, class)))
+    }
+
+    /// Finds the declaring file and canonical class view for a class symbol in
+    /// this collection. Members, constructors and classes from omitted files
+    /// have no entry. The symbol must belong to the same naming session.
+    pub fn class(&self, symbol: SymbolId) -> Option<(&'a NamedClassSource, &'a SourceClass)> {
+        self.by_class.get(&symbol).copied()
     }
 
     /// Returns the validated declaration index, including constructors and their fields.
@@ -168,6 +185,65 @@ impl<'a> NamedClassSources<'a> {
             store,
             definitions,
             packages,
+        )
+    }
+
+    /// Types the ordinary class identified by `class` after signature completion.
+    /// Supplies its canonical AST and index to [`crate::type_class_body_with_resolver`].
+    /// Pass [`crate::core::NoResolver`] for source-only typing or borrow the session
+    /// resolver. The first failing member rolls back its attempt. Earlier members
+    /// remain committed; later members are skipped. An absent class returns
+    /// [`crate::ClassBodyError::InvalidClass`] before touching the store or arena.
+    pub fn type_class_body(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> Result<crate::jvm_class_plan::TypedClassBody, crate::ClassBodyError> {
+        let (file, view) = self
+            .class(class)
+            .ok_or(crate::ClassBodyError::InvalidClass(class))?;
+        crate::type_class_body_with_resolver(
+            view,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+            arena,
+            resolver,
+        )
+    }
+
+    /// Checks all declared members of an ordinary class after signature completion.
+    /// Uses the canonical source bindings and the supplied session arena and resolver.
+    /// [`crate::check_class_body`] describes member rollback, warning order and
+    /// the retained bindings for successful siblings. A symbol outside the indexed
+    /// classes yields only [`crate::ClassBodyError::InvalidClass`], without typing.
+    pub fn check_class_body(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> crate::ClassBodyCheck {
+        let Some((file, view)) = self.class(class) else {
+            return crate::ClassBodyCheck::invalid(class);
+        };
+        crate::check_class_body(
+            view,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+            arena,
+            resolver,
         )
     }
 
@@ -257,6 +333,35 @@ mod tests {
         }
         assert!(sources.declaration(omitted.classes()[0].symbol).is_none());
     }
+    #[test]
+    fn class_lookup_returns_exact_borrowed_views_only_for_included_classes() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let ab = named(
+            42,
+            "class A; class B { def value() = 1 }",
+            &mut store,
+            &mut packages,
+        );
+        let c = named(7, "class C", &mut store, &mut packages);
+        let other = named(13, "class Other", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&c, &ab], &store).unwrap();
+        for f in [&ab, &c] {
+            for class in f.classes() {
+                let (file, view) = sources.class(class.symbol).unwrap();
+                assert!(std::ptr::eq(file, f));
+                assert!(std::ptr::eq(view, class));
+                assert!(sources.class(class.constructor).is_none());
+            }
+        }
+        assert!(
+            sources
+                .class(ab.classes()[1].methods().next().unwrap().symbol)
+                .is_none()
+        );
+        assert!(sources.class(other.classes()[0].symbol).is_none());
+    }
+
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,
         store: &mut SemanticStore,
@@ -409,5 +514,196 @@ mod tests {
             };
             assert!(matches!(store.types.get(ty),Type::Method(m) if m.result == defs.int));
         }
+    }
+
+    // All classes in these body fixtures have independent headers and annotated members.
+    fn prepare_bodies(
+        sources: &NamedClassSources<'_>,
+        store: &mut SemanticStore,
+        defs: Definitions,
+        packages: &Packages,
+    ) -> AstArena<Typed> {
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        prepare_constructors(sources, store, defs, packages);
+        for (_, class) in sources.classes() {
+            assert!(matches!(
+                sources.try_complete_class_header(
+                    class.symbol,
+                    store,
+                    defs,
+                    packages,
+                    &mut arena,
+                    &mut bindings
+                ),
+                Ok(SignatureCompletion::Complete(_))
+            ));
+            for symbol in class.fields().chain(class.methods()).map(|d| d.symbol) {
+                assert!(matches!(
+                    sources.try_complete_member_signature(symbol, store, defs, packages),
+                    Ok(SignatureCompletion::Complete(_))
+                ));
+            }
+        }
+        arena
+    }
+
+    #[test]
+    fn body_by_symbol_stops_at_the_first_field_and_rejects_an_omitted_class() {
+        use crate::{ClassBodyError, core::NoResolver};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let file = named(
+            42,
+            "class C { val bad: Int = false; def later(): Int = 7 }",
+            &mut store,
+            &mut packages,
+        );
+        let omitted = named(9, "class Other", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let before = (store.checkpoint(), arena.checkpoint());
+        let other = omitted.classes()[0].symbol;
+        assert!(
+            matches!(sources.type_class_body(other,&mut store,defs,&packages,&mut arena,NoResolver),Err(ClassBodyError::InvalidClass(s)) if s == other)
+        );
+        let class = &file.classes()[0];
+        assert!(
+            matches!(sources.type_class_body(class.symbol,&mut store,defs,&packages,&mut arena,NoResolver),
+            Err(ClassBodyError::Member{class:owner,member,error:TyperError::ExpectedExpressionTypeMismatch{actual,expected,..}})
+            if owner == class.symbol && member == class.members[0] && actual == defs.boolean && expected == defs.int)
+        );
+        assert_eq!(before, (store.checkpoint(), arena.checkpoint()));
+    }
+
+    #[test]
+    fn checking_by_symbol_keeps_ordered_errors_committed_bindings_and_warnings() {
+        use crate::{ClassBodyError, core::NoResolver, typer::TyperWarning};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let file = named(
+            42,
+            "class C { def f(implicit n: Int): Int = n; val first: Int = false; def good(): Int = f(1); val last: Int = true }",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let class = &file.classes()[0];
+        let before = (store.checkpoint(), arena.checkpoint());
+        let invalid = sources.check_class_body(
+            class.constructor,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            NoResolver,
+        );
+        assert!(
+            matches!(invalid.body.as_ref().unwrap_err().as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
+        );
+        assert!(invalid.diagnostics.is_empty() && invalid.bindings().is_none());
+        assert_eq!(before, (store.checkpoint(), arena.checkpoint()));
+        let check = sources.check_class_body(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            NoResolver,
+        );
+        let errors = check.body.as_ref().unwrap_err();
+        assert_eq!(errors.len(), 2);
+        for (error, decl) in errors.iter().zip(class.fields()) {
+            assert!(
+                matches!(error, ClassBodyError::Member {class: owner, member: crate::source_declarations::ClassMember::Field(field),error:TyperError::ExpectedExpressionTypeMismatch{actual,expected,..}}
+                if *owner == class.symbol && field.symbol == decl.symbol && *actual == defs.boolean && *expected == defs.int)
+            );
+        }
+        let [(source, warning)] = check.diagnostics.as_slice() else {
+            panic!("expected one warning")
+        };
+        assert_eq!(*source, file.source());
+        assert_eq!(warning.issue(), &TyperWarning::ImplicitClauseWithoutUsing);
+        let good = class.methods().nth(1).unwrap();
+        assert!(
+            check
+                .bindings()
+                .unwrap()
+                .get(file.source(), good.tree)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_moved_report_leaves_navigation_only_for_committed_calls() {
+        use crate::{CheckedClassBody, ClassBodyError, core::NoResolver, typer::TyperWarning};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class C { def only(implicit x: Int): Int = x; def bad(): Int = only(false); def good(): Int = only(1) }";
+        let file = named(42, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let class = &file.classes()[0];
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                class.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
+            )
+            .into_parts();
+        assert!(matches!(body, CheckedClassBody::Partial(_)));
+        let mut errors = report.errors.into_iter();
+        assert!(
+            matches!(errors.next(), Some(ClassBodyError::Member{error:TyperError::ApplicationArgumentTypeMismatch{actual,expected,..},..}) if actual == defs.boolean && expected == defs.int)
+        );
+        assert!(errors.next().is_none());
+        let [(id, warning)] = report.diagnostics.as_slice() else {
+            panic!("expected good call warning")
+        };
+        assert_eq!(
+            (*id, warning.issue()),
+            (file.source(), &TyperWarning::ImplicitClauseWithoutUsing)
+        );
+        drop(report.diagnostics);
+        let calls = file.navigation().unwrap();
+        let definition = |needle| {
+            calls.definition_at_with_bindings(
+                text.find(needle).unwrap() as u32,
+                file.ast(),
+                &arena,
+                &store,
+                |owner| {
+                    assert_eq!(owner, class.symbol);
+                    body.bindings()
+                },
+                |id| sources.file(id)?.navigation().ok(),
+            )
+        };
+        assert!(definition("only(false)").is_none());
+        let target = definition("only(1)").unwrap();
+        assert_eq!(target.source, file.source());
+        assert_eq!(target.name.start() as usize, text.find("only(").unwrap());
+        let (invalid, report) = sources
+            .check_class_body(
+                class.constructor,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
+            )
+            .into_parts();
+        assert!(matches!(invalid, CheckedClassBody::Invalid));
+        assert!(invalid.bindings().is_none());
+        assert!(
+            matches!(report.errors.as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
+        );
     }
 }

@@ -100,7 +100,13 @@ fn compile_with_signatures(
     let named = Instant::now();
     let headers = complete(&units, &mut store, definitions, &packages).unwrap();
     let completed = Instant::now();
-    let (output, typed) = type_bodies(&units, &mut store, definitions, &packages, headers);
+    let (output, typed) = type_bodies(
+        &dotty::NamedClassSources::new(&units, &store).unwrap(),
+        &mut store,
+        definitions,
+        &packages,
+        headers,
+    );
     let typed_at = Instant::now();
     let plan = JvmCompilationUnit {
         classes: class_plans(&units, &typed, &output, &store).unwrap(),

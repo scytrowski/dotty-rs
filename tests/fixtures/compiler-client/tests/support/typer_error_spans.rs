@@ -6,7 +6,7 @@ use dotty::typer::TyperError;
 
 #[test]
 fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
-    use super::{name_units, named_classes, parsing};
+    use super::{name_units, parsing};
     use dotty::classloader::{ClasspathSymbolResolver, JmodClassPath, LoadingSession};
     use dotty::core::{Packages, SemanticStore, SourceId, SourceText, SymbolResolver};
     use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
@@ -48,27 +48,26 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
         let local_packages = Packages::new();
         let mut diagnostics = Vec::new();
         let mut bodies = TypedClassBodies::default();
-        for (unit, class) in named_classes(&units) {
+        for (_, class) in sources.classes() {
             let before = store.checkpoint();
             let resolver_before = resolver.checkpoint();
-            let report = dotty::check_class_body(
-                class,
-                unit.ast(),
-                unit.index(),
-                &mut store,
-                defs,
-                &local_packages,
-                &mut headers.arena,
-                &mut resolver,
-            );
+            let (body, report) = sources
+                .check_class_body(
+                    class.symbol,
+                    &mut store,
+                    defs,
+                    &local_packages,
+                    &mut headers.arena,
+                    &mut resolver,
+                )
+                .into_parts();
             assert!(report.diagnostics.is_empty());
-            let errors = match report.body {
-                Ok(body) => {
-                    bodies.record(body).unwrap();
-                    continue;
-                }
-                Err(errors) => errors,
-            };
+            if let dotty::CheckedClassBody::Complete(body) = body {
+                assert!(report.errors.is_empty());
+                bodies.record(body).unwrap();
+                continue;
+            }
+            let errors = report.errors;
             assert!(!errors.is_empty());
             if errors.len() == class.members.len() {
                 assert_eq!(store.checkpoint(), before);

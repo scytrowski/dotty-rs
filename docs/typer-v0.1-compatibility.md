@@ -2300,15 +2300,12 @@ root and its source attribution.
 ### Class headers and inferred member signatures across source files
 
 The standalone compiler client names the sources and completes their constructor
-signatures. It uses `dotty::try_complete_class_header` for class headers and
-`dotty::try_complete_member_signature` for individual member
-signatures. The client builds one `dotty::SourceDeclarationIndex` from the
-batch's named classes. Looking up a blocked symbol gives its source ID,
-declaring class and symbol kind. The header phase accepts indexed classes and
-the member phase accepts indexed fields and methods. The client uses the source
-ID to select the AST and semantic index for the next attempt. The member API
-checks the declaration against these inputs even for a cached signature. An
-invalid target or a mismatched unit returns `MemberSignatureError::InvalidMember`.
+signatures. Its `dotty::NamedClassSources` collection routes header and member
+signature attempts to the canonical source file and index. The collection's
+declaration index includes the source ID, enclosing class and symbol kind.
+The header phase accepts indexed classes and the member phase accepts indexed
+fields and methods. The underlying member API validates its inputs even for
+a cached signature.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
 - `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
@@ -2359,6 +2356,11 @@ it with `SourceDiagnostic::from_typer_warning`. Its stable code is
 the successful members' trees. The original `type_class_body` entry points
 stop at the first failure.
 
+`NamedClassSources::class` resolves a class symbol to its file and canonical
+class view. The collection's `type_class_body` and `check_class_body` methods
+use that pair with the caller's resolver and typed arena. For a symbol outside
+the indexed classes, both report `ClassBodyError::InvalidClass` before typing.
+
 Both entry points return failures reportable with `ClassBodyError::diagnostic`.
 Look up the original untyped AST by source ID. The report carries severity,
 a message and an optional `SourceSpan`. For an `Int` parameter, `only(false)`
@@ -2405,7 +2407,10 @@ With `check_class_body`, the file index can also navigate from a successfully
 typed member of a class with errors. `SourceFileCalls::definition_at` takes a
 lookup for the enclosing class check and one for the defining file. Its result
 contains the source ID, the declaration range and the exact name token range.
-Only committed bindings participate. JVM planning still requires a complete
+A client can also move the errors and warnings out with `ClassBodyCheck::into_parts`
+and use `SourceFileCalls::definition_at_with_bindings` with the retained
+`CheckedClassBody`. Partial classes carry the successful source-to-typed
+mappings, and invalid classes have no mappings. JVM planning requires a complete
 `TypedClassBody`.
 
 For a call with the wrong number of arguments, pass the original

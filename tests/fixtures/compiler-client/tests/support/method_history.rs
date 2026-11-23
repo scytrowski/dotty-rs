@@ -66,17 +66,21 @@ impl MethodHistory {
         let roots = preferred
             .into_iter()
             .chain(units.iter().flat_map(NamedUnit::method_symbols));
-        let headers =
-            complete_methods_in_order(units, roots, store, defs, packages, |symbol, outcome| {
-                match outcome {
-                    SignatureCompletion::BlockedOn(_) => blocked(),
-                    SignatureCompletion::Complete(_) => {
-                        if let Some(&key) = by_symbol.get(&symbol) {
-                            next_order.push(key);
-                        }
+        let headers = complete_methods_in_order(
+            &dotty::NamedClassSources::new(units, store).unwrap(),
+            roots,
+            store,
+            defs,
+            packages,
+            |symbol, outcome| match outcome {
+                SignatureCompletion::BlockedOn(_) => blocked(),
+                SignatureCompletion::Complete(_) => {
+                    if let Some(&key) = by_symbol.get(&symbol) {
+                        next_order.push(key);
                     }
                 }
-            })?;
+            },
+        )?;
         self.sources = files
             .iter()
             .map(|&(_, path, text)| (path.to_owned(), text.to_owned()))

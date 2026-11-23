@@ -159,7 +159,13 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
     );
     let class = &units[0].classes()[0];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (_, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+    let (_, bodies) = type_bodies(
+        &dotty::NamedClassSources::new(&units, &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     let field = class.fields().next().unwrap();
     assert_eq!(
         store.symbols.info(field.symbol),
@@ -267,7 +273,13 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
             };
             assert_eq!(unit.source(), good.0);
             let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+            let (output, bodies) = type_bodies(
+                &dotty::NamedClassSources::new(&units, &store).unwrap(),
+                &mut store,
+                defs,
+                &packages,
+                headers,
+            );
             let plan = JvmCompilationUnit {
                 classes: class_plans(&units, &bodies, &output, &store).unwrap(),
                 store: &store,
@@ -448,7 +460,7 @@ fn complete_signatures_in_order<'a>(
     observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
     complete_methods_in_order(
-        units,
+        &NamedClassSources::new(units, store).unwrap(),
         roots.into_iter().flat_map(NamedUnit::method_symbols),
         store,
         definitions,
@@ -458,15 +470,14 @@ fn complete_signatures_in_order<'a>(
 }
 
 fn complete_methods_in_order(
-    units: &[NamedUnit],
+    sources: &NamedClassSources,
     roots: impl IntoIterator<Item = SymbolId>,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    let sources = NamedClassSources::new(units, store).unwrap();
-    let headers = complete_headers(&sources, store, definitions, packages, &mut observe)?;
+    let headers = complete_headers(sources, store, definitions, packages, &mut observe)?;
 
     for (unit, class) in sources.classes() {
         while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
@@ -485,7 +496,7 @@ fn complete_methods_in_order(
             complete_member_path(
                 field,
                 Some(dependency),
-                &sources,
+                sources,
                 store,
                 definitions,
                 packages,
@@ -498,7 +509,7 @@ fn complete_methods_in_order(
             complete_member_path(
                 symbol,
                 None,
-                &sources,
+                sources,
                 store,
                 definitions,
                 packages,
@@ -545,9 +556,18 @@ fn with_plan<R>(
         &mut store,
         &mut packages,
     );
-    let headers = complete_signatures(&units, &mut store, definitions, &packages).unwrap();
-
-    let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages, headers);
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    let headers = complete_methods_in_order(
+        &sources,
+        sources.files().flat_map(NamedUnit::method_symbols),
+        &mut store,
+        definitions,
+        &packages,
+        |_, _| {},
+    )
+    .unwrap();
+    let (output, typed_classes) =
+        type_bodies(&sources, &mut store, definitions, &packages, headers);
     let classes = class_plans(&units, &typed_classes, &output, &store).unwrap();
     let plan = JvmCompilationUnit {
         store: &store,
@@ -566,24 +586,24 @@ fn named_classes(
 }
 
 fn type_bodies(
-    units: &[NamedUnit],
+    sources: &NamedClassSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     mut headers: TypedHeaders,
 ) -> (TypedHeaders, TypedClassBodies) {
     let mut typed_classes = TypedClassBodies::default();
-    for (unit, class) in named_classes(units) {
-        let body = dotty::type_class_body(
-            class,
-            unit.ast(),
-            unit.index(),
-            store,
-            definitions,
-            packages,
-            &mut headers.arena,
-        )
-        .unwrap();
+    for (_, class) in sources.classes() {
+        let body = sources
+            .type_class_body(
+                class.symbol,
+                store,
+                definitions,
+                packages,
+                &mut headers.arena,
+                dotty::core::NoResolver,
+            )
+            .unwrap();
         typed_classes.record(body).unwrap();
     }
 
@@ -711,7 +731,7 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             );
             let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
             let sources = NamedClassSources::new(&units, &store).unwrap();
-            let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+            let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
             let caller = sources.file(b).unwrap();
             let provider = sources.file(a).unwrap();
             let calls = caller.navigation().unwrap();
@@ -941,7 +961,13 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
     let (mut store, defs, packages, unit) = class_planning::named(text);
     let units = std::slice::from_ref(&unit);
     let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
-    let (output, bodies) = type_bodies(units, &mut store, defs, &packages, headers);
+    let (output, bodies) = type_bodies(
+        &dotty::NamedClassSources::new(units, &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     let body = bodies.get(unit.classes()[0].symbol).unwrap();
     let mut methods = unit.methods();
     let apply = methods.next().unwrap().symbol;
@@ -1189,7 +1215,7 @@ fn cross_file_signature_completes_the_dependency_then_retries_the_original_metho
     let g = units[1].method_symbol();
     let mut attempts = Vec::new();
     complete_methods_in_order(
-        &units,
+        &NamedClassSources::new(&units, &store).unwrap(),
         [f],
         &mut store,
         defs,
@@ -1330,7 +1356,7 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             );
         }
         let (output, bodies) = type_bodies(
-            std::slice::from_ref(good),
+            &dotty::NamedClassSources::new(std::slice::from_ref(good), &store).unwrap(),
             &mut store,
             defs,
             &packages,

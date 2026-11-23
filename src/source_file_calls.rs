@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolOrigin, TextRange, TreeKind, Typed, Untyped,
+    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
+    SymbolId, SymbolOrigin, TextRange, TreeKind, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBodies;
 use crate::parser::{ParseResult, SourceCallNames};
@@ -166,11 +166,24 @@ impl SourceFileCalls {
         store: &SemanticStore,
         check: impl FnOnce(SymbolId) -> Option<&'a crate::ClassBodyCheck>,
     ) -> Option<SymbolId> {
+        self.method_at_with_bindings(offset, ast, typed_ast, store, |owner| {
+            check(owner)?.bindings()
+        })
+    }
+
+    fn method_at_with_bindings<'a>(
+        &self,
+        offset: u32,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
+    ) -> Option<SymbolId> {
         let call = self.call_names().call_at(offset)?;
         if ast.try_get(call)?.position?.source() != self.call_names().source() {
             return None;
         }
-        let bindings = check(self.class_at(offset)?)?.bindings()?;
+        let bindings = bindings(self.class_at(offset)?)?;
         crate::jvm_class_plan::selected_method(bindings, call, ast, typed_ast, store)
     }
 
@@ -185,7 +198,30 @@ impl SourceFileCalls {
         check: impl FnOnce(SymbolId) -> Option<&'a crate::ClassBodyCheck>,
         file: impl FnOnce(SourceId) -> Option<&'a SourceFileCalls>,
     ) -> Option<SourceMethodTarget> {
-        let method = self.checked_method_at(offset, ast, typed_ast, store, check)?;
+        self.definition_at_with_bindings(
+            offset,
+            ast,
+            typed_ast,
+            store,
+            |owner| check(owner)?.bindings(),
+            file,
+        )
+    }
+
+    /// Resolves a direct call after its class report has been consumed. Return the
+    /// enclosing class's committed [`crate::CheckedClassBody::bindings`] and the
+    /// target file's navigation index from the same session. A failed member or
+    /// missing mapping yields `None`. Positions are UTF-8 byte offsets.
+    pub fn definition_at_with_bindings<'a>(
+        &self,
+        offset: u32,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
+        file: impl FnOnce(SourceId) -> Option<&'a SourceFileCalls>,
+    ) -> Option<SourceMethodTarget> {
+        let method = self.method_at_with_bindings(offset, ast, typed_ast, store, bindings)?;
         let SymbolOrigin::Source(source) = store.symbols.get(method).origin else {
             return None;
         };
