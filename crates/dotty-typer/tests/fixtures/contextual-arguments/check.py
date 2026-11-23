@@ -128,6 +128,7 @@ def main():
         client_output.mkdir()
         classpath = os.pathsep.join((output, toolchain.classpath))
         check_contextual_exports(toolchain, output, client_output, classpath)
+        check_chained_exports(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -229,6 +230,34 @@ def check_contextual_exports(toolchain, output, client_output, classpath):
         "exportsprint.Conditional.boxed[Int](/* missing */summon[exportsprint.TC[Int]])",
         "both parameter b and parameter a match type exportsprint.TC[Int]",
     ), classpath)
+
+
+def check_chained_exports(toolchain, output, client_output, classpath):
+    check_typer_output(toolchain, output, "ChainedExports.scala", 0, (
+        "def control: chain.TC[Int] = chain.Middle.first",
+        "def named: chain.TC[Int] = chain.Renamed.selected",
+        "final given def selected:\n      (chain.Middle.first : => (chain.Leaf.ints : chain.TC[Int])) =\n      chain.Middle.first",
+        "final implicit def old:\n      (chain.OldMiddle.old : => (chain.Legacy.old : chain.TC[Int])) =\n      chain.OldMiddle.old",
+        "chain.Public.want[Int](chain.Public.first)", "this.need[Boolean](chain.Public.flags)",
+        "this.need[Int](chain.Public.first)", "this.need[Int](chain.Filtered.first)",
+        "this.need[Int](chain.OldPublic.old)", "this.need[Boolean](chain.WithoutFirst.flags)",
+        "this.need[chain.Box[Int]](chain.Public.boxed[Int](chain.Public.first))",
+        "chain.Middle.boxed[A](e)", "chain.Leaf.boxed[A](e)",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "ChainedErrors.scala", 1, (
+        "[E172]", "7 errors found",
+        "given instance other in object Rival and given instance first in object Public",
+        "import chain.Filtered.given\n        this.ask[Boolean](/* missing */summon[chain.TC[Boolean]])",
+        "import chain.PlainStar.given\n        this.ask[Int](/* missing */summon[chain.TC[Int]])",
+        "import chain.WithoutFirst.given\n        this.ask[Int](/* missing */summon[chain.TC[Int]])",
+        "import chain.Public.given\n        this.ask[Long](/* missing */summon[chain.TC[Long]])",
+        "chain.Conditional.boxed[Int](/* missing */summon[chain.TC[Int]])",
+        "both parameter right and parameter left match type chain.TC[Int]",
+    ), classpath)
+    check_typer_output(toolchain, client_output, "ChainedCycle.scala", 1, (
+        "[E172]", "1 error found", "No given instance of type cycles.TC[Int] was found for parameter e",
+        "this.need[Int](/* missing */summon[cycles.TC[Int]])",
+    ), toolchain.classpath)
 
 
 def check_typer_output(toolchain, output, source, code, required, classpath):

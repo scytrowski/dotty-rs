@@ -73,8 +73,22 @@ method has its own binder. A caller importing `All.given` obtains
 `Instances.boxed[A](e)`. Use `SourceTyper::type_export_forwarder_definition`
 with the selected method symbol to inspect that definition in the same session.
 
+For chained exports, each generated method selects its immediate delegate.
+When `Middle` exports `Leaf.ints` as `first` and `Public` exports
+`Middle.given`, a call requiring `TC[Int]` after importing `Public.given` selects
+`Public.first`. Its body selects `Middle.first`, whose body selects
+`Leaf.ints`. Each selector sees the intermediate name, visibility, type and
+contextual flag. Conditional methods at each level bind their own type and
+value parameters. A failed client lookup rolls back any forwarders published
+while completing the chain and retains the public candidate names for ambiguity.
+
+Two objects exporting each other's givens with no declared evidence yield a
+missing argument at the client call. Source completion allows up to 16 nested
+requests to complete previously uncompleted export qualifiers on the same stack.
+Exceeding this limit returns a typing error and restores the enclosing transaction.
+
 The regression fixtures exercise source typing and compare it with Scala 3.9.0
-typer output. Chained and inherited exports, arbitrary stable qualifiers,
+typer output. Inherited exports, arbitrary stable qualifiers,
 general overloaded or multi-clause forwarding, and emission of these methods
 in Rust-produced TASTy or JVM classes remain outside this contract.
 

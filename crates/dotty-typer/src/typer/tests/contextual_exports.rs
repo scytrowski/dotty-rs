@@ -1,3 +1,5 @@
+mod chained;
+
 use super::*;
 
 const LIBRARY: &str =
@@ -332,6 +334,10 @@ fn polymorphic_export_passes_its_own_type_and_witness_to_the_original_method() {
         typer.store.symbols.info(provider),
         typer.store.symbols.info(original)
     );
+    assert_eq!(provider_delegate(&mut typer, provider), original);
+}
+
+fn provider_delegate(typer: &mut SourceTyper<'_>, provider: SymbolId) -> SymbolId {
     let def = typer.type_export_forwarder_definition(provider).unwrap();
     let TreeKind::DefDef(def) = &typer.typed_ast().get(def).kind else {
         panic!()
@@ -349,12 +355,12 @@ fn polymorphic_export_passes_its_own_type_and_witness_to_the_original_method() {
     let TreeKind::Apply(delegate) = &typer.typed_ast().get(def.rhs.unwrap()).kind else {
         panic!()
     };
-    assert_eq!(reference(&typer, delegate.args[0]), parameter);
+    assert_eq!(reference(typer, delegate.args[0]), parameter);
     let TreeKind::TypeApply(ta) = &typer.typed_ast().get(delegate.function).kind else {
         panic!()
     };
-    assert_eq!(reference(&typer, ta.args[0]), type_param);
-    assert_eq!(reference(&typer, ta.function), original);
+    assert_eq!(reference(typer, ta.args[0]), type_param);
+    reference(typer, ta.function)
 }
 
 #[test]

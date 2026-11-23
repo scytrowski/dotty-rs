@@ -1624,22 +1624,23 @@ impl SourceTyper<'_> {
         scope: ScopeId,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<SymbolId>, TyperError> {
-        let mut symbols = self.contextual_symbols(scope);
-        let Some(class) = self.store.scopes.get(scope).owner else {
-            return Ok(symbols);
+        let Some(class) = self.store.scopes.get(scope).owner.filter(|&owner| {
+            matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            )
+        }) else {
+            return Ok(self.contextual_symbols(scope));
         };
-        if !matches!(
-            self.store.symbols.get(class).kind,
-            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-        ) {
-            return Ok(symbols);
-        }
+        // Class completion publishes source export methods into this same scope.
+        let ancestors = self.contextual_ancestors(class, journal)?;
+        let mut symbols = self.contextual_symbols(scope);
         let error = |e| TyperError::MemberLookup(Box::new(e));
         let receiver = self.store.types.alloc(Type::ThisType { class });
         let mut names = HashSet::new();
         // Use ordinary lookup for each inherited name so a non-given override
         // can still hide the inherited declaration.
-        for (_, scope) in self.contextual_ancestors(class, journal)? {
+        for (_, scope) in ancestors {
             for symbol in self.contextual_symbols(scope) {
                 names.insert(self.store.symbols.get(symbol).name);
             }
