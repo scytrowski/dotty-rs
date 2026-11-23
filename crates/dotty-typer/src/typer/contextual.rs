@@ -970,6 +970,17 @@ impl SourceTyper<'_> {
             result = instantiated;
         }
         let result = self.contextual_type_at_owner(result, owner, journal)?;
+        // A partial binary signature can still rule a provider out by its
+        // nominal parents. Keep unresolved arguments observable for candidates
+        // that could supply the requested type, including through inheritance.
+        if matches!(self.store.types.try_get(result), Some(Type::Applied { args, .. })
+            if args.iter().any(|arg| matches!(self.store.types.try_get(*arg), Some(Type::Error(_)))))
+            && self
+                .contextual_inference_views(result, expected)
+                .is_ok_and(|views| views.is_empty())
+        {
+            return Ok(None);
+        }
         if !self.contextual_conforms(result, expected, tree_index, journal)? {
             return Ok(None);
         }
