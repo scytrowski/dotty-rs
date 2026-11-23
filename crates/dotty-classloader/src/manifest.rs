@@ -1,39 +1,38 @@
-/// Reads exactly one fact out of a JAR's `META-INF/MANIFEST.MF` bytes:
-/// whether its main section declares `Multi-Release: true` (the JAR File
-/// Specification's "Multi-release JAR files" mechanism, JEP 238).
-///
-/// Not a general manifest-attribute API — nothing else in this crate
-/// needs one. `bytes` is decoded as UTF-8 best-effort
-/// (`String::from_utf8_lossy`) rather than erroring on malformed
-/// encoding: an unreadable manifest simply fails to match, the same
-/// outcome as an absent attribute, so there is no separate error case
-/// worth modeling.
-///
-/// Continuation lines (a line starting with a single space, folding a
-/// header value that would otherwise exceed 72 bytes per the manifest
-/// spec) are unfolded before matching, so a wrapped value is still read
-/// correctly.
-pub(crate) fn declares_multi_release(bytes: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(bytes);
-
-    let mut unfolded_lines: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if let Some(continuation) = line.strip_prefix(' ')
-            && let Some(last) = unfolded_lines.last_mut()
-        {
-            last.push_str(continuation);
-            continue;
+/// Reads the Multi-Release attribute from the main section of a JAR manifest.
+/// CRLF, LF and CR each terminate a physical line. A leading space continues
+/// the preceding value, and the first empty line ends the main section.
+pub(crate) fn declares_multi_release(mut bytes: &[u8]) -> bool {
+    const HEADER: &[u8] = b"Multi-Release: ";
+    let mut value = Vec::new();
+    let mut reading_value = false;
+    while !bytes.is_empty() {
+        let end = bytes
+            .iter()
+            .position(|b| matches!(b, b'\r' | b'\n'))
+            .unwrap_or(bytes.len());
+        let (line, rest) = bytes.split_at(end);
+        if line.is_empty() {
+            break;
         }
-        unfolded_lines.push(line.to_owned());
-    }
-
-    unfolded_lines.iter().any(|line| {
-        let Some((name, value)) = line.split_once(':') else {
-            return false;
+        bytes = match rest {
+            [b'\r', b'\n', tail @ ..] | [_, tail @ ..] => tail,
+            [] => &[],
         };
-        name.trim().eq_ignore_ascii_case("multi-release")
-            && value.trim().eq_ignore_ascii_case("true")
-    })
+        if let Some(continuation) = line.strip_prefix(b" ") {
+            if reading_value {
+                value.extend_from_slice(continuation);
+            }
+        } else {
+            reading_value = line
+                .get(..HEADER.len())
+                .is_some_and(|name| name.eq_ignore_ascii_case(HEADER));
+            if reading_value {
+                value.clear();
+                value.extend_from_slice(&line[HEADER.len()..]);
+            }
+        }
+    }
+    value.eq_ignore_ascii_case(b"true")
 }
 
 #[cfg(test)]
@@ -79,6 +78,37 @@ mod tests {
         let manifest =
             b"Manifest-Version: 1.0\nSome-Other-Attribute: a very long value that wra\n ps onto a second line\nMulti-Release: true\n";
         assert!(declares_multi_release(manifest));
+    }
+
+    #[test]
+    fn only_the_main_section_can_enable_multi_release() {
+        for newline in ["\r", "\n", "\r\n"] {
+            let manifest = [
+                "Manifest-Version: 1.0",
+                "",
+                "Name: Item.class",
+                "Multi-Release: true",
+                "",
+            ]
+            .join(newline);
+            assert!(!declares_multi_release(manifest.as_bytes()), "{newline:?}");
+        }
+    }
+
+    #[test]
+    fn unfolds_the_main_attribute_across_all_manifest_line_endings() {
+        for newline in ["\r", "\n", "\r\n"] {
+            let manifest = [
+                "Manifest-Version: 1.0",
+                "Multi-Release: Tr",
+                " Ue",
+                "",
+                "Name: Item.class",
+                "Multi-Release: false",
+            ]
+            .join(newline);
+            assert!(declares_multi_release(manifest.as_bytes()), "{newline:?}");
+        }
     }
 
     #[test]

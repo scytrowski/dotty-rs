@@ -356,6 +356,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn selects_versioned_class_only_for_a_main_section_declaration() {
+        let name = BinaryName::from_internal("Item");
+        for (manifest, expected) in [
+            (
+                &b"Manifest-Version: 1.0\r\n\r\nName: Item.class\r\nMulti-Release: true\r\n"[..],
+                &b"base"[..],
+            ),
+            (
+                &b"Manifest-Version: 1.0\rMulti-Release: true\r\r"[..],
+                &b"v17"[..],
+            ),
+        ] {
+            let jar = minimal_stored_zip(&[
+                (MANIFEST_ENTRY_NAME, manifest),
+                ("Item.class", b"base"),
+                ("META-INF/versions/17/Item.class", b"v17"),
+            ]);
+            let path = write_temp_jar("main_section_selection", &jar);
+            let entry = JarClassPath::new(&path, 21).unwrap();
+            assert_eq!(entry.find_class(&name).unwrap().unwrap().bytes(), expected);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn finds_a_class_entry_present_in_the_jar() {
         let class_path = JarClassPath::new(
             fixture_path("tests/fixtures/pool_sample_jar/pool_sample_stored.jar"),
