@@ -147,6 +147,16 @@ impl ParsedSource<SyntaxDiagnostic> {
 }
 
 impl ClassPreparation {
+    /// Moves out the optional view and all diagnostics in phase order. A
+    /// prepared file, including an empty one, yields `Some`. Match
+    /// [`Self::Rejected`] directly to keep its explicit file ID.
+    pub fn into_parts(self) -> (Option<NamedClassSource>, Vec<PreparationDiagnostic>) {
+        match self {
+            Self::Prepared { file, diagnostics } => (Some(file), diagnostics),
+            Self::Rejected { diagnostics, .. } => (None, diagnostics),
+        }
+    }
+
     pub(crate) fn from_named(named: NamedSource, store: &SemanticStore) -> Self {
         let source = named.source();
         let mut diagnostics: Vec<_> = named

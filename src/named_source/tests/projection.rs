@@ -177,5 +177,19 @@ fn a_missing_package_binding_returns_the_original_named_file() {
         }
     );
     assert!(Arc::ptr_eq(&original, &failure.named.syntax));
+    let crate::ClassPreparation::Rejected {
+        source: id,
+        diagnostics,
+    } = crate::ClassPreparation::from_named(*failure.named, &store)
+    else {
+        panic!("expected a fatal projection error")
+    };
+    assert_eq!(id, source);
+    let [d @ crate::PreparationDiagnostic::Declaration(report)] = diagnostics.as_slice() else {
+        panic!("expected a declaration error")
+    };
+    assert_eq!(report.error, failure.error);
+    assert_eq!(d.code(), Some("declaration.invalid_binding"));
+    assert_eq!(d.location(), failure.error.location(&original.ast));
     assert_eq!(store.checkpoint(), before);
 }

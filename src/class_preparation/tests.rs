@@ -100,3 +100,44 @@ fn structural_failure_in_a_bound_parse_keeps_its_file_id() {
         matches!(&diagnostics[..], [PreparationDiagnostic::NamerFailure {source: s, error: NamerError::RootIsNotPackage{tree_index}}] if *s == source && *tree_index == tree.index())
     );
 }
+
+#[test]
+fn complete_empty_and_partial_files_are_all_prepared() {
+    let id = SourceId::from_index(52);
+    for (text, names, omitted) in [
+        ("", &[][..], false),
+        ("trait T", &[][..], true),
+        ("class A; trait T; class B", &["A", "B"][..], true),
+        ("class A", &["A"][..], false),
+    ] {
+        let mut store = SemanticStore::new();
+        let (file, diagnostics) = bound(text, id, &mut store)
+            .prepare_classes("Model.scala", &mut store, &mut Packages::new())
+            .into_parts();
+        let file = file.expect("a prepared view even for zero classes");
+        assert_eq!(file.source(), id);
+        assert_eq!(
+            file.classes()
+                .iter()
+                .map(|c| store.names.resolve(store.symbols.get(c.symbol).name.text()))
+                .collect::<Vec<_>>(),
+            names
+        );
+        if omitted {
+            let [d @ PreparationDiagnostic::Declaration(report)] = diagnostics.as_slice() else {
+                panic!("expected just the trait")
+            };
+            assert!(
+                matches!(report.error, DeclarationError::Unsupported {source, ..} if source == id)
+            );
+            assert_eq!(d.code(), Some("declaration.unsupported"));
+            let range = d.location().unwrap().span().range();
+            assert_eq!(
+                &text[range.start() as usize..range.end() as usize],
+                "trait T"
+            );
+        } else {
+            assert!(diagnostics.is_empty());
+        }
+    }
+}
