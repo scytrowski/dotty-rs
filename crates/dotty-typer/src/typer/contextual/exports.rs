@@ -262,7 +262,7 @@ impl SourceTyper<'_> {
         let mut depth = 0;
         while let Type::Method(clause) = self.store.types.get(body) {
             if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH
-                || clause.kind != MethodKind::Contextual
+                || clause.kind == MethodKind::Plain
                 || clause.params.is_empty()
                 || clause.params.iter().any(|p| p.erased || p.varargs)
             {
@@ -497,6 +497,13 @@ impl SourceTyper<'_> {
         clause: dotty_core::types::MethodType,
     ) -> Result<TypeId, TyperError> {
         let position = self.store.symbols.get(method).position;
+        let flags = match clause.kind {
+            MethodKind::Contextual => SymbolFlags::GIVEN,
+            MethodKind::Implicit => SymbolFlags::IMPLICIT,
+            MethodKind::Plain => {
+                return Err(TyperError::SourceProvenanceMissing { symbol: method });
+            }
+        };
         let mut params = Vec::new();
         let mut paths = Vec::new();
         let mut arguments = Vec::new();
@@ -505,7 +512,7 @@ impl SourceTyper<'_> {
                 method,
                 *formal.name.as_name(),
                 SymbolKind::Parameter,
-                SymbolFlags::GIVEN,
+                flags,
                 SymbolInfo::Complete(formal.ty),
             );
             let path = self

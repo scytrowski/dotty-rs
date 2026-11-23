@@ -15,13 +15,22 @@ object Poly:
   export Records.poly
 object Curried:
   export Records.curried
+object Again:
+  export Curried.{curried as derived}
+object Legacy:
+  implicit def old[A,B](implicit k: Key[A], t: Tag[B]): Pair[A,B] = new Pair[A,B]
+object Old:
+  export Legacy.*
 class Client:
   def need[A](using x: A): A = x
   def directMono(using k: Key[Int]): Pair[Int,Int] = { import Records.mono; need[Pair[Int,Int]] }
   def directFlat(using k: Key[Int], t: Tag[Int]): Pair[Int,Int] = { import Records.flat; need[Pair[Int,Int]] }
   def directPoly(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Records.poly; need[Pair[Int,Boolean]] }
   def directCurried(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Records.curried; need[Pair[Int,Boolean]] }
+  def directLegacy(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Legacy.*; need[Pair[Int,Boolean]] }
   def viaMono(using k: Key[Int]): Pair[Int,Int] = { import Mono.given; need[Pair[Int,Int]] }
   def viaFlat(using k: Key[Int], t: Tag[Int]): Pair[Int,Int] = { import Flat.given; need[Pair[Int,Int]] }
   def viaPoly(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Poly.given; need[Pair[Int,Boolean]] }
   def viaCurried(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Curried.given; need[Pair[Int,Boolean]] }
+  def viaAlias(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Again.given; need[Pair[Int,Boolean]] }
+  def viaLegacy(using k: Key[Int], t: Tag[Boolean]): Pair[Int,Boolean] = { import Old.*; need[Pair[Int,Boolean]] }

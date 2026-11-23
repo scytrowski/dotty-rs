@@ -277,3 +277,57 @@ object Api { export Records.product }";
         Some(first)
     );
 }
+
+#[test]
+fn renamed_curried_provider_selects_its_immediate_exported_delegate() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "viaAlias").unwrap();
+    let app = invocation(&typer, evidence(&typer, call));
+    assert_eq!(qualified_name(&typer, app.method), ("Again", "derived"));
+    assert_eq!(app.types, [defs.int, defs.boolean]);
+    let clauses = &[&["k"][..], &["t"][..]];
+    let names: Vec<Vec<_>> = app
+        .clauses
+        .iter()
+        .map(|args| args.iter().map(|&s| qualified_name(&typer, s)).collect())
+        .collect();
+    assert_eq!(names, [vec![("viaAlias", "k")], vec![("viaAlias", "t")]]);
+    let middle = delegate(&mut typer, app.method, 2, clauses);
+    assert_eq!(qualified_name(&typer, middle), ("Curried", "curried"));
+    let leaf = delegate(&mut typer, middle, 2, clauses);
+    assert_eq!(qualified_name(&typer, leaf), ("Records", "curried"));
+}
+
+#[test]
+fn legacy_wildcard_preserves_the_implicit_method_and_its_parameter_flags() {
+    check_sites(
+        &[("directLegacy", "Legacy"), ("viaLegacy", "Old")],
+        "old",
+        &[|d| d.int, |d| d.boolean],
+        &[&["k", "t"]],
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "viaLegacy").unwrap();
+    let method = invocation(&typer, evidence(&typer, call)).method;
+    let tree = typer.type_export_forwarder_definition(method).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    assert!(
+        typer
+            .store
+            .symbols
+            .get(method)
+            .flags
+            .contains(SymbolFlags::IMPLICIT | SymbolFlags::EXPORTED)
+    );
+    for &tree in &def.value_param_clauses[0] {
+        let symbol = typer.typed_index.synthetic_definition_symbol(tree).unwrap();
+        assert_eq!(
+            typer.store.symbols.get(symbol).flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT),
+            SymbolFlags::IMPLICIT
+        );
+    }
+}
