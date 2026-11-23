@@ -32,3 +32,4 @@ class Client:
   def reverse(using b: Box[Int], f: Fmt[Int]): Any = flip(using flag = true)
   def twoVars(using b: Box[Int], f: Fmt[Boolean]): Any = pair(using flag = true)
   def partial(b: Box[Int])(using f: Fmt[Boolean]): Any = pair(using flag = true, b = b)
+  def earlyFilter(using a: Box[Int], b: Box[Boolean], f: Fmt[Int]): Any = flip(using flag = true)
