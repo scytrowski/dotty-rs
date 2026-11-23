@@ -85,6 +85,35 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
         phase
     }
 
+    /// Prepares constructors in the same order as [`Self::prepare`] and stops
+    /// at the first rejection. Earlier successful constructors remain complete,
+    /// and later constructors and header bindings are untouched.
+    pub fn try_prepare(
+        sources: &'s NamedClassSources<'file>,
+        store: &'s mut SemanticStore,
+        definitions: Definitions,
+        packages: &'s Packages,
+        arena: &'s mut AstArena<Typed>,
+        bindings: &'s mut ClassHeaderBindings,
+    ) -> Result<Self, ClassHeaderFailure> {
+        sources
+            .prepare_class_constructors(
+                sources.classes().map(|(_, class)| class.symbol),
+                store,
+                definitions,
+                packages,
+            )
+            .try_for_each(|result| result.map(|_| ()))?;
+        Ok(Self::new(
+            sources,
+            store,
+            definitions,
+            packages,
+            arena,
+            bindings,
+        ))
+    }
+
     fn new(
         sources: &'s NamedClassSources<'file>,
         store: &'s mut SemanticStore,
@@ -195,6 +224,14 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
                 Err(&self.failures[index])
             }
         }
+    }
+
+    /// Stops the phase and moves out the direct error for one class, if present.
+    /// Use after a rejected attempt when stopping at the first error. This skips
+    /// classification of the remaining graph. Use [`Self::finish`] to keep all errors.
+    pub fn into_failure(mut self, class: SymbolId) -> Option<ClassHeaderFailure> {
+        let index = *self.failure_indices.get(&class)?;
+        Some(self.failures.swap_remove(index))
     }
 
     /// Ends this phase and releases its borrows of the session. Classification

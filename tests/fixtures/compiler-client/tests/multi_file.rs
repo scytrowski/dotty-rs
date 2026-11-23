@@ -425,16 +425,24 @@ fn follow_signature(
         };
         ready.extend(dependencies.record(symbol, outcome).into_iter().rev());
         if let SignatureCompletion::BlockedOn(provider) = outcome {
-            if dependencies.waiting_on(provider).is_some()
-                && let Some((_, dotty::SignatureBlockage::CycleMember(cycle))) =
-                    dependencies.blockages([provider]).pop()
-            {
+            if let Some(cycle) = provider_cycle(&dependencies, provider) {
                 return Err(SignatureError::Cycle(cycle));
             }
             ready.push(provider);
         }
     }
     Ok(())
+}
+
+fn provider_cycle(
+    dependencies: &dotty::SignatureDependencies,
+    provider: SymbolId,
+) -> Option<std::sync::Arc<dotty::SignatureCycle>> {
+    dependencies.waiting_on(provider)?;
+    match dependencies.blockages([provider]).pop()? {
+        (_, dotty::SignatureBlockage::CycleMember(cycle)) => Some(cycle),
+        _ => None,
+    }
 }
 
 fn complete_headers(
@@ -444,31 +452,35 @@ fn complete_headers(
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    for (_, class) in sources.classes() {
-        sources.complete_constructor_signature(class.symbol, store, definitions, packages)?;
-    }
     let mut headers = TypedHeaders::default();
+    let mut phase = dotty::ClassHeaderPhase::try_prepare(
+        sources,
+        store,
+        definitions,
+        packages,
+        &mut headers.arena,
+        &mut headers.bindings,
+    )
+    .map_err(|failure| SignatureError::Header(failure.error))?;
     for (_, root) in sources.classes() {
-        if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
+        if phase.is_ready(root.symbol) {
             continue;
         }
-        follow_signature(
-            root.symbol,
-            dotty::SignaturePhase::Headers,
-            None,
-            |symbol| {
-                let completion = sources.try_complete_class_header_reported(
-                    symbol,
-                    store,
-                    definitions,
-                    packages,
-                    &mut headers.arena,
-                    &mut headers.bindings,
-                )?;
-                observe(symbol, completion);
-                Ok(completion)
-            },
-        )?;
+        let mut ready = vec![root.symbol];
+        while let Some(symbol) = ready.pop() {
+            let Ok(attempt) = phase.attempt(symbol) else {
+                let failure = phase.into_failure(symbol).expect("rejected header");
+                return Err(SignatureError::Header(failure.error));
+            };
+            observe(symbol, attempt.completion);
+            ready.extend(attempt.retry.into_iter().rev());
+            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
+                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                    return Err(SignatureError::Cycle(cycle));
+                }
+                ready.push(provider);
+            }
+        }
     }
     Ok(headers)
 }

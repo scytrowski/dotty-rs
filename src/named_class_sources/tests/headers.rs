@@ -415,3 +415,38 @@ fn header_report_distinguishes_cycles_unvisited_and_failed_providers() {
     assert_eq!(causes[3].1, SignatureBlockage::Failed(ids[4]));
     assert_eq!(causes[4].1, SignatureBlockage::Pending(ids[6]));
 }
+
+#[test]
+fn fail_fast_phase_stops_before_the_next_constructor() {
+    use crate::core::SymbolInfo;
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(
+        5,
+        "class First; class Bad(x: Missing); class Last",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let [first, bad, last] = file.classes() else {
+        panic!()
+    };
+    let mut arena = AstArena::new();
+    let mut bindings = ClassHeaderBindings::default();
+    let error = crate::ClassHeaderPhase::try_prepare(
+        &sources,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        &mut bindings,
+    )
+    .unwrap_err();
+    assert_eq!(error.class, bad.symbol);
+    assert!(matches!(
+        store.symbols.info(first.constructor),
+        SymbolInfo::Complete(_)
+    ));
+    assert_eq!(store.symbols.info(last.constructor), &SymbolInfo::Missing);
+}
