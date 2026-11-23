@@ -90,6 +90,9 @@ impl SourceDiagnostic {
     /// Presents a committed typer warning from the supplied source file.
     pub fn from_typer_warning(source: SourceId, diagnostic: &TyperDiagnostic) -> Self {
         let message = match diagnostic.issue() {
+            TyperWarning::DefaultShadowsGiven { .. } => {
+                "A default argument was used for a contextual parameter with available evidence."
+            }
             TyperWarning::ImplicitClauseWithoutUsing => {
                 "Implicit parameters should be provided with a `using` clause."
             }
@@ -134,6 +137,15 @@ impl SourceDiagnostic {
                 format!("Expected {expected} {noun}, got {actual}")
             }
             TyperError::TypeNameNotFound { .. } => "Unknown type name".into(),
+            TyperError::UnknownNamedArgument { .. } => {
+                "The selected clause has no parameter with this name.".into()
+            }
+            TyperError::DuplicateNamedArgument { .. } => {
+                "This parameter already has an argument.".into()
+            }
+            TyperError::PositionalAfterNamedArgument { .. } => {
+                "Positional argument after an out-of-order named argument.".into()
+            }
             TyperError::TermNameNotFound { .. } => "Unknown term name".into(),
             TyperError::ExpectedExpressionTypeMismatch { .. } => {
                 "Expression does not conform to the expected type".into()

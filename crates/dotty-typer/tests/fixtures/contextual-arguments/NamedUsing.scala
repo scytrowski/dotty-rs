@@ -1,6 +1,11 @@
 package namedctx
 trait Family { type Out }
 trait Tag
+class Product
+object Makers:
+  given product(using f: Family, v: f.Out): Product = new Product
+object Api:
+  export Makers.{product as selected}
 class Client:
   def pick(using n: Int, flag: Boolean, text: Tag): Int = n
   def pos(i: Int, b: Boolean, t: Tag): Int = pick(using i, b, t)
@@ -20,3 +25,5 @@ class Client:
   def read(using f: Family, v: f.Out): f.Out = v
   def dep(using p: Family, w: p.Out): p.Out = read(using v = w, f = p)
   def omitFamily(using p: Family, w: p.Out): p.Out = read(using v = w)
+  def exported(using p: Family, w: p.Out): Product = Api.selected(using v = w, f = p)
+  def old(using i: Int, b: Boolean): Int = legacy(using flag = b)

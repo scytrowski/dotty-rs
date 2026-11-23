@@ -295,8 +295,7 @@ impl SourceTyper<'_> {
         let mut target = call.root;
         let mut getter = match original.kind {
             TreeKind::Select(sel) => {
-                let receiver =
-                    self.share_strict_operand(sel.qualifier, stats, context, journal)?;
+                let receiver = self.share_strict_operand(sel.qualifier, stats, context, journal)?;
                 let prefix = self.typed_arena.get(receiver).ty;
                 let getter_type = self.store.types.alloc(Type::term_ref(prefix, call.getter));
                 if receiver != sel.qualifier {

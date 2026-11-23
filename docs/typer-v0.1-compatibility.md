@@ -140,6 +140,19 @@ suffix. An available default getter takes precedence for an omitted explicit
 using argument. The same path substitution applies when searching all arguments
 or materializing a conditional provider with an implicit or using clause.
 
+For an unambiguously selected method with a known contextual or legacy implicit
+signature, an explicit `using` clause can bind arguments by name. Missing slots
+are filled in parameter order, so `read(using v = w)` can first select `p`
+and check `w: p.Out`. Reordered strict operands execute once in written order
+after the receiver and earlier clauses. By-name arguments stay deferred.
+An explicit clause selects an available default getter for an omitted slot and
+warns when a unique contextual argument would have been available (Scala E220).
+Unknown names, duplicate bindings and misplaced positional arguments are diagnosed
+at the offending argument. The NamedUsing fixtures cover source methods, an
+exported given alias and a legacy implicit method. Overload selection by argument
+name and inference of type arguments from named contextual operands are outside
+these controls.
+
 Within a
 simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.

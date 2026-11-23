@@ -210,17 +210,11 @@ fn dependent_named_arguments_use_the_chosen_path_and_report_the_wrong_rhs() {
         assert_eq!(t.store.types.get(*prefix).reference_symbol(), Some(family));
     }
     let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, "wrongPath");
-    let TreeKind::Apply(a) = &parsed.ast.get(rhs).kind else {
-        panic!()
-    };
-    let TreeKind::NamedArg(value) = &parsed.ast.get(a.args[0]).kind else {
-        panic!()
-    };
     let checkpoint = t.store.checkpoint();
     for _ in 0..2 {
         let error = client_result(&mut t, &parsed, "wrongPath").unwrap_err();
         assert!(
-            matches!(error,TyperError::ApplicationArgumentTypeMismatch{tree_index,argument_index:1,..} if tree_index==value.arg.index()),
+            matches!(error,TyperError::ApplicationArgumentTypeMismatch{tree_index,argument_index:0,..} if tree_index==rhs.index()),
             "{error:?}"
         );
         assert_eq!(t.store.checkpoint(), checkpoint);
@@ -245,4 +239,28 @@ fn lifting_a_field_preserves_the_original_singleton_path() {
     assert_eq!(qualified_name(&t, p), ("C", "p"));
     let temp = reference(&t, args(&t, call)[0]);
     assert_eq!(t.store.symbols.info(temp), &SymbolInfo::Complete(*prefix));
+}
+
+#[test]
+fn exported_provider_and_legacy_method_keep_the_selected_symbol_and_witnesses() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, owner, method, names) in [
+        ("exported", "Api", "selected", ["p", "w"]),
+        ("old", "Client", "legacy", ["i", "b"]),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let TreeKind::Apply(call) = &t.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        assert_eq!(
+            qualified_name(&t, reference(&t, call.function)),
+            (owner, method)
+        );
+        let actual: Vec<_> = args(&t, tree)
+            .iter()
+            .map(|&arg| qualified_name(&t, reference(&t, arg)))
+            .collect();
+        assert_eq!(actual, names.map(|n| (site, n)));
+    }
 }

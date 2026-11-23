@@ -16,7 +16,8 @@ enum ErrorSite {
 /// Locates a supported typer error in the untyped AST from the original parse.
 ///
 /// - Call arity errors identify the whole call. Argument type mismatches on
-///   explicit applications identify the offending argument.
+///   explicit applications identify the offending argument value. Named argument
+///   binding errors identify the written argument.
 /// - A type argument count mismatch identifies the explicit type application. A
 ///   bound violation identifies the type argument. Failed or ambiguous overload
 ///   selection identifies the whole call.
@@ -54,6 +55,15 @@ pub fn typer_error_span_with<'a>(
             source, tree_index, ..
         }
         | TyperError::ExpectedExpressionTypeMismatch {
+            source, tree_index, ..
+        }
+        | TyperError::UnknownNamedArgument {
+            source, tree_index, ..
+        }
+        | TyperError::DuplicateNamedArgument {
+            source, tree_index, ..
+        }
+        | TyperError::PositionalAfterNamedArgument {
             source, tree_index, ..
         }
         | TyperError::ExtensionOverload {
@@ -177,7 +187,13 @@ pub fn typer_error_span_with<'a>(
             Some(index) => *call.args.get(index)?,
             None => return Some(position),
         },
-        (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
+        (ErrorSite::Argument(index), TreeKind::Apply(call)) => {
+            let arg = *call.args.get(index)?;
+            match &ast.try_get(arg)?.kind {
+                TreeKind::NamedArg(named) => named.arg,
+                _ => arg,
+            }
+        }
         (ErrorSite::AssignmentTarget { reported_lhs }, TreeKind::Assign(assign))
             if reported_lhs.is_none_or(|index| index == assign.lhs.index()) =>
         {
@@ -417,6 +433,21 @@ mod tests {
         assert_eq!(typer_error_span(&error, &ast), Some(argument_span));
         assert_eq!(typer_error_span(&mismatch(call.index(), 1), &ast), None);
         assert_eq!(typer_error_span(&mismatch(argument.index(), 0), &ast), None);
+        let mut store = SemanticStore::new();
+        let named = ast.alloc(Tree {
+            kind: TreeKind::NamedArg(crate::core::ast::NamedArg {
+                name: *crate::core::TermName::new(store.names.intern("flag")).as_name(),
+                arg: argument,
+            }),
+            position: Some(position(source, 1, 6)),
+            ty: (),
+        });
+        let TreeKind::Apply(app) = &mut ast.get_mut(call).kind else {
+            unreachable!()
+        };
+        app.kind = ApplyKind::Using;
+        app.args[0] = named;
+        assert_eq!(typer_error_span(&error, &ast), Some(argument_span));
         ast.get_mut(call).position = Some(position(other, 0, 7));
         assert_eq!(typer_error_span(&error, &ast), None);
         ast.get_mut(call).position = Some(position(source, 0, 7));

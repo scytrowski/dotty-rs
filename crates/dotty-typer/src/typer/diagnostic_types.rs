@@ -18,10 +18,15 @@ impl TyperError {
         }
     }
 
-    /// Stable diagnostic code for ordinary call arity and argument-type failures.
+    /// Stable diagnostic code for arity, argument-type and named argument binding failures.
     /// Other failures, including explicit type-argument errors, return `None`.
     pub fn call_error_code(&self) -> Option<&'static str> {
         match self {
+            Self::UnknownNamedArgument { .. } => Some("typer.unknown_named_argument"),
+            Self::DuplicateNamedArgument { .. } => Some("typer.duplicate_named_argument"),
+            Self::PositionalAfterNamedArgument { .. } => {
+                Some("typer.positional_after_named_argument")
+            }
             Self::ApplicationArityMismatch { .. } => Some("typer.application_arity_mismatch"),
             Self::ApplicationArgumentTypeMismatch { .. } => {
                 Some("typer.application_argument_type_mismatch")

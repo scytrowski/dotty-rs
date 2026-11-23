@@ -1210,12 +1210,8 @@ impl SourceTyper<'_> {
                             TyperError::argument_type_mismatch(
                                 self.store,
                                 self.source,
-                                if slot.is_some() {
-                                    argument_tree.index()
-                                } else {
-                                    tree_index
-                                },
-                                argument_index,
+                                tree_index,
+                                written,
                                 actual,
                                 expected_type,
                             )
