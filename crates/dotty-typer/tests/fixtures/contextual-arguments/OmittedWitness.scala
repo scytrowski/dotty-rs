@@ -33,3 +33,5 @@ class Client:
   def twoVars(using b: Box[Int], f: Fmt[Boolean]): Any = pair(using flag = true)
   def partial(b: Box[Int])(using f: Fmt[Boolean]): Any = pair(using flag = true, b = b)
   def earlyFilter(using a: Box[Int], b: Box[Boolean], f: Fmt[Int]): Any = flip(using flag = true)
+  def boundOk(using d: Box[Dog]): Any = bounded(using flag = true)
+  def boundMix(using d: Box[Dog], i: Box[Int]): Any = bounded(using flag = true)

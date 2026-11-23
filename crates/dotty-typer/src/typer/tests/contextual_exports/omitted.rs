@@ -60,6 +60,7 @@ fn missing_and_ambiguous_goals_report_the_first_failed_search_and_roll_back() {
     let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     for (site, ambiguous, closed) in [
         ("absent", false, false),
+        ("boundBad", false, false),
         ("noSecond", false, true),
         ("mismatch", false, true),
         ("ambSame", true, false),
@@ -128,4 +129,22 @@ fn missing_and_ambiguous_goals_report_the_first_failed_search_and_roll_back() {
         qualified_name(&t, reference(&t, a.args[1])),
         ("earlyFilter", "a")
     );
+}
+
+#[test]
+fn open_witnesses_satisfy_the_callers_bounds_before_ranking() {
+    let (parsed, mut store, packages, defs, index, source) = invalid_clients();
+    let dog = class_symbol(&parsed, &store, &index, source, "Dog");
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for site in ["boundOk", "boundMix"] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let Type::Applied { args, .. } = t.store.types.get(t.typed_ast().get(tree).ty) else {
+            panic!()
+        };
+        assert_eq!(t.store.types.get(args[0]).reference_symbol(), Some(dog));
+        let TreeKind::Apply(a) = &t.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        assert_eq!(qualified_name(&t, reference(&t, a.args[0])), (site, "d"));
+    }
 }

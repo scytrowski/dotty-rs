@@ -33,6 +33,12 @@ impl SourceTyper<'_> {
         {
             return Ok(None);
         }
+        let bounds = call.poly.params[index].bounds;
+        // This search handles independently bounded type parameters. A dependent
+        // bound needs constraints on more than the binder slot of this goal.
+        if self.type_contains_param_ref(bounds, call.binder)? {
+            return Ok(None);
+        }
         let site = call.tree_index;
         for level in self.contextual_scopes(context, site)? {
             let mut candidates = Vec::new();
@@ -59,6 +65,13 @@ impl SourceTyper<'_> {
                 });
                 if !self.contextual_conforms(actual, closed, site, journal)? {
                     continue;
+                }
+                match self
+                    .check_explicit_type_argument_bounds(argument, bounds, index, site, journal)
+                {
+                    Ok(()) => {}
+                    Err(TyperError::ExplicitTypeArgumentBoundViolation { .. }) => continue,
+                    Err(error) => return Err(error),
                 }
                 candidates.push((
                     Provider {

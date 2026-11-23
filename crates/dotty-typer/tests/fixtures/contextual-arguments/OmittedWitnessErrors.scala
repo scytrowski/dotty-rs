@@ -6,3 +6,4 @@ class Invalid:
   def ambSame(c: Client)(using a: Box[Int], b: Box[Int]): Any = c.one(using flag = true)
   def ambDiff(c: Client)(using a: Box[Int], b: Box[Boolean]): Any = c.one(using flag = true)
   def lateFilter(c: Client)(using a: Box[Int], b: Box[Boolean], f: Fmt[Int]): Any = c.read(using flag = true)
+  def boundBad(c: Client)(using i: Box[Int]): Any = c.bounded(using flag = true)
