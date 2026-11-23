@@ -2324,7 +2324,9 @@ root and its source attribution.
 ### Class headers and inferred member signatures across source files
 
 The standalone compiler client names the sources and completes their constructor
-signatures. Its `dotty::NamedClassSources` collection routes header and member
+signatures by class symbol through `NamedClassSources::complete_constructor_signature`.
+A symbol outside the selected classes produces `ClassHeaderError::InvalidClass`
+before typing. The same collection routes header and member
 signature attempts to the canonical source file and index. The collection's
 declaration index includes the source ID, enclosing class and symbol kind.
 The header phase accepts indexed classes and the member phase accepts indexed
@@ -2408,7 +2410,10 @@ For example, if `Base` expects an `Int`, checking
 Clients that publish after analysis can instead convert the three phase errors
 with `into_reported_error`. The result retains the original typer error, the
 enclosing symbols and its optional validated byte span. Structural errors are
-returned in their original wrapper. For a raw header or constructor failure,
+returned in their original wrapper. For indexed constructors and headers,
+`complete_constructor_signature` and `try_complete_class_header_reported`
+capture the original error and optional location in `ClassHeaderError::Typing`.
+For a raw header or constructor failure,
 `ReportedTyperError::from_class` takes the class and optional member.
 `call_identity` is available for supported call retries within one analysis.
 Use the original document version for the byte range and discard retry keys
