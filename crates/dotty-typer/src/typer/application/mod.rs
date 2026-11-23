@@ -8,6 +8,7 @@ use super::*;
 pub(super) mod constructors;
 pub use constructors::ConstructorCandidate;
 mod inference;
+mod named;
 pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::{InferenceLocation, PolyApplicationInference};
 
@@ -1010,6 +1011,8 @@ impl SourceTyper<'_> {
                 method_kind: method.kind,
             });
         }
+        let named =
+            self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
         let mut shared = Vec::new();
         let partial_using = application_kind == ApplyKind::Using
             && !argument_trees.is_empty()
@@ -1072,20 +1075,45 @@ impl SourceTyper<'_> {
                 ..
             }) if self.is_any_ref_identity_symbol(*symbol)
         );
-        for (argument_index, (argument_tree, parameter)) in
-            argument_trees.iter().zip(&method.params).enumerate()
-        {
+        let count = if partial_using {
+            method.params.len()
+        } else {
+            argument_trees.len()
+        };
+        for (argument_index, parameter) in method.params.iter().take(count).enumerate() {
             let formal_ty = if method.kind == MethodKind::Plain {
                 parameter.ty
             } else {
                 self.contextual_parameter_type(callable, parameter.ty, &arguments, tree_index)?
+            };
+            let slot = named.as_ref().and_then(|s| s[argument_index].as_ref());
+            let (written, argument_tree) = match slot {
+                Some(a) => (a.written, &a.value),
+                None if named.is_some() || argument_index >= argument_trees.len() => {
+                    let parameter = dotty_core::MethodParam {
+                        ty: formal_ty,
+                        ..*parameter
+                    };
+                    arguments.push(self.omitted_using_argument(
+                        &mut function,
+                        argument_index,
+                        &parameter,
+                        context,
+                        tree_index,
+                        position,
+                        &mut shared,
+                        info_journal,
+                    )?);
+                    continue;
+                }
+                None => (argument_index, &argument_trees[argument_index]),
             };
             let expected_type = match self.store.types.try_get(formal_ty) {
                 Some(Type::ByName { result }) => *result,
                 _ => formal_ty,
             };
             let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
-                let typed_argument = typed_arguments[argument_index];
+                let typed_argument = typed_arguments[written];
                 debug_assert_eq!(
                     self.typed_arena.get(typed_argument.typed).ty,
                     typed_argument.own_type
@@ -1183,7 +1211,7 @@ impl SourceTyper<'_> {
                                 self.store,
                                 self.source,
                                 tree_index,
-                                argument_index,
+                                written,
                                 actual,
                                 expected_type,
                             )
@@ -1199,6 +1227,9 @@ impl SourceTyper<'_> {
                         error: Box::new(error),
                     });
                 }
+            }
+            if *argument_tree != argument_trees[written] {
+                self.record_typed_child(argument_trees[written], argument, new_mappings)?;
             }
             arguments.push(argument);
         }
@@ -1217,19 +1248,6 @@ impl SourceTyper<'_> {
             ));
         }
         if method.kind != MethodKind::Plain {
-            if partial_using {
-                (arguments, _) = self.contextual_call_arguments(
-                    &mut function,
-                    callable,
-                    &method,
-                    arguments,
-                    context,
-                    tree_index,
-                    None,
-                    &mut shared,
-                    info_journal,
-                )?;
-            }
             let call = self.finish_contextual_call(
                 function,
                 callable,
@@ -1239,6 +1257,24 @@ impl SourceTyper<'_> {
                 position,
                 tree_index,
             )?;
+            // Compute dependent result paths from the original operands before
+            // introducing temporaries solely for evaluation order.
+            if let Some(slots) = &named
+                && slots
+                    .iter()
+                    .enumerate()
+                    .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
+            {
+                self.order_named_operands(
+                    call,
+                    slots,
+                    &method,
+                    &mut shared,
+                    context,
+                    tree_index,
+                    info_journal,
+                )?;
+            }
             return Ok(self.bind_default_operands(shared, call, position));
         }
         let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(

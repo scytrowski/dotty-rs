@@ -132,6 +132,7 @@ def main():
         check_inherited_exports(toolchain, output, client_output, classpath)
         check_provider_export_clauses(toolchain, output, client_output, classpath)
         check_within_clause(toolchain, output, client_output, classpath)
+        check_named_using(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -339,6 +340,28 @@ def check_within_clause(toolchain, output, client_output, classpath):
         "within.Again.derived(p,\n            /* ambiguous: both parameter b and parameter a match type p.Out",
         "this.read(using p, /* missing */summon[p.Out])",
         "this.read(using p,\n        /* ambiguous: both parameter b and parameter a match type p.Out",
+    ), classpath)
+
+
+def check_named_using(toolchain, output, client_output, classpath):
+    # Tie repeated trees to individual methods so one working call cannot mask another.
+    check_typer_output(toolchain, output, "NamedUsing.scala", 0, (
+        "this.pick(using i, b, t)", "this.pick(using 7, b, t)",
+        "def ordered(i: Int, b: Boolean, t: namedctx.Tag): Int =\n      this.pick(using n = i, flag = b, text = t)",
+        "def reverse(i: Int, b: Boolean, t: namedctx.Tag): Int =\n      this.pick(using n = i, flag = b, text = t)",
+        "val flag$1: Boolean = this.tickBool()\n        val n$1: Int = this.tickInt()\n"
+        "        this.legacy(using n = n$1, flag = flag$1)",
+        "this.pick(using i, flag = true, t)", "this.pick(using 7, b, text = t)",
+        "def useDefault(): Int =\n      this.fallback(using this.fallback$default$1, flag = true)",
+        "def preferGiven(using i: Int): Int =\n      this.fallback(using this.fallback$default$1, flag = true)",
+        "[E220]", "def preferGiven(using i: Int): Int = fallback(using flag = true)", "1 warning found",
+        "this.fallback(using n = i, flag = true)", "this.read(using f = p, v = w)", "this.read(using p, v = w)",
+        "namedctx.Api.selected(using f = p, v = w)", "namedctx.Makers.product(f, v)", "this.legacy(using i, flag = b)",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "NamedUsingErrors.scala", 1, (
+        "does not have a parameter bogus", "parameter n of method pick", "is already instantiated",
+        "No given instance of type Int was found", "both parameter j and parameter i match type Int",
+        "positional after named argument", "[E007]", "Found:    (w : q.Out)", "Required: p.Out", "6 errors found",
     ), classpath)
 
 

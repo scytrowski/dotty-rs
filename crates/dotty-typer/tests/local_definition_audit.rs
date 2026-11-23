@@ -20723,6 +20723,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::AmbiguousMemberConversion { .. } => "AmbiguousMemberConversion",
         TyperError::AmbiguousContextualArgument { .. } => "AmbiguousContextualArgument",
         TyperError::UsingApplicationDeferred { .. } => "UsingApplicationDeferred",
+        TyperError::UnknownNamedArgument { .. } => "UnknownNamedArgument",
+        TyperError::DuplicateNamedArgument { .. } => "DuplicateNamedArgument",
+        TyperError::PositionalAfterNamedArgument { .. } => "PositionalAfterNamedArgument",
         TyperError::ApplicationArityMismatch { .. } => "ApplicationArityMismatch",
         TyperError::ErasedApplicationParameterDeferred { .. } => {
             "ErasedApplicationParameterDeferred"
@@ -20927,6 +20930,9 @@ fn is_type_relation_inference_or_completion(bucket: &str) -> bool {
             | "PolyInstantiation"
             | "ApplicationMethodKindMismatch"
             | "UnsupportedApplicationMethodKind"
+            | "UnknownNamedArgument"
+            | "DuplicateNamedArgument"
+            | "PositionalAfterNamedArgument"
             | "ApplicationArityMismatch"
             | "ErasedApplicationParameterDeferred"
             | "VarargsApplicationParameterDeferred"

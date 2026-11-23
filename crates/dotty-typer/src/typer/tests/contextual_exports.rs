@@ -1,6 +1,7 @@
 mod chained;
 mod clauses;
 mod inherited;
+mod named_using;
 mod within;
 
 use super::*;
