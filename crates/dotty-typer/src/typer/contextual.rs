@@ -575,17 +575,10 @@ impl SourceTyper<'_> {
             }
         }
         let divergences = history.divergences;
-        for level in self.contextual_scopes(context, tree_index)? {
-            let refs = self.contextual_scope_refs(level, tree_index, journal)?;
-            if let Some(winner) =
-                self.choose_contextual_refs(refs, expected, context, tree_index, history, journal)?
-            {
-                return Ok(winner);
-            }
-        }
-        let companions = self.companion_refs(expected, tree_index, journal)?;
-        if let Some(winner) = self
-            .choose_contextual_refs(companions, expected, context, tree_index, history, journal)?
+        if let Some(winner) =
+            self.search_contextual_scopes(expected, context, tree_index, journal, |t, refs, j| {
+                t.choose_contextual_refs(refs, expected, context, tree_index, history, j)
+            })?
         {
             return Ok(winner);
         }
@@ -601,6 +594,29 @@ impl SourceTyper<'_> {
             tree_index,
             expected,
         })
+    }
+
+    /// Examine one lexical/import level at a time; implicit scope is the last resort.
+    fn search_contextual_scopes<T>(
+        &mut self,
+        expected: TypeId,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        mut select: impl FnMut(
+            &mut Self,
+            Vec<ContextualRef>,
+            &mut Vec<(SymbolId, SymbolInfo)>,
+        ) -> Result<Option<T>, TyperError>,
+    ) -> Result<Option<T>, TyperError> {
+        for level in self.contextual_scopes(context, site)? {
+            let refs = self.contextual_scope_refs(level, site, journal)?;
+            if let Some(winner) = select(self, refs, journal)? {
+                return Ok(Some(winner));
+            }
+        }
+        let companions = self.companion_refs(expected, site, journal)?;
+        select(self, companions, journal)
     }
 
     fn contextual_scopes(

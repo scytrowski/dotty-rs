@@ -148,3 +148,55 @@ fn open_witnesses_satisfy_the_callers_bounds_before_ranking() {
         assert_eq!(qualified_name(&t, reference(&t, a.args[0])), (site, "d"));
     }
 }
+
+#[test]
+fn open_search_selects_the_import_or_companion_witness() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(LIB);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, expected) in [
+        ("imported", ("Imports", "imported")),
+        ("companion", ("Anchor", "chosen")),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        let TreeKind::Apply(app) = &t.typed_ast().get(tree).kind else {
+            panic!("{site}")
+        };
+        let witness = app.args[0];
+        assert_eq!(qualified_name(&t, reference(&t, witness)), expected);
+        let TreeKind::Select(sel) = &t.typed_ast().get(witness).kind else {
+            panic!("qualified witness")
+        };
+        assert_eq!(
+            qualified_name(&t, reference(&t, sel.qualifier)).1,
+            expected.0
+        );
+        let Type::Applied { args, .. } = t.store.types.get(t.typed_ast().get(tree).ty) else {
+            panic!("{site}")
+        };
+        assert_eq!(args, &[defs.boolean]);
+    }
+}
+
+#[test]
+fn nearer_witness_wins_before_implicit_scope_and_an_open_factory_is_deferred() {
+    let text = format!(
+        "{LIB}
+  def nearer(using local: Anchor[Int]): Any = anchor(using flag = true)
+class Factory:
+  given generic[A]: Box[A] = new Box[A]
+  def unresolved(c: Client): Any = c.one(using flag = true)"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let tree = client_result(&mut t, &parsed, "nearer").unwrap();
+    let TreeKind::Apply(a) = &t.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    assert_eq!(
+        qualified_name(&t, reference(&t, a.args[0])),
+        ("nearer", "local")
+    );
+    let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), &index, source, "unresolved");
+    assert!(matches!(client_result(&mut t, &parsed, "unresolved"),
+        Err(TyperError::UsingApplicationDeferred{tree_index,..}) if tree_index == rhs.index()));
+}
