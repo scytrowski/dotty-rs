@@ -23,7 +23,7 @@ use dotty::jvm::{
 use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
+use dotty::source_declarations::{Declaration, DeclarationDiagnostic, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
 use dotty::{DetachedSource, NamedClassSources, SourceDiagnostic, SyntaxDiagnostic};
 use dotty::{NameSourceError, NamedClassSource as NamedUnit};
@@ -78,7 +78,7 @@ enum FrontendDiagnostic {
     Syntax(SyntaxDiagnostic),
     Naming(NamerDiagnostic),
     Structural(NamerError),
-    Declaration(DeclarationError, Option<dotty::core::SourceSpan>),
+    Declaration(DeclarationDiagnostic),
 }
 
 impl FrontendDiagnostic {
@@ -92,11 +92,11 @@ impl FrontendDiagnostic {
                 message: error.to_string(),
                 location: None,
             },
-            Self::Declaration(error, location) => SourceDiagnostic {
+            Self::Declaration(diagnostic) => SourceDiagnostic {
                 code: None,
                 severity: dotty::core::DiagnosticSeverity::Error,
-                message: error.to_string(),
-                location: *location,
+                message: diagnostic.error.to_string(),
+                location: diagnostic.location,
             },
         }
     }
@@ -191,11 +191,18 @@ fn name_units_with_diagnostics(
                         .cloned()
                         .map(FrontendDiagnostic::Naming),
                 );
-                match named.into_classes(store) {
-                    Ok(unit) => units.push(unit),
+                match named.project_classes(store) {
+                    Ok(projection) => {
+                        reports.extend(
+                            projection
+                                .rejections
+                                .into_iter()
+                                .map(FrontendDiagnostic::Declaration),
+                        );
+                        units.push(projection.file);
+                    }
                     Err(failure) => reports.push(FrontendDiagnostic::Declaration(
-                        failure.error,
-                        failure.error.location(&failure.named.syntax().ast),
+                        failure.error.diagnostic(&failure.named.syntax().ast),
                     )),
                 }
             }
@@ -290,6 +297,70 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
                 "40"
             );
         }
+    }
+}
+
+#[test]
+fn projected_siblings_emit_and_the_scala_consumer_runs_in_both_input_orders() {
+    let model = (
+        SourceId::from_index(17),
+        "Model.scala",
+        "package demo\nclass A { def value(): Int = 40 }; trait T; class B { def value(): Int = 7 }",
+    );
+    let caller = (
+        SourceId::from_index(2),
+        "Consumer.scala",
+        "package demo\nclass Consumer { def first(a: A): Int = a.value(); def second(b: B): Int = b.value() }",
+    );
+    for files in [[model, caller], [caller, model]] {
+        let (artifacts, reports) = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let (units, reports) = name_units_with_diagnostics(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let sources = NamedClassSources::new(&units, &store).unwrap();
+            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
+            let plan = JvmCompilationUnit {
+                classes: class_plans(&units, &bodies, &output, &store).unwrap(),
+                store: &store,
+                typed_ast: &output.arena,
+            };
+            let prepared = plan.prepare_emission(&defs).unwrap();
+            (emit_batch(&prepared, &plan.classes, 2).0, reports)
+        };
+        let mut names: Vec<_> = artifacts
+            .iter()
+            .map(GeneratedClass::internal_name)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["demo/A", "demo/B", "demo/Consumer"]);
+        assert_eq!(
+            run_java_client("projected-siblings", "ProjectedClassClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["40", "7"]
+        );
+        let [FrontendDiagnostic::Declaration(report)] = reports.as_slice() else {
+            panic!("expected only the trait rejection: {reports:?}")
+        };
+        assert!(
+            matches!(report.error, dotty::source_declarations::DeclarationError::Unsupported {source,..} if source == model.0)
+        );
+        let span = report.location.unwrap();
+        assert_eq!(span.source(), model.0);
+        assert_eq!(
+            dotty::core::SourceText::new(model.2)
+                .unwrap()
+                .slice(span.span().range())
+                .unwrap(),
+            "trait T"
+        );
     }
 }
 
