@@ -9034,10 +9034,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     Ok(self.store.types.alloc(Type::And { left, right }))
                 },
             )?;
+            let bounds = self.store.types.alloc(Type::Bounds {
+                low: self.definitions.nothing_type,
+                high,
+            });
             let text = self.store.names.intern(&parameter.name);
             type_params.push(TypeParam {
                 name: TypeName::new(text),
-                bounds: high,
+                bounds,
                 declared_variance: None,
             });
         }
@@ -22196,6 +22200,7 @@ mod tests {
         let class_symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample"))
             .expect("NestedSample should load");
+        let nothing = loader.definitions.nothing_type;
         drop(loader);
 
         let max_type = member_type_id(&mut store, class_symbol, "max");
@@ -22210,7 +22215,11 @@ mod tests {
         // T's bound is the implicit Object intersected with its one
         // interface bound, Comparable[T] -- same shape as a class-level
         // F-bounded type parameter (`class_bound: None` means Object).
-        let Type::And { left, right } = store.types.get(type_param.bounds) else {
+        let Type::Bounds { low, high } = store.types.get(type_param.bounds) else {
+            panic!("expected the bounds of T");
+        };
+        assert_eq!(*low, nothing);
+        let Type::And { left, right } = store.types.get(*high) else {
             panic!("expected T's bound to be an intersection with the implicit Object bound");
         };
         assert_eq!(symbol_name(&store, parent_symbol(&store, *left)), "Object");

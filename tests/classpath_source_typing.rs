@@ -735,6 +735,66 @@ fn tasty_curried_method_accepts_two_successive_applications() {
     );
 }
 
+#[test]
+fn java_generic_method_checks_the_declared_upper_bound() {
+    let root = TemporaryDirectory::new("java-method-bounds");
+    write_stub_class(root.path(), "java/lang/Object", None, 0x0021);
+    write_stub_class(
+        root.path(),
+        "java/lang/Number",
+        Some("java/lang/Object"),
+        0x0421,
+    );
+    let package = root.path().join("example");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("Bounded.class"),
+        include_bytes!("../crates/dotty-classloader/tests/fixtures/bounded_method/Bounded.class"),
+    )
+    .unwrap();
+    with_classpath_client(
+        root.path(),
+        "def ok(v: example.Bounded, x: java.lang.Number): java.lang.Number =
+           v.ident[java.lang.Number](x)
+         def tooWide(v: example.Bounded, x: java.lang.Number): java.lang.Object =
+           v.ident[java.lang.Object](x)",
+        |unit, typer, _| {
+            let (method, rhs) = method_rhs(unit, typer.store(), "ok");
+            let context = typer.expression_context_for(method).unwrap();
+            let call = typer.type_expression(rhs, context).unwrap();
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(number),
+                ..
+            } = typer.store().types.get(typer.typed_ast().get(call).ty)
+            else {
+                panic!("the instantiated result should be java.lang.Number");
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*number).name.text()),
+                "Number"
+            );
+
+            let (method, rhs) = method_rhs(unit, typer.store(), "tooWide");
+            let context = typer.expression_context_for(method).unwrap();
+            let error = typer.type_expression(rhs, context).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    TyperError::ExplicitTypeArgumentBoundViolation {
+                        parameter_index: 0,
+                        side: dotty_typer::TypeArgumentBoundSide::Upper,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        },
+    );
+}
+
 #[derive(Default)]
 struct ResolutionLog {
     packages: Vec<(Vec<String>, SymbolId)>,

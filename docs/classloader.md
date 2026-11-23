@@ -192,6 +192,9 @@ resolution.
   (`SymbolKind::Field`/`Method`/`Constructor`) with real `Type::Method`/
   `Type::Poly` types, lowered from JVM descriptors and — when present
   and consistent with the descriptor — generic `Signature` attributes.
+  Each method type parameter carries `Type::Bounds` with lower bound
+  `Nothing`. Its upper bound is the JVM class bound (defaulting to
+  `java.lang.Object`) intersected with any declared interface bounds.
 - JVM signature type variables use this class's type parameters, followed
   by enclosing member-class parameters from nearest to farthest. A method's
   own parameters shadow all class parameters. Enclosing parameters are
