@@ -3882,7 +3882,11 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
                     && selected_package.as_deref().is_some_and(|package| {
                         matches!(
                             package,
-                            "scala" | "scala/annotation" | "java/io" | "java/lang"
+                            "scala"
+                                | "scala/annotation"
+                                | "scala/collection"
+                                | "java/io"
+                                | "java/lang"
                         )
                     })
                     && is_package_qualifier(file, &selection.qualifier, depth + 1)
@@ -5855,15 +5859,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 7);
+        assert_eq!(current_unresolved_roots.len(), 5);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            34
+            36
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 17);
-        assert_eq!(recovered_roots.len(), 34);
-        assert_eq!(recovered_weight, 362);
+        assert_eq!(current_weight, 7);
+        assert_eq!(recovered_roots.len(), 36);
+        assert_eq!(recovered_weight, 372);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -6972,6 +6976,21 @@ mod tests {
         assert!(decoded.flags.is_interface());
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
         assert!(decoded.interfaces.is_empty());
+    }
+
+    #[test]
+    fn mutable_indexed_seq_resolves_its_qualified_collection_parent() {
+        let name = BinaryName::from_internal("scala/collection/mutable/IndexedSeq");
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/collection/mutable/IndexedSeq.tasty"),
+            &name,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.interfaces[1].as_internal(),
+            "scala/collection/IndexedSeq"
+        );
+        assert!(!decoded.interfaces.contains(&name));
     }
 
     #[test]
