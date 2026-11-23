@@ -43,6 +43,7 @@ use std::time::Instant;
 /// entry.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyClass {
+    pub semantic_flags: SymbolFlags,
     pub flags: ClassAccessFlags,
     /// The class's real `PRIVATE_TAG`/`PROTECTED_TAG` modifier, kept
     /// separately from `flags` — see [`DeclaredVisibility`]'s doc
@@ -68,6 +69,7 @@ pub(crate) struct DecodedTastyClass {
 /// Facts needed to publish a TASTy-backed identity without resolving its
 /// parents or lowering any member types.
 pub(crate) struct DecodedTastyIdentity {
+    pub semantic_flags: SymbolFlags,
     pub flags: ClassAccessFlags,
     pub visibility: Option<DeclaredVisibility>,
 }
@@ -1009,6 +1011,7 @@ pub(crate) fn decode_identity(
     }
 
     Ok(DecodedTastyIdentity {
+        semantic_flags: symbol_flags(&tail) | language_flags(&file)?,
         flags: decode_flags(&tail),
         visibility: decode_visibility(&file, &tail),
     })
@@ -1704,6 +1707,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DecodedTastyClass {
+        semantic_flags: symbol_flags(&tail) | language_flags(&file)?,
         flags,
         visibility,
         super_class,
@@ -2982,6 +2986,19 @@ fn term_clauses(
     Ok(clauses)
 }
 
+fn language_flags(file: &TastyFile<'_>) -> Result<SymbolFlags, TastyDecodeError> {
+    Ok(
+        if file
+            .attributes()?
+            .is_some_and(|attrs| attrs.contains(&dotty_tasty::tasty::Attribute::Java))
+        {
+            SymbolFlags::JAVA_DEFINED
+        } else {
+            SymbolFlags::EMPTY
+        },
+    )
+}
+
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
 /// `Template.stats`) into a [`DecodedTastyField`]/[`DecodedTastyMethod`].
 ///
@@ -3009,14 +3026,7 @@ fn decode_members(
     let mut methods = Vec::new();
 
     let address_index = file.ast_address_index_view()?;
-    let source_flags = if file
-        .attributes()?
-        .is_some_and(|attrs| attrs.contains(&dotty_tasty::tasty::Attribute::Java))
-    {
-        SymbolFlags::JAVA_DEFINED
-    } else {
-        SymbolFlags::EMPTY
-    };
+    let source_flags = language_flags(file)?;
 
     let mut incomplete_methods = HashSet::new();
     let definitions = stats.iter().filter_map(|tree| match tree {

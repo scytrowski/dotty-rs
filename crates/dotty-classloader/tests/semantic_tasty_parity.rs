@@ -859,8 +859,8 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .collect::<Vec<_>>();
     assert_eq!(
         changed.len(),
-        22,
-        "the qualified Dog identity and error context, selected Option member, canonical Boolean identity, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
+        23,
+        "only the Dog identity and error context, Option member and flags, canonical Boolean identity, and the newly loadable Some and Tuple2 rows may change"
     );
 
     let mut some_fields = HashSet::new();
@@ -887,7 +887,7 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 let (outcome, value) = match field {
                     "identity" => ("MATCH", "scala.Tuple2|Class|Tuple2"),
                     "visibility" => ("MATCH", "public"),
-                    "flags" => ("MATCH", "final"),
+                    "flags" => ("MATCH", "final,case"),
                     "hierarchy" => (
                         "MATCH",
                         "scala.$times$colon&scala.Product2[scala.Tuple2.T1,scala.Tuple2.T2]&scala.Product&java.io.Serializable",
@@ -935,7 +935,7 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 let (outcome, value, delta) = match field {
                     "identity" => ("MATCH", "scala.Some|Class|Some", "equal"),
                     "visibility" => ("MATCH", "public", "equal"),
-                    "flags" => ("MATCH", "final", "different"),
+                    "flags" => ("MATCH", "final,case", "equal"),
                     "hierarchy" => (
                         "MATCH",
                         "scala.Option[scala.Some.A]&scala.Product&java.io.Serializable",
@@ -985,6 +985,12 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 assert_eq!(current[2], outcome, "Some {field} outcome");
                 assert_eq!(current[3], value, "Some {field} value");
                 assert_eq!(current[10], delta, "Some {field} comparison");
+            }
+            ("option", "flags") => {
+                let mut expected = frozen.clone();
+                assert_eq!(expected[3], "abstract");
+                expected[3] = "abstract,sealed".to_owned();
+                assert_eq!(*current, expected);
             }
             ("option", "member_signatures") => option_member_delta = Some((current, frozen)),
             key => panic!("unexpected frozen parity delta {key:?}"),

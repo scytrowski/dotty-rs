@@ -551,8 +551,10 @@ contextual. A definition with no clauses of either kind lowers to
 `Type::ByName` (TASTy's `ExprType`). A type-parameter-only definition keeps
 its direct result under `Type::Poly`, matching the semantic unpickler. An
 explicit empty `()` clause remains a `Type::Method` with no parameters.
-Only methods from class files or Java-marked TASTy receive `JAVA_DEFINED`
-for Java empty-clause call adaptation. A JVM descriptor represents all term
+Ordinary TASTy class identities and fields preserve Scala provenance, and
+classes retain declaration flags such as `SEALED` through completion.
+Classfile declarations and Java-marked TASTy receive `JAVA_DEFINED`;
+methods use this flag for Java empty-clause call adaptation. A JVM descriptor represents all term
 parameters in one list and a zero-argument method as an empty `Type::Method`.
 
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,

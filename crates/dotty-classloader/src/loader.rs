@@ -5782,7 +5782,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 symbol,
                 &identity.module_class_name,
                 field.visibility.as_ref(),
-                field.contextual_flags,
+                field.contextual_flags
+                    | decoded
+                        .semantic_flags
+                        .intersection(SymbolFlags::JAVA_DEFINED),
             );
         }
         self.enter_tasty_methods(
@@ -6279,17 +6282,29 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     }
                     let owner = self.semantic_owner_name(name, &class_file)?;
                     let visibility = self.semantic_class_visibility_flags(name, &class_file)?;
-                    (class_file.access_flags, None, visibility, owner)
+                    (
+                        class_file.access_flags,
+                        SymbolFlags::JAVA_DEFINED,
+                        None,
+                        visibility,
+                        owner,
+                    )
                 }
                 ClassFormat::Tasty => {
                     let identity = tasty_symbol::decode_identity(resource.bytes(), name)
                         .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
-                    (identity.flags, identity.visibility, None, None)
+                    (
+                        identity.flags,
+                        identity.semantic_flags,
+                        identity.visibility,
+                        None,
+                        None,
+                    )
                 }
             })
         })();
-        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
-            header.inspect_err(|_| {
+        let (flags, base_flags, tasty_visibility, classfile_visibility, semantic_owner) = header
+            .inspect_err(|_| {
                 self.dependency_failure_context =
                     Some((name.clone(), origin.clone(), resource.format()));
             })?;
@@ -6412,7 +6427,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Some(visibility) => self.tasty_visibility(name, &visibility),
             None => jvm_visibility(classfile_visibility.unwrap_or(flags).0, package),
         };
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = base_flags;
         if flags.is_abstract() {
             symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
         }
@@ -6795,6 +6810,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         package: SymbolId,
         flags: ClassAccessFlags,
+        base_flags: SymbolFlags,
         visibility: Visibility,
         origin: SymbolOrigin,
     ) -> Result<(SymbolId, ScopeId, SymbolOrigin), ClassLoadError> {
@@ -6806,7 +6822,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SymbolKind::Class
         };
 
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = base_flags;
         if flags.is_abstract() {
             symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
         }
@@ -6963,7 +6979,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> SymbolId {
         let visibility = jvm_visibility(flags.0, package);
         let owner = self.store.scopes.get(declarations).owner;
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = if matches!(origin, SymbolOrigin::Classfile(_)) {
+            SymbolFlags::JAVA_DEFINED
+        } else {
+            SymbolFlags::EMPTY
+        };
         if flags.is_static() {
             symbol_flags = symbol_flags | SymbolFlags::STATIC;
         }
@@ -7525,8 +7545,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Some(declared) => self.tasty_visibility(name, declared),
             None => jvm_visibility(decoded.flags.0, package),
         };
-        let (class_symbol, declarations, origin) =
-            self.enter_class(name, package, decoded.flags, visibility, origin)?;
+        let (class_symbol, declarations, origin) = self.enter_class(
+            name,
+            package,
+            decoded.flags,
+            decoded.semantic_flags,
+            visibility,
+            origin,
+        )?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
@@ -7595,7 +7621,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 symbol,
                 name,
                 field.visibility.as_ref(),
-                field.contextual_flags,
+                field.contextual_flags
+                    | decoded
+                        .semantic_flags
+                        .intersection(SymbolFlags::JAVA_DEFINED),
             );
         }
         self.enter_tasty_methods(
@@ -8174,6 +8203,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             name,
             package,
             class_file.access_flags,
+            SymbolFlags::JAVA_DEFINED,
             jvm_visibility(access.0, package),
             origin,
         )?;
@@ -16908,6 +16938,7 @@ mod tests {
                 &class_name,
                 package,
                 decoded.flags,
+                decoded.semantic_flags,
                 Visibility::Public,
                 origin,
             )
@@ -17027,6 +17058,7 @@ mod tests {
                 &class_name,
                 package,
                 decoded.flags,
+                decoded.semantic_flags,
                 Visibility::Public,
                 origin,
             )
@@ -17575,6 +17607,92 @@ mod tests {
                 superinterfaces: vec![],
             })
         );
+    }
+
+    #[test]
+    fn scala_class_and_field_flags_follow_tasty_in_shells_and_completed_symbols() {
+        let name = BinaryName::from_internal("audits/Ledger");
+        let entries = HashMap::from([
+            (
+                name.clone(),
+                (
+                    include_bytes!("../tests/fixtures/member_access/audits/Ledger.tasty").to_vec(),
+                    ClassFormat::Tasty,
+                ),
+            ),
+            (
+                BinaryName::from_internal("java/lang/Object"),
+                (
+                    synthetic_class("java/lang/Object", None),
+                    ClassFormat::Class,
+                ),
+            ),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            ResourceClassPath(
+                entries
+                    .into_iter()
+                    .map(|(n, (bytes, format))| {
+                        (n, (bytes, format, ClassOrigin::Directory("fixture".into())))
+                    })
+                    .collect(),
+            ),
+            &mut store,
+        );
+        let shell = loader.ensure_class_identity(&name).unwrap();
+        assert!(
+            loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::SEALED)
+        );
+        assert!(
+            !loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::JAVA_DEFINED)
+        );
+        assert_eq!(loader.load_class(&name).unwrap(), shell);
+        assert!(
+            loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::SEALED)
+        );
+        assert!(
+            !loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::JAVA_DEFINED)
+        );
+        let scope = class_info(loader.store, shell).declarations;
+        let fields: Vec<_> = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .filter(|s| loader.store.symbols.get(*s).kind == SymbolKind::Field)
+            .collect();
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            assert!(
+                !loader
+                    .store
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::JAVA_DEFINED)
+            );
+        }
     }
 
     #[test]
