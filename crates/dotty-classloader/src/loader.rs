@@ -8233,7 +8233,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let parent_indices = class_file.super_class.iter().chain(&class_file.interfaces);
             let parent_signatures =
                 std::iter::once(&signature.superclass).chain(&signature.superinterfaces);
-            if parent_indices.clone().count() != parent_signatures.clone().count() {
+            // Scala 3 appends Serializable to the JVM interfaces of module
+            // classes after computing the generic signature.
+            let mut runtime_parent = None;
+            if class_file.interfaces.len() == signature.superinterfaces.len() + 1
+                && name.as_internal().ends_with('$')
+                && class_file.attributes.iter().any(|a| matches!(a, Attribute::Other(raw)
+                    if raw.bytes.is_empty() && class_file.constant_pool.utf8(raw.name_index) == Ok("Scala")))
+                && let Some(last) = class_file.interfaces.last()
+                && self.resolve_name(name, &class_file, *last)?.as_internal() == "java/io/Serializable"
+            {
+                runtime_parent = interfaces.last().copied();
+            }
+            if parent_indices.clone().count()
+                != parent_signatures.clone().count() + usize::from(runtime_parent.is_some())
+            {
                 return Err(ClassLoadError::IdentityConflict {
                     name: name.clone(),
                     reason: "generic and erased parent counts disagree".into(),
@@ -8253,6 +8267,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     });
                 }
                 parents.push(self.apply_class_signature_arguments(name, &env, symbol, parent)?);
+            }
+            if let Some(symbol) = runtime_parent {
+                parents.push(self.type_ref(symbol));
             }
             parents
         } else {
@@ -17557,6 +17574,47 @@ mod tests {
                 },
                 superinterfaces: vec![],
             })
+        );
+    }
+
+    #[test]
+    fn scala_module_keeps_its_applied_superclass_and_runtime_serializable_interface() {
+        let name = BinaryName::from_internal("audits/Single$");
+        let mut classes = HashMap::from([(
+            name.clone(),
+            include_bytes!("../tests/fixtures/scala_module_parents/Single$.class").to_vec(),
+        )]);
+        for dependency in [
+            "java/lang/Object",
+            "audits/Base",
+            "java/io/Serializable",
+            "java/lang/String",
+            "scala/runtime/ModuleSerializationProxy",
+        ] {
+            classes.insert(
+                BinaryName::from_internal(dependency),
+                synthetic_class(dependency, None),
+            );
+        }
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let class = loader.load_class(&name).unwrap();
+        let parents = &class_info(loader.store, class).parents;
+        assert_eq!(parents.len(), 2);
+        let Type::Applied { tycon, args } = loader.store.types.get(parents[0]) else {
+            panic!("expected Base[String]")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+            "Base"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "String"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, parents[1])),
+            "Serializable"
         );
     }
 
