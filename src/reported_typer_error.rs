@@ -1,5 +1,5 @@
 //! Typer failures retained by clients after a source analysis.
-use crate::core::{AstArena, SourceId, SourceSpan, Untyped};
+use crate::core::{AstArena, SourceId, SourceSpan, SymbolId, Untyped};
 use crate::typer::TyperError;
 use crate::{CallDiagnostic, typer_error_span_with};
 
@@ -10,6 +10,8 @@ use crate::{CallDiagnostic, typer_error_span_with};
 #[derive(Debug)]
 pub struct ReportedTyperError {
     failure: Failure,
+    class: Option<SymbolId>,
+    member: Option<SymbolId>,
 }
 
 #[derive(Debug)]
@@ -28,9 +30,30 @@ impl ReportedTyperError {
     /// AST from this session, or `None` to keep the failure without a span.
     pub fn from_typer<'a>(
         error: TyperError,
+        ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Self {
+        Self::capture(error, None, None, ast_for)
+    }
+
+    /// Captures a typer failure encountered while processing a known class.
+    /// Supply the same-session class and, if known, its constructor, field or method.
+    /// This records caller-provided ownership independently of the error location.
+    pub fn from_class<'a>(
+        error: TyperError,
+        class: SymbolId,
+        member: Option<SymbolId>,
+        ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Self {
+        Self::capture(error, Some(class), member, ast_for)
+    }
+
+    fn capture<'a>(
+        error: TyperError,
+        class: Option<SymbolId>,
+        member: Option<SymbolId>,
         mut ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
     ) -> Self {
-        let failure = match CallDiagnostic::from_typer(error, None, &mut ast_for) {
+        let failure = match CallDiagnostic::from_typer(error, member, &mut ast_for) {
             Ok(call) => Failure::Call(call),
             Err(error) => {
                 let mut source = None;
@@ -45,7 +68,21 @@ impl ReportedTyperError {
                 }
             }
         };
-        Self { failure }
+        Self {
+            failure,
+            class,
+            member,
+        }
+    }
+
+    /// Canonical enclosing class if supplied by the phase or caller.
+    pub fn class(&self) -> Option<SymbolId> {
+        self.class
+    }
+
+    /// Canonical member if supplied by the phase or caller.
+    pub fn member(&self) -> Option<SymbolId> {
+        self.member
     }
 
     /// Stable category when the typer assigns one. Always inspect [`Self::error`]
@@ -216,5 +253,106 @@ mod tests {
             assert_eq!(report.code(), Some(code));
             assert_eq!(report.render().message, message);
         }
+    }
+
+    #[test]
+    fn each_phase_reports_the_declaring_field_and_returns_structural_errors_intact() {
+        use crate::{
+            ClassBodyError, ClassFieldSignatureError, MemberSignatureError, NamedClassSources,
+            core::NoResolver,
+        };
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let id = SourceId::from_index(7);
+        let text = "class A { val answer = 40 }; class B { val answer = missingValue }";
+        let file = crate::parse_source(id, text, Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("Both.scala", &mut store, &mut packages)
+            .unwrap()
+            .into_classes(&store)
+            .unwrap();
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = AstArena::new();
+        let mut bindings = Default::default();
+        for (_, class) in sources.classes() {
+            SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages)
+                .complete_symbol(class.constructor)
+                .unwrap();
+            let header = sources
+                .try_complete_class_header(
+                    class.symbol,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut arena,
+                    &mut bindings,
+                )
+                .unwrap();
+            assert!(matches!(
+                header,
+                crate::typer::SignatureCompletion::Complete(_)
+            ));
+        }
+        let class = &file.classes()[1];
+        let field = class.fields().next().unwrap().symbol;
+        assert_ne!(field, file.classes()[0].fields().next().unwrap().symbol);
+        let lookup = |id| sources.file(id).map(crate::NamedClassSource::ast);
+        let member = sources
+            .try_complete_member_signature(field, &mut store, defs, &packages)
+            .unwrap_err()
+            .into_reported_error(lookup)
+            .unwrap();
+        let group = crate::try_complete_class_field_signatures(
+            class.symbol,
+            file.ast(),
+            file.index(),
+            &mut store,
+            defs,
+            &packages,
+            |_| false,
+        )
+        .unwrap_err()
+        .into_reported_error(lookup)
+        .unwrap();
+        let body = sources
+            .type_class_body(
+                class.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
+            )
+            .unwrap_err()
+            .into_reported_error(lookup)
+            .unwrap();
+        for report in [member, group, body] {
+            assert_eq!(
+                (report.class(), report.member()),
+                (Some(class.symbol), Some(field))
+            );
+            assert!(matches!(
+                report.error(),
+                TyperError::TermNameNotFound { .. }
+            ));
+            let span = report.location().unwrap();
+            assert_eq!(span.source(), id);
+            let range = span.span().range();
+            assert_eq!(
+                &text[range.start() as usize..range.end() as usize],
+                "missingValue"
+            );
+        }
+        assert!(
+            matches!(MemberSignatureError::InvalidMember(field).into_reported_error(|_|unreachable!()),Err(MemberSignatureError::InvalidMember(s)) if s == field)
+        );
+        assert!(
+            matches!(ClassBodyError::InvalidClass(class.symbol).into_reported_error(|_|unreachable!()),Err(ClassBodyError::InvalidClass(s)) if s == class.symbol)
+        );
+        assert!(
+            matches!(ClassFieldSignatureError::InvalidClass(class.symbol).into_reported_error(|_|unreachable!()),Err(ClassFieldSignatureError::InvalidClass(s)) if s == class.symbol)
+        );
     }
 }
