@@ -511,14 +511,14 @@ fn complete_methods_in_order(
     Ok(headers)
 }
 
-fn complete_member_paths(
-    selection: &dotty::MemberSignatureSelection<'_, '_>,
+fn complete_member_paths<'s, 'file>(
+    selection: &'s dotty::MemberSignatureSelection<'s, 'file>,
     roots: impl IntoIterator<Item = SymbolId>,
-    store: &mut SemanticStore,
+    store: &'s mut SemanticStore,
     definitions: Definitions,
-    packages: &Packages,
+    packages: &'s Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<(), SignatureError> {
+) -> Result<dotty::MemberSignaturePhase<'s, 'file>, SignatureError> {
     let mut phase = dotty::MemberSignaturePhase::new(selection, store, definitions, packages);
     let mut ready = Vec::new();
     for root in roots {
@@ -542,7 +542,7 @@ fn complete_member_paths(
             }
         }
     }
-    Ok(())
+    Ok(phase)
 }
 
 fn with_plan<R>(
@@ -594,18 +594,33 @@ fn type_bodies(
     packages: &Packages,
     mut headers: TypedHeaders,
 ) -> (TypedHeaders, TypedClassBodies) {
+    let selection = sources
+        .member_signatures(sources.classes().map(|(_, c)| c.symbol), store)
+        .unwrap();
+    // Emission also needs private field signatures which the public roots did not request.
+    let phase = complete_member_paths(
+        &selection,
+        selection.members().iter().copied(),
+        store,
+        definitions,
+        packages,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let (_, work) = phase.finish_with_body_work();
     let mut typed_classes = TypedClassBodies::default();
     for (_, class) in sources.classes() {
-        let body = sources
-            .type_class_body(
-                class.symbol,
-                store,
-                definitions,
-                packages,
-                &mut headers.arena,
-                dotty::core::NoResolver,
-            )
-            .unwrap();
+        let (body, report) = work.check(
+            class.symbol,
+            store,
+            definitions,
+            packages,
+            &mut headers.arena,
+            dotty::core::NoResolver,
+        );
+        let dotty::CheckedClassBody::Complete(body) = body else {
+            panic!("incomplete class body: {report:?}")
+        };
         typed_classes.record(body).unwrap();
     }
 

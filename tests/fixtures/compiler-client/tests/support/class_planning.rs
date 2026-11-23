@@ -307,6 +307,92 @@ fn field_and_local_value_errors_locate_the_initializer() {
 }
 
 #[test]
+fn rejected_signature_leaves_only_the_independent_class_emittable() {
+    let [a_file, b_file] =
+        body_files("package demo\nclass B { def value(): Int = 7; val broken = value(1) }");
+    for files in [[a_file, b_file], [b_file, a_file]] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new(&units, &store).unwrap();
+        let a = sources.file(a_file.0).unwrap();
+        let b = &sources.file(b_file.0).unwrap().classes()[0];
+        let mut output =
+            super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        let selection = sources
+            .member_signatures(output.ready.iter().copied(), &store)
+            .unwrap();
+        let mut phase = dotty::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+        for (_, c) in sources.classes() {
+            for method in c.methods() {
+                assert!(matches!(
+                    phase.attempt(method.symbol).unwrap().completion,
+                    dotty::typer::SignatureCompletion::Complete(_)
+                ));
+            }
+        }
+        let broken = b.fields().next().unwrap().symbol;
+        assert!(phase.attempt(broken).is_err());
+        let seed = a.classes()[0].fields().next().unwrap().symbol;
+        assert!(!phase.is_ready(seed));
+        assert_eq!(
+            phase.attempt(seed).unwrap().completion,
+            dotty::typer::SignatureCompletion::Complete(defs.int)
+        );
+        let (report, work) = phase.finish_with_body_work();
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            matches!(&report.failures[0], dotty::MemberSignatureFailure::Typing { report, .. } if report.member() == Some(broken))
+        );
+        let mut bodies = dotty::jvm_class_plan::TypedClassBodies::default();
+        for (_, c) in sources.classes() {
+            let (body, report) = work.check(
+                c.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut output.arena,
+                dotty::core::NoResolver,
+            );
+            assert!(report.errors.is_empty());
+            match body {
+                dotty::CheckedClassBody::Complete(full) => {
+                    assert_eq!(c.symbol, a.classes()[0].symbol);
+                    bodies.record(full).unwrap();
+                }
+                dotty::CheckedClassBody::Partial(_) => assert_eq!(c.symbol, b.symbol),
+                dotty::CheckedClassBody::Invalid => panic!("selected class rejected"),
+            }
+        }
+        assert_eq!(
+            bodies.get(b.symbol).unwrap_err(),
+            ClassPlanError::MissingClassBody(b.symbol)
+        );
+        let plan = dotty::jvm::JvmCompilationUnit {
+            store: &store,
+            typed_ast: &output.arena,
+            classes: class_plans(std::slice::from_ref(a), &bodies, &output, &store).unwrap(),
+        };
+        let artifact = plan
+            .prepare_emission(&defs)
+            .unwrap()
+            .emit_class(a.classes()[0].symbol)
+            .unwrap();
+        assert_eq!(
+            super::run_java_client("surviving-signature", "SurvivingClassClient", &[artifact])
+                .trim(),
+            "40"
+        );
+    }
+}
+
+#[test]
 fn method_error_keeps_a_executable_and_b_unpublished() {
     let text = "package demo\nclass B { private val seed: Int = 7; def value(): Int = true }";
     let [a_file, b_file] = body_files(text);
