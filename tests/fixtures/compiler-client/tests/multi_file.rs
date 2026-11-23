@@ -14,6 +14,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use dotty::ClassHeaderBindings;
+use dotty::NamedClassSource as NamedUnit;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
 };
@@ -22,11 +23,9 @@ use dotty::jvm::{
 };
 use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
-use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{Declaration, DeclarationDiagnostic, SourceClass};
+use dotty::source_declarations::{Declaration, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{DetachedSource, NamedClassSources, SourceDiagnostic, SyntaxDiagnostic};
-use dotty::{NameSourceError, NamedClassSource as NamedUnit};
+use dotty::{DetachedSource, NamedClassSources, PreparationDiagnostic, SyntaxDiagnostic};
 
 trait FixtureMethods {
     fn methods(&self) -> impl Iterator<Item = Declaration> + '_;
@@ -70,35 +69,6 @@ impl FixtureMethods for NamedUnit {
             definitions,
             packages,
         )
-    }
-}
-
-#[derive(Debug)]
-enum FrontendDiagnostic {
-    Syntax(SyntaxDiagnostic),
-    Naming(NamerDiagnostic),
-    Structural(NamerError),
-    Declaration(DeclarationDiagnostic),
-}
-
-impl FrontendDiagnostic {
-    fn render(&self) -> SourceDiagnostic {
-        match self {
-            Self::Syntax(diagnostic) => diagnostic.render(),
-            Self::Naming(diagnostic) => SourceDiagnostic::from_namer(diagnostic),
-            Self::Structural(error) => SourceDiagnostic {
-                code: None,
-                severity: dotty::core::DiagnosticSeverity::Error,
-                message: error.to_string(),
-                location: None,
-            },
-            Self::Declaration(diagnostic) => SourceDiagnostic {
-                code: None,
-                severity: dotty::core::DiagnosticSeverity::Error,
-                message: diagnostic.error.to_string(),
-                location: diagnostic.location,
-            },
-        }
     }
 }
 
@@ -178,47 +148,16 @@ fn name_units_with_diagnostics(
     parsed: Vec<DetachedSource>,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> (Vec<NamedUnit>, Vec<FrontendDiagnostic>) {
+) -> (Vec<NamedUnit>, Vec<PreparationDiagnostic>) {
     let mut units = Vec::new();
     let mut reports = Vec::new();
     for (&(_, name, _), detached) in files.iter().zip(parsed) {
-        match detached.bind(&mut store.names).name(name, store, packages) {
-            Ok(named) => {
-                reports.extend(
-                    named
-                        .diagnostics()
-                        .iter()
-                        .cloned()
-                        .map(FrontendDiagnostic::Naming),
-                );
-                match named.project_classes(store) {
-                    Ok(projection) => {
-                        reports.extend(
-                            projection
-                                .rejections
-                                .into_iter()
-                                .map(FrontendDiagnostic::Declaration),
-                        );
-                        units.push(projection.file);
-                    }
-                    Err(failure) => reports.push(FrontendDiagnostic::Declaration(
-                        failure.error.diagnostic(&failure.named.syntax().ast),
-                    )),
-                }
-            }
-            Err(NameSourceError::Syntax(recovered)) => reports.extend(
-                recovered
-                    .diagnostics
-                    .into_iter()
-                    .map(FrontendDiagnostic::Syntax),
-            ),
-            Err(NameSourceError::Rejected(issues)) => {
-                reports.extend(issues.into_iter().map(FrontendDiagnostic::Naming))
-            }
-            Err(NameSourceError::Namer { error, .. }) => {
-                reports.push(FrontendDiagnostic::Structural(error))
-            }
-        }
+        let (file, diagnostics) = detached
+            .bind(&mut store.names)
+            .prepare_classes(name, store, packages)
+            .into_parts();
+        units.extend(file);
+        reports.extend(diagnostics);
     }
     (units, reports)
 }
@@ -312,55 +251,80 @@ fn projected_siblings_emit_and_the_scala_consumer_runs_in_both_input_orders() {
         "Consumer.scala",
         "package demo\nclass Consumer { def first(a: A): Int = a.value(); def second(b: B): Int = b.value() }",
     );
-    for files in [[model, caller], [caller, model]] {
-        let (artifacts, reports) = {
-            let mut store = SemanticStore::new();
-            let defs = Definitions::bootstrap(&mut store);
-            let mut packages = Packages::new();
-            let (units, reports) = name_units_with_diagnostics(
-                &files,
-                parsing::parse_files(&files, 2),
-                &mut store,
-                &mut packages,
-            );
-            let sources = NamedClassSources::new(&units, &store).unwrap();
-            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
-            let plan = JvmCompilationUnit {
-                classes: class_plans(&units, &bodies, &output, &store).unwrap(),
-                store: &store,
-                typed_ast: &output.arena,
+    let broken = (
+        SourceId::from_index(43),
+        "Broken.scala",
+        "class Broken { val n: Int 1 }",
+    );
+    for files in [[model, caller, broken], [broken, caller, model]] {
+        for workers in [1, 2] {
+            let (artifacts, reports) = {
+                let mut store = SemanticStore::new();
+                let defs = Definitions::bootstrap(&mut store);
+                let mut packages = Packages::new();
+                let (units, reports) = name_units_with_diagnostics(
+                    &files,
+                    parsing::parse_files(&files, workers),
+                    &mut store,
+                    &mut packages,
+                );
+                let sources = NamedClassSources::new(&units, &store).unwrap();
+                let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+                let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
+                let plan = JvmCompilationUnit {
+                    classes: class_plans(&units, &bodies, &output, &store).unwrap(),
+                    store: &store,
+                    typed_ast: &output.arena,
+                };
+                let prepared = plan.prepare_emission(&defs).unwrap();
+                (emit_batch(&prepared, &plan.classes, 2).0, reports)
             };
-            let prepared = plan.prepare_emission(&defs).unwrap();
-            (emit_batch(&prepared, &plan.classes, 2).0, reports)
-        };
-        let mut names: Vec<_> = artifacts
-            .iter()
-            .map(GeneratedClass::internal_name)
-            .collect();
-        names.sort_unstable();
-        assert_eq!(names, ["demo/A", "demo/B", "demo/Consumer"]);
-        assert_eq!(
-            run_java_client("projected-siblings", "ProjectedClassClient", &artifacts)
-                .lines()
-                .collect::<Vec<_>>(),
-            ["40", "7"]
-        );
-        let [FrontendDiagnostic::Declaration(report)] = reports.as_slice() else {
-            panic!("expected only the trait rejection: {reports:?}")
-        };
-        assert!(
-            matches!(report.error, dotty::source_declarations::DeclarationError::Unsupported {source,..} if source == model.0)
-        );
-        let span = report.location.unwrap();
-        assert_eq!(span.source(), model.0);
-        assert_eq!(
-            dotty::core::SourceText::new(model.2)
-                .unwrap()
-                .slice(span.span().range())
-                .unwrap(),
-            "trait T"
-        );
+            let mut names: Vec<_> = artifacts
+                .iter()
+                .map(GeneratedClass::internal_name)
+                .collect();
+            names.sort_unstable();
+            assert_eq!(names, ["demo/A", "demo/B", "demo/Consumer"]);
+            assert_eq!(
+                run_java_client("projected-siblings", "ProjectedClassClient", &artifacts)
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["40", "7"]
+            );
+            assert_eq!(reports.len(), 2);
+            let (omission, syntax) = if files[0].0 == model.0 {
+                (&reports[0], &reports[1])
+            } else {
+                (&reports[1], &reports[0])
+            };
+            assert!(
+                matches!(omission, PreparationDiagnostic::Declaration(report) if matches!(report.error, dotty::source_declarations::DeclarationError::Unsupported {source,..} if source == model.0))
+            );
+            assert!(matches!(
+                syntax,
+                PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(_))
+            ));
+            for (diagnostic, input, site, code) in [
+                (omission, model, "trait T", "declaration.unsupported"),
+                (
+                    syntax,
+                    broken,
+                    "1",
+                    "parser.declaration.expected_value_equals",
+                ),
+            ] {
+                assert_eq!(diagnostic.code(), Some(code));
+                let span = diagnostic.location().unwrap();
+                assert_eq!((diagnostic.source(), span.source()), (input.0, input.0));
+                assert_eq!(
+                    dotty::core::SourceText::new(input.2)
+                        .unwrap()
+                        .slice(span.span().range())
+                        .unwrap(),
+                    site
+                );
+            }
+        }
     }
 }
 
@@ -394,7 +358,8 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
         let [report] = reports.as_slice() else {
             panic!("{reports:?}")
         };
-        let FrontendDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }) = report else {
+        let PreparationDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }) = report
+        else {
             panic!("expected a lexer issue: {report:?}");
         };
         assert_eq!(
