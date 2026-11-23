@@ -207,3 +207,50 @@ fn generic_default_replays_inferred_type_argument_and_only_warns_for_shadowed_ev
         }
     }
 }
+
+#[test]
+fn bounded_and_conflicting_constraints_restore_the_session_and_locate_the_conflict() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for site in ["clash", "badBound"] {
+        let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, site);
+        let checkpoint = t.store.checkpoint();
+        for _ in 0..2 {
+            let err = client_result(&mut t, &parsed, site).unwrap_err();
+            match err {
+                TyperError::ConflictingInferenceConstraints {
+                    tree_index,
+                    parameter_index: 0,
+                    first,
+                    second,
+                    ..
+                } if site == "clash" => {
+                    let TreeKind::Apply(a) = &parsed.ast.get(rhs).kind else {
+                        panic!()
+                    };
+                    let TreeKind::NamedArg(value) = &parsed.ast.get(a.args[1]).kind else {
+                        panic!()
+                    };
+                    assert_eq!(tree_index, value.arg.index());
+                    assert_eq!((first, second), (defs.int, defs.boolean));
+                }
+                TyperError::InferredTypeArgumentBoundViolation {
+                    argument,
+                    parameter_index: 0,
+                    side: TypeArgumentBoundSide::Upper,
+                    ..
+                } if site == "badBound" => assert_eq!(argument, defs.int),
+                _ => panic!("{site}: {err:?}"),
+            }
+            assert_eq!(t.store.checkpoint(), checkpoint);
+            assert!(t.typed_index.get(source, rhs).is_none());
+        }
+    }
+    let tree = client_result(&mut t, &parsed, "goodBound").unwrap();
+    let arg = result_arguments(&t, tree)[0];
+    let dog = t.store.types.get(arg).reference_symbol().unwrap();
+    assert_eq!(
+        t.store.names.resolve(t.store.symbols.get(dog).name.text()),
+        "Dog"
+    );
+}

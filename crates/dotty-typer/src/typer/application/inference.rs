@@ -325,7 +325,15 @@ impl SourceTyper<'_> {
                     depth: 0,
                 },
                 info_journal,
-            )?;
+            )
+            .map_err(|mut error| {
+                if let TyperError::ConflictingInferenceConstraints { tree_index, .. } = &mut error
+                    && let Some(arg) = named.and_then(|slots| slots[ordinal].as_ref())
+                {
+                    *tree_index = arg.value.index();
+                }
+                error
+            })?;
         }
         let mut type_arguments = Vec::with_capacity(poly.params.len());
         for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {

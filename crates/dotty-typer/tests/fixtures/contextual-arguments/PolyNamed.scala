@@ -2,6 +2,8 @@ package inference
 class Box[A]
 class Fmt[A]
 class Result[A, B]
+trait Animal
+class Dog extends Animal
 class Client:
   def pair[A, B](using x: Box[A], y: Box[B]): Result[A, B] = new Result[A, B]
   def choose[A](using value: Box[A], fmt: Fmt[A]): Box[A] = value
@@ -23,3 +25,5 @@ class Client:
   def defaulted(b: Box[Int]): Box[Int] = fallback(using value = b)
   def shadow(b: Box[Int])(using f: Fmt[Int]): Box[Int] = fallback(using value = b)
   def overrideDefault(b: Box[Int])(using f: Fmt[Int]): Box[Int] = fallback(using fmt = f, value = b)
+  def bounded[A <: Animal](using value: Box[A]): Box[A] = value
+  def goodBound(d: Box[Dog]): Box[Dog] = bounded(using value = d)

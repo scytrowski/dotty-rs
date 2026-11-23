@@ -19,7 +19,9 @@ enum ErrorSite {
 ///   explicit applications identify the offending argument value. Named argument
 ///   binding errors identify the written argument.
 /// - A type argument count mismatch identifies the explicit type application. A
-///   bound violation identifies the type argument. Failed or ambiguous overload
+///   bound violation on explicit types identifies the type argument. For inferred
+///   types a bound violation identifies the call, and a conflicting named contextual
+///   argument identifies its value. Failed or ambiguous overload
 ///   selection identifies the whole call.
 /// - Expected expression type mismatches identify the checked expression.
 ///   Local value type mismatches identify the initializer.
@@ -55,6 +57,12 @@ pub fn typer_error_span_with<'a>(
             source, tree_index, ..
         }
         | TyperError::ExpectedExpressionTypeMismatch {
+            source, tree_index, ..
+        }
+        | TyperError::ConflictingInferenceConstraints {
+            source, tree_index, ..
+        }
+        | TyperError::InferredTypeArgumentBoundViolation {
             source, tree_index, ..
         }
         | TyperError::UnknownNamedArgument {
