@@ -12,7 +12,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
-CLASS_BOUND_CONTROLS = (
+SUPPLEMENTAL_CONTROLS = (
+    MODULE + "lookup::binary_fractional_companion_search",
     "typer::tests::contextual_arguments::envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses",
     "typer::tests::contextual_arguments::envelope_calls_diagnose_each_context_argument_at_the_call_site",
     "typer::tests::contextual_arguments::envelope_apply_passes_both_context_arguments_to_the_constructor",
@@ -61,6 +62,9 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("FractionalStandard.scala", 0, ["def standard: scala.math.Fractional[Double] = scala.math.Numeric.DoubleIsFractional",
+          "def single: scala.math.Fractional[Float] = scala.math.Numeric.FloatIsFractional"]),
+        ("FractionalMissing.scala", 1, ["[E172]", "No given instance of type Fractional[T] was found", "1 error found"]),
         ("Envelope.scala", 0, [
             "def apply[A](value: A)(using evidence$1: TC[A], trace: Trace): Envelope[A] = "
             "new Envelope[A](value)(using evidence$1, trace)",
@@ -158,14 +162,14 @@ def rust_observations(tc, rows):
     env = {**os.environ, "SCALA39_CLASSPATH": tc.runtime_classpath}
     result = subprocess.run(
         ["cargo", "test", "--locked", "-p", "dotty-typer", "--lib", "--",
-         "--include-ignored", "--show-output", "--test-threads=1", MODULE, *CLASS_BOUND_CONTROLS],
+         "--include-ignored", "--show-output", "--test-threads=1", MODULE, *SUPPLEMENTAL_CONTROLS],
         cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     passed = set(re.findall(r"^test (\S+) \.\.\. ok$", result.stdout, re.MULTILINE))
     sources = set(re.findall(r"^AUDIT_SOURCE\t(\S+)\t(\S+)$", result.stdout, re.MULTILINE))
     outcomes = re.findall(r"^AUDIT_OUTCOME\t(\S+)\t(\S+)$", result.stdout, re.MULTILINE)
     statuses = dict(outcomes)
-    if (result.returncode or passed != rows.keys() | set(CLASS_BOUND_CONTROLS)
+    if (result.returncode or passed != rows.keys() | set(SUPPLEMENTAL_CONTROLS)
             or sources != {(name, row[0]) for name, row in rows.items()}
             or len(outcomes) != len(rows) or statuses.keys() != rows.keys()
             or not set(statuses.values()) <= {"match", "typer-gap", "blocked"}):
