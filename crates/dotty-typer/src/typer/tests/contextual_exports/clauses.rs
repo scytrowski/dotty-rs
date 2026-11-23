@@ -144,3 +144,49 @@ object Api { export Records.product }";
     );
     assert_eq!(typer.store.checkpoint(), before);
 }
+
+#[test]
+fn exported_binary_type_constructor_uses_both_inferred_arguments() {
+    check_sites(
+        &[("directPoly", "Records"), ("viaPoly", "Poly")],
+        "poly",
+        &[|d| d.int, |d| d.boolean],
+        &[&["k", "t"]],
+    );
+}
+
+#[test]
+fn later_type_parameter_bounds_refer_to_the_forwarders_own_parameter() {
+    let input = "package multi
+class Key[A]
+class Pair[A,B]
+object Records { given poly[A,B <: A](using k: Key[A]): Pair[A,B] = new Pair[A,B] }
+object Poly { export Records.poly }
+class Client {
+  def need[A](using x: A): A = x
+  def viaPoly(using k: Key[Any]): Pair[Any,Boolean] = { import Poly.given; need[Pair[Any,Boolean]] }
+}";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(input);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "viaPoly").unwrap();
+    let app = invocation(&typer, evidence(&typer, call));
+    let tree = typer.type_export_forwarder_definition(app.method).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    let symbols: Vec<_> = def
+        .type_params
+        .iter()
+        .map(|&p| typer.typed_index.synthetic_definition_symbol(p).unwrap())
+        .collect();
+    let SymbolInfo::Complete(bounds) = *typer.store.symbols.info(symbols[1]) else {
+        panic!()
+    };
+    let Type::Bounds { high, .. } = typer.store.types.get(bounds) else {
+        panic!()
+    };
+    assert_eq!(
+        typer.store.types.get(*high).reference_symbol(),
+        Some(symbols[0])
+    );
+}

@@ -251,7 +251,7 @@ impl SourceTyper<'_> {
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
         let body = match self.store.types.get(signature) {
-            Type::Poly(poly) if poly.params.len() == 1 => poly.result,
+            Type::Poly(poly) if !poly.params.is_empty() => poly.result,
             _ => signature,
         };
         if !matches!(self.store.types.get(body), Type::Method(m) if m.kind == MethodKind::Contextual
@@ -392,52 +392,65 @@ impl SourceTyper<'_> {
     fn export_type_application(
         &mut self,
         method: SymbolId,
-        select: TreeId<Typed>,
+        body: &mut ExportBody,
         signature: TypeId,
-    ) -> Result<(TreeId<Typed>, TypeId, Vec<TreeId<Typed>>), TyperError> {
-        let invalid = || TyperError::SourceProvenanceMissing { symbol: method };
-        let position = self.store.symbols.get(method).position;
+    ) -> Result<TypeId, TyperError> {
         let Some(Type::Poly(poly)) = self.store.types.try_get(signature) else {
-            return Ok((select, signature, Vec::new()));
+            return Ok(signature);
         };
-        let &[parameter] = poly.params.as_slice() else {
-            return Err(invalid());
-        };
-        let symbol = self.export_parameter(
-            method,
-            *parameter.name.as_name(),
-            SymbolKind::TypeParameter,
-            SymbolFlags::EMPTY,
-            SymbolInfo::Missing,
+        let params = poly.params.clone();
+        let position = self.store.symbols.get(method).position;
+        let mut declarations = Vec::with_capacity(params.len());
+        let mut args = Vec::with_capacity(params.len());
+        // Bounds can refer to other parameters of this same binder.
+        for param in params {
+            let symbol = self.export_parameter(
+                method,
+                *param.name.as_name(),
+                SymbolKind::TypeParameter,
+                SymbolFlags::EMPTY,
+                SymbolInfo::Missing,
+            );
+            let arg = self
+                .store
+                .types
+                .alloc(Type::type_ref(self.definitions.no_prefix, symbol));
+            declarations.push((param, symbol, arg));
+            args.push(arg);
+        }
+        let instance = instantiate_poly(self.store, signature, &args)
+            .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?;
+        let mut type_args = Vec::with_capacity(args.len());
+        for ((param, symbol, arg), bound) in declarations.into_iter().zip(instance.bounds) {
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(bound));
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let bound_tree = builder.type_tree(bound, position);
+            type_args.push(builder.type_tree(arg, position));
+            let definition = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                symbol,
+                Tree {
+                    ty: arg,
+                    position,
+                    kind: TreeKind::TypeDef(TypeDef {
+                        name: param.name,
+                        rhs: bound_tree,
+                        metadata: (),
+                        variance: param.declared_variance,
+                    }),
+                },
+            );
+            body.type_params.push(definition);
+        }
+        body.rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).type_apply(
+            body.rhs,
+            type_args,
+            instance.result,
+            position,
         );
-        let arg = self
-            .store
-            .types
-            .alloc(Type::type_ref(self.definitions.no_prefix, symbol));
-        let instance = instantiate_poly(self.store, signature, &[arg]).map_err(|_| invalid())?;
-        let bound = instance.bounds[0];
-        self.store
-            .symbols
-            .set_info(symbol, SymbolInfo::Complete(bound));
-        let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-        let bound_tree = builder.type_tree(bound, position);
-        let type_arg = builder.type_tree(arg, position);
-        let type_apply = builder.type_apply(select, vec![type_arg], instance.result, position);
-        let type_def = self.typed_index.alloc_synthetic_definition(
-            &mut self.typed_arena,
-            symbol,
-            Tree {
-                ty: arg,
-                position,
-                kind: TreeKind::TypeDef(TypeDef {
-                    name: parameter.name,
-                    rhs: bound_tree,
-                    metadata: (),
-                    variance: parameter.declared_variance,
-                }),
-            },
-        );
-        Ok((type_apply, instance.result, vec![type_def]))
+        Ok(instance.result)
     }
 
     fn build_export_provider_body(
@@ -450,8 +463,12 @@ impl SourceTyper<'_> {
         let SymbolInfo::Complete(signature) = *self.store.symbols.info(method) else {
             return Err(invalid());
         };
-        let (function, callable, type_params) =
-            self.export_type_application(method, select, signature)?;
+        let mut body = ExportBody {
+            rhs: select,
+            type_params: Vec::new(),
+            value_param_clauses: Vec::new(),
+        };
+        let callable = self.export_type_application(method, &mut body, signature)?;
         let Type::Method(clause) = self.store.types.get(callable) else {
             return Err(invalid());
         };
@@ -495,12 +512,9 @@ impl SourceTyper<'_> {
         }
         let result =
             instantiate_method_result(self.store, callable, &paths).map_err(|_| invalid())?;
-        let rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .apply(function, arguments, result, position);
-        Ok(ExportBody {
-            rhs,
-            type_params,
-            value_param_clauses: vec![params],
-        })
+        body.rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .apply(body.rhs, arguments, result, position);
+        body.value_param_clauses.push(params);
+        Ok(body)
     }
 }
