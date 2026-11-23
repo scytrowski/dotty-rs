@@ -706,6 +706,15 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
     let middle_method = "  def take() = seeds.seed";
     let caller = "  def read(m: Middle) = m.take()";
     let bad = "  def bad(): Int = only(1)";
+    let only = "  def only(): Int = 7";
+    let good = "  def good(): Int = only()";
+    let origin = good.find("only").unwrap();
+    let sibling_lookup =
+        json!({"textDocument":{"uri":B}, "position":{"line":4,"character":origin+1}});
+    let sibling_link = json!([{
+        "originSelectionRange":range(4,origin,origin+4), "targetUri":B,
+        "targetSelectionRange":range(2,6,10), "targetRange":range(2,2,only.len())
+    }]);
     let call = caller.find("take").unwrap();
     let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":call+1}});
     let link = json!([{
@@ -732,9 +741,13 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         );
         client.open(
             B,
-            &format!("class Consumer {{\n{caller}\n  def only(): Int = 7\n{bad}\n}}"),
+            &format!("class Consumer {{\n{caller}\n{only}\n{bad}\n{good}\n}}"),
         );
         client.diagnostics(B, 1, independent.clone());
+        assert_eq!(
+            client.request("textDocument/definition", sibling_lookup.clone()),
+            sibling_link
+        );
         assert_eq!(
             client.request("textDocument/definition", lookup.clone()),
             link
@@ -745,6 +758,10 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         client.diagnostics(B, 1, independent.clone());
         client.diagnostics(seeds, 2, arity(2, start, start + "value(1)".len()));
         assert_eq!(
+            client.request("textDocument/definition", sibling_lookup.clone()),
+            sibling_link
+        );
+        assert_eq!(
             client.request("textDocument/definition", lookup.clone()),
             Value::Null
         );
@@ -752,6 +769,10 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         client.edit(seeds, 3, range(2, argument, argument + 1), "");
         client.diagnostics(B, 1, independent.clone());
         client.diagnostics(seeds, 3, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", sibling_lookup.clone()),
+            sibling_link
+        );
         assert_eq!(
             client.request("textDocument/definition", lookup.clone()),
             link

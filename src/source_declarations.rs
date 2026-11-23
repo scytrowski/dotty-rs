@@ -25,6 +25,14 @@ pub enum ClassMember {
     Method(Declaration),
 }
 
+impl ClassMember {
+    /// Canonical symbol of this field or method in its naming session.
+    pub fn symbol(self) -> SymbolId {
+        let (Self::Field(d) | Self::Method(d)) = self;
+        d.symbol
+    }
+}
+
 /// IDs from a named class, in source order. All IDs refer to the caller's session.
 #[derive(Debug)]
 pub struct SourceClass {
