@@ -855,7 +855,8 @@ pub(crate) fn profile_parent_references(
                 &file,
                 parent,
                 package,
-                requested.as_internal() == "scala/Tuple2" && parent_index == 0,
+                matches!(requested.as_internal(), "scala/Tuple2" | "scala/Tuple3")
+                    && parent_index == 0,
                 &mut |owner, alias| {
                     alias_attempted = true;
                     let result = resolve_alias(owner, alias);
@@ -930,10 +931,10 @@ pub(crate) fn parse_classloader_tasty(bytes: &[u8]) -> Result<TastyFile<'_>, Tas
     Ok(file)
 }
 
-const TUPLE2_TIMES_COLON_INTERNAL: &str = "scala/$times$colon";
+const TUPLE_TIMES_COLON_INTERNAL: &str = "scala/$times$colon";
 
-fn is_tuple2_times_colon_identity(requested: &BinaryName) -> bool {
-    requested.as_internal() == TUPLE2_TIMES_COLON_INTERNAL
+fn is_times_colon_identity(requested: &BinaryName) -> bool {
+    requested.as_internal() == TUPLE_TIMES_COLON_INTERNAL
 }
 
 /// Selects a unique direct declaration of the requested package, before any
@@ -944,7 +945,7 @@ fn select_type_definition<'i, 'a>(
     requested: &BinaryName,
     module_class: bool,
 ) -> Result<&'i dotty_tasty::tasty::RawNode<'a>, TastyDecodeError> {
-    let encoded_times_colon = is_tuple2_times_colon_identity(requested);
+    let encoded_times_colon = is_times_colon_identity(requested);
     let simple_name = requested.simple_name();
     let expected = if encoded_times_colon {
         "*:"
@@ -1550,7 +1551,8 @@ where
                             &file,
                             parent,
                             package,
-                            requested.as_internal() == "scala/Tuple2" && parent_index == 0,
+                            matches!(requested.as_internal(), "scala/Tuple2" | "scala/Tuple3")
+                                && parent_index == 0,
                             &mut profiled_alias,
                             &mut profiled_bare,
                         );
@@ -4477,7 +4479,7 @@ fn resolve_parent_name_with_alias(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
-    allow_tuple2_constructor_parent: bool,
+    allow_tuple_constructor_parent: bool,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
@@ -4487,8 +4489,8 @@ fn resolve_parent_name_with_alias(
             _ => None,
         };
     }
-    if allow_tuple2_constructor_parent
-        && let Some(name) = resolve_tuple2_times_colon_constructor_parent(file, parent, package)
+    if allow_tuple_constructor_parent
+        && let Some(name) = resolve_tuple_times_colon_constructor_parent(file, parent, package)
     {
         return Some(name);
     }
@@ -4522,11 +4524,11 @@ fn resolve_parent_name_with_alias(
     resolve_parent_name_with_bare(file, parent, package, resolve_bare)
 }
 
-/// Resolves only the pinned first applied constructor parent in Scala 3.9's
-/// `scala/Tuple2.tasty`. The source spelling is accepted only when the exact
+/// Resolves the pinned first applied constructor parent in Scala 3.9's
+/// `Tuple2` and `Tuple3` declarations. The source spelling is accepted only when the exact
 /// Apply/TypeApply/SelectIn wrapper, package-qualified applied type
 /// constructor, and underlying shared type reference all agree.
-fn resolve_tuple2_times_colon_constructor_parent(
+fn resolve_tuple_times_colon_constructor_parent(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
@@ -4553,10 +4555,10 @@ fn resolve_tuple2_times_colon_constructor_parent(
     {
         return None;
     }
-    resolve_tuple2_constructor_owner(file, &selection.qualifier, &selection.underlying_type)
+    resolve_tuple_constructor_owner(file, &selection.qualifier, &selection.underlying_type)
 }
 
-fn resolve_tuple2_constructor_owner(
+fn resolve_tuple_constructor_owner(
     file: &TastyFile<'_>,
     qualifier: &RawTree<'_>,
     underlying_type: &RawTree<'_>,
@@ -4576,25 +4578,25 @@ fn resolve_tuple2_constructor_owner(
         return None;
     }
 
-    let underlying_name = resolve_tuple2_package_type_reference(file, underlying_type, 0)?;
-    let constructor_name = resolve_tuple2_package_type_reference(file, &applied.tycon, 0)?;
+    let underlying_name = resolve_tuple_package_type_reference(file, underlying_type, 0)?;
+    let constructor_name = resolve_tuple_package_type_reference(file, &applied.tycon, 0)?;
     if underlying_name.as_internal() == "scala/*:"
         && constructor_name == underlying_name
         && underlying_name.package_path() == "scala"
     {
-        Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
+        Some(BinaryName::from_internal(TUPLE_TIMES_COLON_INTERNAL))
     } else {
         None
     }
 }
 
-fn resolve_tuple2_package_type_reference(
+fn resolve_tuple_package_type_reference(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
     depth: usize,
 ) -> Option<BinaryName> {
-    const MAX_TUPLE2_TYPE_REFERENCE_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE2_TYPE_REFERENCE_DEPTH {
+    const MAX_TUPLE_TYPE_REFERENCE_DEPTH: usize = 128;
+    if depth >= MAX_TUPLE_TYPE_REFERENCE_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = tree
@@ -4602,7 +4604,7 @@ fn resolve_tuple2_package_type_reference(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple2_package_type_reference(file, &target, depth + 1);
+        return resolve_tuple_package_type_reference(file, &target, depth + 1);
     }
 
     let StructuredTree::Reference(ReferenceNode {
@@ -4613,23 +4615,23 @@ fn resolve_tuple2_package_type_reference(
     else {
         return None;
     };
-    // The Tuple2 parent is authenticated from the nominal class-name entry
+    // The tuple parent is authenticated from the nominal class-name entry
     // itself. Resolving a Signed name through its result signature would let
     // a method signature impersonate the class name.
     let dotty_tasty::tasty::RawName::Utf8(name) = file.name(reference)? else {
         return None;
     };
-    let package = resolve_tuple2_package_prefix(file, &qualifier, depth + 1)?;
+    let package = resolve_tuple_package_prefix(file, &qualifier, depth + 1)?;
     Some(BinaryName::from_internal(format!("{package}/{name}")))
 }
 
-fn resolve_tuple2_package_prefix(
+fn resolve_tuple_package_prefix(
     file: &TastyFile<'_>,
     prefix: &RawTree<'_>,
     depth: usize,
 ) -> Option<String> {
-    const MAX_TUPLE2_PACKAGE_PREFIX_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE2_PACKAGE_PREFIX_DEPTH {
+    const MAX_TUPLE_PACKAGE_PREFIX_DEPTH: usize = 128;
+    if depth >= MAX_TUPLE_PACKAGE_PREFIX_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = prefix
@@ -4637,7 +4639,7 @@ fn resolve_tuple2_package_prefix(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple2_package_prefix(file, &target, depth + 1);
+        return resolve_tuple_package_prefix(file, &target, depth + 1);
     }
 
     let RawTree::Leaf(term) = prefix else {
@@ -6003,15 +6005,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 1);
+        assert!(current_unresolved_roots.is_empty());
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            40
+            41
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 1);
-        assert_eq!(recovered_roots.len(), 40);
-        assert_eq!(recovered_weight, 378);
+        assert_eq!(current_weight, 0);
+        assert_eq!(recovered_roots.len(), 41);
+        assert_eq!(recovered_weight, 379);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -6019,8 +6021,11 @@ mod tests {
             current_weight + recovered_weight
         );
         assert_eq!(
-            load_cause_counts.get("tasty.unresolved_supertype"),
-            Some(&current_unresolved_roots.len())
+            load_cause_counts
+                .get("tasty.unresolved_supertype")
+                .copied()
+                .unwrap_or(0),
+            current_unresolved_roots.len()
         );
         std::fs::write(&output_path, rows).expect("write parent profile TSV");
         eprintln!(
@@ -6435,21 +6440,15 @@ mod tests {
         assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
 
         let tuple3 = fixture_bytes("scala3-library/scala/Tuple3.tasty");
-        let error = decode_with_resolvers(
+        let decoded = decode_with_resolvers(
             &tuple3,
             &BinaryName::from_internal("scala/Tuple3"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("the neighboring Tuple3 source operator name remains unsupported");
-        assert!(
-            matches!(
-                error,
-                TastyDecodeError::UnresolvedSupertype(ref parent)
-                    if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("*:")
-            ),
-            "Tuple3: {error:?}"
-        );
+        .unwrap();
+        assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
+        assert_eq!(decoded.interfaces[0].as_internal(), "scala/Product3");
     }
 
     #[test]
@@ -7381,10 +7380,13 @@ mod tests {
             |_, _| None,
         )
         .unwrap();
-        assert!(
-            tuple3_profiles
-                .iter()
-                .all(|parent| parent.resolved_binary_name.as_deref() != Some("scala/$times$colon"))
+        assert_eq!(
+            tuple3_profiles[0].resolved_binary_name.as_deref(),
+            Some("scala/$times$colon")
+        );
+        assert_eq!(
+            tuple3_profiles[1].resolved_binary_name.as_deref(),
+            Some("scala/Product3")
         );
         let decoded = decode_with_resolvers(
             &bytes,
@@ -7464,12 +7466,12 @@ mod tests {
         };
         let parent = &template.parents[0];
         assert_eq!(
-            resolve_tuple2_times_colon_constructor_parent(&file, parent, "scala")
+            resolve_tuple_times_colon_constructor_parent(&file, parent, "scala")
                 .as_ref()
                 .map(BinaryName::as_internal),
             Some("scala/$times$colon")
         );
-        assert!(resolve_tuple2_times_colon_constructor_parent(&file, parent, "foreign").is_none());
+        assert!(resolve_tuple_times_colon_constructor_parent(&file, parent, "foreign").is_none());
 
         let StructuredTree::Length(StructuredNode::Apply(apply)) =
             parent.decode_structured().unwrap()
@@ -7520,7 +7522,7 @@ mod tests {
             child: Box::new(contradictory_applied),
         };
         assert!(
-            resolve_tuple2_constructor_owner(
+            resolve_tuple_constructor_owner(
                 &file,
                 &contradictory_qualifier,
                 &selection.underlying_type
@@ -7548,17 +7550,17 @@ mod tests {
         };
         assert_eq!(root_type_tag, TYPEREF_TAG);
         assert_eq!(
-            resolve_tuple2_package_prefix(&file, &package_prefix, 0).as_deref(),
+            resolve_tuple_package_prefix(&file, &package_prefix, 0).as_deref(),
             Some("scala")
         );
-        assert!(resolve_tuple2_package_prefix(&file, &applied.tycon, 0).is_none());
+        assert!(resolve_tuple_package_prefix(&file, &applied.tycon, 0).is_none());
         let term_tycon = RawTree::NatAst {
             tag: dotty_tasty::tasty::TERMREF_TAG,
             offset,
             value,
             child,
         };
-        assert!(resolve_tuple2_package_prefix(&file, &term_tycon, 0).is_none());
+        assert!(resolve_tuple_package_prefix(&file, &term_tycon, 0).is_none());
         let term_applied = AppliedTypeNode {
             tag: applied.tag,
             tycon: term_tycon,
@@ -7575,7 +7577,7 @@ mod tests {
             child: Box::new(term_applied),
         };
         assert!(
-            resolve_tuple2_constructor_owner(&file, &term_qualifier, &selection.underlying_type)
+            resolve_tuple_constructor_owner(&file, &term_qualifier, &selection.underlying_type)
                 .is_none(),
             "a TERMREF root tycon must not be accepted as the nominal class constructor"
         );
