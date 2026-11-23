@@ -2769,16 +2769,88 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     }),
                 }
             }
-            [] if store.symbols.get(resolved_owner).kind == SymbolKind::ModuleClass
-                && request.name.is_type() =>
+            [] if request.name.is_type()
+                && matches!(
+                    store.symbols.get(resolved_owner).kind,
+                    SymbolKind::ModuleClass | SymbolKind::Class | SymbolKind::Trait
+                ) =>
             {
-                let Some(identity) = self.session.module_for_class(resolved_owner).cloned() else {
-                    return Ok(None);
-                };
                 let simple_name = store.names.resolve(request.name.text()).to_owned();
+                let (outer_name, visibility) = if let Some(identity) =
+                    self.session.module_for_class(resolved_owner)
+                {
+                    let Some(visibility) = identity.nested_type_visibilities.get(&simple_name)
+                    else {
+                        return Ok(None);
+                    };
+                    (identity.object_name.clone(), *visibility)
+                } else {
+                    let owner = store.symbols.get(resolved_owner);
+                    let Some(package) = owner.owner.and_then(|s| package_path_of_symbol(store, s))
+                    else {
+                        return Ok(None);
+                    };
+                    let mut path = package;
+                    path.push(store.names.resolve(owner.name.text()).to_owned());
+                    let outer = BinaryName::from_internal(path.join("/"));
+                    if self.session.identified.get(&outer) != Some(&resolved_owner)
+                        || !matches!(owner.origin, SymbolOrigin::Tasty(_))
+                    {
+                        return Ok(None);
+                    }
+                    let class_path = self
+                        .class_path
+                        .as_ref()
+                        .expect("exclusive resolver operation");
+                    let nested =
+                        BinaryName::from_internal(format!("{}${simple_name}", outer.as_internal()));
+                    if !nested.is_path_safe() {
+                        return Ok(None);
+                    }
+                    // Missing source names are common. Check for the actual
+                    // classfile before decoding an entire enclosing TASTy file.
+                    let Some(nested_resource) =
+                        class_path.find_class(&nested).map_err(|error| {
+                            ResolutionError::Malformed {
+                                reason: error.to_string(),
+                            }
+                        })?
+                    else {
+                        return Ok(None);
+                    };
+                    if nested_resource.format() != ClassFormat::Class
+                        || self.session.origins.get(&resolved_owner)
+                            != Some(nested_resource.origin())
+                    {
+                        return Ok(None);
+                    }
+                    let Some(resource) =
+                        class_path
+                            .find_class(&outer)
+                            .map_err(|e| ResolutionError::Malformed {
+                                reason: e.to_string(),
+                            })?
+                    else {
+                        return Ok(None);
+                    };
+                    if resource.format() != ClassFormat::Tasty
+                        || resource.origin() != nested_resource.origin()
+                        || !crate::tasty_symbol::declares_public_nested_class(
+                            resource.bytes(),
+                            &outer,
+                            &simple_name,
+                        )
+                        .map_err(|e| ResolutionError::Malformed {
+                            reason: format!("invalid TASTy of {outer}: {e:?}"),
+                        })?
+                    {
+                        return Ok(None);
+                    }
+                    (outer, dotty_core::symbols::Visibility::Public)
+                };
                 let binary_name = BinaryName::from_internal(format!(
                     "{}${simple_name}",
-                    identity.object_name.as_internal()
+                    outer_name.as_internal()
                 ));
                 if !binary_name.is_path_safe() {
                     return Ok(None);
@@ -2799,37 +2871,39 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 let Some(metadata) = self.session.metadata.get(&symbol) else {
                     return Ok(None);
                 };
+                let instance_member =
+                    store.symbols.get(resolved_owner).kind != SymbolKind::ModuleClass;
+                if instance_member
+                    && self.session.origins.get(&resolved_owner)
+                        != self.session.origins.get(&symbol)
+                {
+                    return Ok(None);
+                }
                 let nested_class_is_proven = metadata.inner_classes.iter().any(|entry| {
                     let inner_matches = match &entry.inner_class {
                         crate::symbol::ClassRef::Resolved(inner) => *inner == symbol,
                         crate::symbol::ClassRef::Unresolved(name) => name == &binary_name,
                     };
                     let outer_matches = match &entry.outer_class {
-                        Some(crate::symbol::ClassRef::Resolved(outer)) => {
-                            self.session.identified.iter().any(|(name, candidate)| {
-                                candidate == outer && name == &identity.object_name
-                            })
-                        }
-                        Some(crate::symbol::ClassRef::Unresolved(name)) => {
-                            name == &identity.object_name
-                        }
+                        Some(crate::symbol::ClassRef::Resolved(outer)) => self
+                            .session
+                            .identified
+                            .iter()
+                            .any(|(name, candidate)| candidate == outer && name == &outer_name),
+                        Some(crate::symbol::ClassRef::Unresolved(name)) => name == &outer_name,
                         None => false,
                     };
                     inner_matches
                         && outer_matches
+                        && (!instance_member
+                            || !entry
+                                .access_flags
+                                .contains(dotty_classfile::access_flags::ACC_STATIC))
                         && entry.inner_name.as_deref() == Some(simple_name.as_str())
                 });
                 if !nested_class_is_proven {
                     return Ok(None);
                 }
-                let Some(visibility) = identity.nested_type_visibilities.get(&simple_name).copied()
-                else {
-                    // Classfile InnerClasses access flags can widen Scala
-                    // protected/private declarations. Only project nested
-                    // types whose declaration visibility is present in the
-                    // authoritative module TASTy.
-                    return Ok(None);
-                };
                 let SymbolInfo::Complete(info) = member.info else {
                     return Ok(None);
                 };
@@ -15634,6 +15708,91 @@ mod tests {
                     .unwrap();
                 assert_eq!(store.symbols.get(constructor).kind, SymbolKind::Constructor);
                 assert_eq!(store.symbols.get(constructor).owner, Some(class));
+            }
+        }
+    }
+
+    #[test]
+    fn instance_prefix_requires_public_same_origin_nonstatic_nested_class() {
+        use dotty_classfile::{attribute::Attribute, class_file::ClassFile, reader::Reader};
+        struct ResourceOverride(BinaryName, ClassResource);
+        impl ClassPathEntry for ResourceOverride {
+            fn find_class(
+                &self,
+                name: &BinaryName,
+            ) -> Result<Option<ClassResource>, ClassPathError> {
+                Ok((name == &self.0).then(|| self.1.clone()))
+            }
+        }
+
+        let outer = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Enclosing");
+        let member = BinaryName::from_internal(format!("{}$Member", outer.as_internal()));
+        let directory = fixture_path("tests/fixtures/tasty_visibility");
+        let resource = DirectoryClassPath::new(directory.clone())
+            .find_class(&member)
+            .unwrap()
+            .unwrap();
+        let mut static_file = ClassFile::decode(&mut Reader::new(resource.bytes())).unwrap();
+        for attribute in &mut static_file.attributes {
+            if let Attribute::InnerClasses(entries) = attribute {
+                let entry = entries
+                    .iter_mut()
+                    .find(|entry| entry.inner_class_info_index == static_file.this_class)
+                    .unwrap();
+                entry.inner_class_access_flags |= dotty_classfile::access_flags::ACC_STATIC;
+            }
+        }
+        let static_member = ClassResource::new(
+            static_file.encode().unwrap(),
+            ClassFormat::Class,
+            resource.origin().clone(),
+        );
+        let shadowing_member = ClassResource::new(
+            resource.bytes().to_vec(),
+            ClassFormat::Class,
+            ClassOrigin::Directory(PathBuf::from("earlier-classpath-entry")),
+        );
+        for (resource, valid_member) in [
+            (resource, true),
+            (static_member, false),
+            (shadowing_member, false),
+        ] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(ResourceOverride(member.clone(), resource)),
+                Box::new(DirectoryClassPath::new(directory.clone())),
+                Box::new(SyntheticTastyJdk),
+            ]);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, defs, LoadingSession::new());
+            let enclosing = resolver.load_class(&mut store, &outer).unwrap();
+            let prefix = store.types.alloc(Type::type_ref(defs.no_prefix, enclosing));
+            for (name, expected) in [
+                ("Member", valid_member),
+                ("Hidden", false),
+                ("CompanionOnly", false),
+                ("Missing", false),
+            ] {
+                let request = MemberRequest {
+                    prefix,
+                    name: Name::new(store.names.intern(name), Namespace::Type),
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let before = store.checkpoint();
+                let result = resolver.resolve_member(&mut store, &request).unwrap();
+                assert_eq!(result.is_some(), expected, "{name}");
+                if let Some(symbol) = result {
+                    assert_eq!(store.symbols.get(symbol).owner, Some(enclosing));
+                    assert_eq!(store.symbols.get(symbol).visibility, Visibility::Public);
+                } else {
+                    assert_eq!(
+                        store.checkpoint(),
+                        before,
+                        "lookup of {name} must roll back"
+                    );
+                }
             }
         }
     }

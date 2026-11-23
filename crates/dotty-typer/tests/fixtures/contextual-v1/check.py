@@ -14,6 +14,7 @@ ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
 SUPPLEMENTAL_CONTROLS = (
     MODULE + "lookup::binary_fractional_companion_search",
+    MODULE + "inherited_nested::fractional_numeric_ops_uses_the_subclass_prefix",
     "typer::tests::contextual_arguments::envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses",
     "typer::tests::contextual_arguments::envelope_calls_diagnose_each_context_argument_at_the_call_site",
     "typer::tests::contextual_arguments::envelope_apply_passes_both_context_arguments_to_the_constructor",
@@ -64,6 +65,7 @@ def check_controls(tc, checkout):
     controls = [
         ("FractionalStandard.scala", 0, ["def standard: scala.math.Fractional[Double] = scala.math.Numeric.DoubleIsFractional",
           "def single: scala.math.Fractional[Float] = scala.math.Numeric.FloatIsFractional"]),
+        ("FractionalInherited.scala", 0, ["def inherited(v: Slice.this.NumericOps): Slice.this.NumericOps = v"]),
         ("FractionalMissing.scala", 1, ["[E172]", "No given instance of type Fractional[T] was found", "1 error found"]),
         ("Envelope.scala", 0, [
             "def apply[A](value: A)(using evidence$1: TC[A], trace: Trace): Envelope[A] = "

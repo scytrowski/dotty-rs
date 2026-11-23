@@ -462,6 +462,16 @@ Scala 3.9.0 `-Vprint:typer` fixture in
 pins nested `(x)` as `x` and `(1)` as `1`. Tuple syntax remains a separate
 `UntypedNode::Tuple` form.
 
+## Inherited nested class names
+
+A template with one explicitly applied direct parent can resolve an unqualified
+type name in its body to a public class or trait declared by that parent. The
+type retains the enclosing receiver as its prefix. For example, the parameter
+type `NumericOps` in a trait `Slice[T] extends scala.math.Numeric[T]` denotes
+`Slice.this.NumericOps`. A method type parameter of the same name takes
+precedence. The regressions cover source declarations and a class compiled
+into the pinned Scala library.
+
 ## Singleton source types
 
 Source singleton type trees (`x.type`, stable selections, and `this.type`) are

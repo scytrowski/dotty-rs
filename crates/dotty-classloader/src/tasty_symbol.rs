@@ -1115,6 +1115,65 @@ pub(crate) fn decode_identity(
     })
 }
 
+/// Proves that this exact package class or trait declares a public nested
+/// class. JVM InnerClasses flags may widen Scala visibility, so neither a
+/// matching binary name nor those flags prove this source-level member.
+pub(crate) fn declares_public_nested_class(
+    bytes: &[u8],
+    owner: &BinaryName,
+    member: &str,
+) -> Result<bool, TastyDecodeError> {
+    let file = parse_classloader_tasty(bytes)?;
+    let index = file.ast_address_index()?;
+    let mut public = None;
+    for node in index.iter().filter(|node| node.tag == TYPEDEF_TAG) {
+        if !is_in_requested_top_level_package(&file, &index, node.offset, owner.package_path()) {
+            continue;
+        }
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template: RawTree::LengthNode(template),
+            tail,
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if template.tag != TEMPLATE_TAG
+            || has_modifier(&tail, OBJECT_TAG)
+            || wire_name(&file, name).as_deref() != Some(owner.simple_name())
+        {
+            continue;
+        }
+        for stat in template.decode_template_structure()?.stats {
+            let RawTree::LengthNode(nested) = stat else {
+                continue;
+            };
+            if nested.tag != TYPEDEF_TAG {
+                continue;
+            }
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                name,
+                type_or_template: RawTree::LengthNode(body),
+                tail,
+            }) = nested.decode_structured()?
+            else {
+                continue;
+            };
+            if body.tag != TEMPLATE_TAG
+                || has_modifier(&tail, OBJECT_TAG)
+                || wire_name(&file, name).as_deref() != Some(member)
+            {
+                continue;
+            }
+            if public.is_some() {
+                return Err(TastyDecodeError::AmbiguousTypeDef);
+            }
+            public = Some(decode_visibility(&file, &tail).is_none());
+        }
+    }
+    Ok(public == Some(true))
+}
+
 /// Finds a Scala object and its module class only when both exact definitions
 /// are direct members of the requested package in the authoritative TASTy
 /// file. A classfile or a `$`-suffixed spelling alone is never evidence.

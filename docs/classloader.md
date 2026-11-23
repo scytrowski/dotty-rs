@@ -675,9 +675,11 @@ and `ThisType`. `MemberSpace::Explicit(owner)` completes and searches only the
 explicit owner, regardless of the displayed prefix, and never falls back.
 Returned symbols are declarations; receiver/generic adaptation stays with the
 caller. The declaration scope contains decoded fields/methods/constructors and
-supported type parameters. `InnerClasses` metadata does not manufacture nested
-class declarations; nested classes absent from an owner's semantic scope can
-be loaded via `ClassLoader::load_class` with their exact JVM binary name.
+supported type parameters. A unique type lookup on a package-owned Scala class
+or trait also exposes a public nested instance class when the enclosing TASTy
+declares it and a classfile from the same origin confirms the non-static
+`InnerClasses` entry, outer, and simple name. Other nested classes absent
+from the declaration scope can be loaded via `ClassLoader::load_class` with their exact JVM binary name.
 The existing package/type policy is preserved, including its refusal to
 replace a pre-existing incomplete package entry.
 
