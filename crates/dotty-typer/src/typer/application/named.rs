@@ -24,11 +24,23 @@ impl SourceTyper<'_> {
     pub(super) fn named_using_arguments(
         &self,
         kind: ApplyKind,
-        method: &MethodType,
+        callable: TypeId,
         trees: &[TreeId<Untyped>],
         tree_index: u32,
     ) -> Result<Option<Vec<Option<NamedArgument>>>, TyperError> {
         if !self.has_named_using_arguments(kind, trees) {
+            return Ok(None);
+        }
+        // Instantiation changes parameter types but preserves the clause's names
+        // and order. Bind once and use the same slots for inference and application.
+        let signature = match self.store.types.try_get(callable) {
+            Some(Type::Poly(poly)) => poly.result,
+            _ => callable,
+        };
+        let Some(Type::Method(method)) = self.store.types.try_get(signature) else {
+            return Ok(None);
+        };
+        if !application_kind_accepts(kind, method.kind) {
             return Ok(None);
         }
         let ordinals: HashMap<_, _> = method

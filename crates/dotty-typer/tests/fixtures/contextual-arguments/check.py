@@ -133,6 +133,7 @@ def main():
         check_provider_export_clauses(toolchain, output, client_output, classpath)
         check_within_clause(toolchain, output, client_output, classpath)
         check_named_using(toolchain, output, client_output, classpath)
+        check_poly_named_using(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -362,6 +363,37 @@ def check_named_using(toolchain, output, client_output, classpath):
         "does not have a parameter bogus", "parameter n of method pick", "is already instantiated",
         "No given instance of type Int was found", "both parameter j and parameter i match type Int",
         "positional after named argument", "[E007]", "Found:    (w : q.Out)", "Required: p.Out", "6 errors found",
+    ), classpath)
+
+
+def check_poly_named_using(toolchain, output, client_output, classpath):
+    full = "inference.Box[Int] = this.choose[Int](using value = b, fmt = f)"
+    getter = "this.fallback[Int](using value = b, this.fallback$default$2[Int])"
+    check_typer_output(toolchain, output, "PolyNamed.scala", 0, (
+        "this.choose[Int](using b, f)",
+        *(f"def {site}(b: inference.Box[Int], f: inference.Fmt[Int]):\n      {full}"
+          for site in ("explicit", "ordered", "reversed")),
+        "this.pair[Int, Boolean](using x = b, y = c)",
+        "val y$1: inference.Box[Boolean] = this.boolean()\n"
+        "        val x$1: inference.Box[Int] = this.integer()\n"
+        "        this.pair[Int, Boolean](using x = x$1, y = y$1)",
+        "inference.Box[Int] = this.choose[Int](using value = b, f)",
+        "this.front[Int](using f, value = b)", "this.middle[Int](using b, f, flag = true)",
+        "def wide(b: inference.Box[Int])(using f: inference.Fmt[Int]): Any =\n      this.choose[Int](using value = b, f)",
+        f"def defaulted(b: inference.Box[Int]): inference.Box[Int] =\n      {getter}",
+        f"def shadow(b: inference.Box[Int])(using f: inference.Fmt[Int]):\n      inference.Box[Int] =\n      {getter}",
+        "[E220]", "def shadow(b: Box[Int])(using f: Fmt[Int]): Box[Int] = fallback(using value = b)", "1 warning found",
+        "this.fallback[Int](using value = b, fmt = f)", "this.bounded[inference.Dog](using value = d)",
+        "inference.Api.selected[Int](using value = b, f)", "inference.Providers.entry[A](value, fmt)",
+        "this.old[Int](using value = b, f)",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "PolyNamedErrors.scala", 1, (
+        "does not have a parameter bogus", "parameter value of method choose", "is already instantiated",
+        "No given instance of type inference.Fmt[Int] was found",
+        "both parameter r and parameter l match type inference.Fmt[Int]",
+        "Found:    (f : inference.Fmt[Boolean])", "Required: inference.Fmt[Int]",
+        "Found:    (b : inference.Box[Int])", "A is a type variable with constraint <: inference.Animal",
+        "6 errors found",
     ), classpath)
 
 

@@ -1,6 +1,7 @@
 //! Shared generic argument constraint collection and bound validation.
 
 use super::super::*;
+use super::named::NamedArgument;
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct InferenceLocation {
@@ -249,12 +250,13 @@ impl SourceTyper<'_> {
         request: PolyApplicationInference<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        self.infer_poly_application_with_defaults(request, &[], info_journal)
+        self.infer_poly_application_with_defaults(request, None, &[], info_journal)
     }
 
-    pub(in crate::typer) fn infer_poly_application_with_defaults(
+    pub(super) fn infer_poly_application_with_defaults(
         &mut self,
         request: PolyApplicationInference<'_>,
+        named: Option<&[Option<NamedArgument>]>,
         defaults: &[TypeId],
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
@@ -273,7 +275,7 @@ impl SourceTyper<'_> {
                 binder,
             });
         };
-        if method.params.len() != arguments.len() + defaults.len() {
+        if named.is_none() && method.params.len() != arguments.len() + defaults.len() {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
                 tree_index,
@@ -300,17 +302,17 @@ impl SourceTyper<'_> {
         }
 
         let mut inferred = vec![None; poly.params.len()];
-        for (argument_index, (parameter, argument)) in method
-            .params
-            .iter()
-            .zip(
-                arguments
-                    .iter()
-                    .map(|a| a.widened_type)
-                    .chain(defaults.iter().copied()),
-            )
-            .enumerate()
-        {
+        for (ordinal, parameter) in method.params.iter().enumerate() {
+            let (argument_index, argument) = if let Some(slots) = named {
+                // Search runs after instantiation. A missing witness cannot
+                // constrain a still-free type parameter in this inference path.
+                let Some(arg) = &slots[ordinal] else { continue };
+                (arg.written, arguments[arg.written].widened_type)
+            } else if let Some(arg) = arguments.get(ordinal) {
+                (ordinal, arg.widened_type)
+            } else {
+                (ordinal, defaults[ordinal - arguments.len()])
+            };
             self.infer_type_constraints(
                 parameter.ty,
                 argument,
@@ -323,7 +325,15 @@ impl SourceTyper<'_> {
                     depth: 0,
                 },
                 info_journal,
-            )?;
+            )
+            .map_err(|mut error| {
+                if let TyperError::ConflictingInferenceConstraints { tree_index, .. } = &mut error
+                    && let Some(arg) = named.and_then(|slots| slots[ordinal].as_ref())
+                {
+                    *tree_index = arg.value.index();
+                }
+                error
+            })?;
         }
         let mut type_arguments = Vec::with_capacity(poly.params.len());
         for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {
