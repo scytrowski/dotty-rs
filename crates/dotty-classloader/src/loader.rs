@@ -306,7 +306,8 @@ impl TastyAliasResolutionError {
     }
 }
 
-/// Resolves an alias in a package object's TASTy and accepts its target only
+/// Resolves a direct nested class in a named object's TASTy, or a type alias
+/// in a package object. For package aliases, accepts the target only
 /// when exactly one plausible binary name is present on the configured
 /// classpath. Bare names in alias RHS trees can be relative to the defining
 /// package, so both the decoded name and that package-qualified name are
@@ -326,6 +327,34 @@ fn resolve_tasty_alias_with_probes<E: ClassPathEntry>(
     probes: Option<&RefCell<Vec<String>>>,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
     let callback_key = probes.map(|_| format!("alias|{}|{alias}", owner.as_internal()));
+    if !matches!(owner.simple_name(), "package" | "package$") {
+        // A stable term prefix alone does not prove that a selected type is
+        // a nested JVM class. Require the top-level module pair and its own
+        // direct class/trait declaration, excluding aliases and nested objects.
+        let resource = profiled_tasty_find_class(
+            class_path,
+            owner,
+            "alias",
+            callback_key.as_deref().unwrap_or_default(),
+            probes,
+        )
+        .map_err(|e| TastyAliasResolutionError::ClassPath(owner.clone(), e))?;
+        let Some(resource) = resource.filter(|r| r.format() == ClassFormat::Tasty) else {
+            return Ok(None);
+        };
+        let identity =
+            tasty_symbol::decode_module_identity(resource.bytes(), owner).map_err(|e| {
+                TastyAliasResolutionError::InvalidTasty(
+                    owner.clone(),
+                    e,
+                    resource.origin().clone(),
+                    resource.format(),
+                )
+            })?;
+        return Ok(identity
+            .filter(|module| module.nested_classes.contains(alias))
+            .map(|_| BinaryName::from_internal(format!("{}${alias}", owner.as_internal()))));
+    }
     let Some((target_owner, candidate)) =
         follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
             resolve_tasty_alias_target_with_probes(
