@@ -91,6 +91,9 @@ pub use source_diagnostic::SourceDiagnostic as TypingDiagnostic;
 /// Diagnostic returned by class body checking.
 pub use source_diagnostic::SourceDiagnostic as ClassBodyDiagnostic;
 
+mod class_body_work;
+pub use class_body_work::{BodySkipReason, ClassBodyWork};
+
 mod class_body;
 pub use class_body::{
     CheckedClassBody, ClassBodyCheck, ClassBodyError, ClassBodyReport, check_class_body,

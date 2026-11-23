@@ -348,3 +348,52 @@ fn signature_rejection_and_body_rejection_have_distinct_owners_and_ranges() {
             .is_some()
     );
 }
+
+#[test]
+fn body_work_preserves_owner_order_and_all_four_signature_states() {
+    use crate::{BodySkipReason, MemberSignaturePhase, SignatureBlockage};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let consumer = named(
+        3,
+        "class A { val seed = 1; def value(): Int = 7; val bad = value(1); def read(b: B) = b.seed; val later = 2 }; class Empty; class Omitted",
+        &mut store,
+        &mut packages,
+    );
+    let provider = named(8, "class B { val seed = 40 }", &mut store, &mut packages);
+    let sources = NamedClassSources::new([&provider, &consumer], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let [a, empty, omitted] = consumer.classes() else {
+        panic!()
+    };
+    let b = &provider.classes()[0];
+    let other = b.fields().next().unwrap().symbol;
+    let ids: Vec<_> = a.members.iter().map(|m| m.symbol()).collect();
+    let selection = sources
+        .member_signatures([a.symbol, b.symbol, empty.symbol], &store)
+        .unwrap();
+    let mut phase = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    for &id in &ids[..4] {
+        let _ = phase.attempt(id);
+    }
+    let (report, work) = phase.finish_with_body_work();
+    drop(report);
+    let waiting = BodySkipReason::Blocked(SignatureBlockage::Pending(other));
+    assert_eq!(
+        work.members(a.symbol).unwrap().collect::<Vec<_>>(),
+        [
+            (ids[0], None),
+            (ids[1], None),
+            (ids[2], Some(&BodySkipReason::Rejected)),
+            (ids[3], Some(&waiting)),
+            (ids[4], Some(&BodySkipReason::Remaining))
+        ]
+    );
+    assert_eq!(
+        work.members(b.symbol).unwrap().collect::<Vec<_>>(),
+        [(other, Some(&BodySkipReason::Remaining))]
+    );
+    assert_eq!(work.members(empty.symbol).unwrap().count(), 0);
+    assert!(work.members(omitted.symbol).is_none());
+}

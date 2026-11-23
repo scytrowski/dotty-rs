@@ -86,7 +86,20 @@ impl<'file> NamedClassSources<'file> {
     }
 }
 
-impl MemberSignatureSelection<'_, '_> {
+impl<'file> MemberSignatureSelection<'_, 'file> {
+    pub(crate) fn selected_classes(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &'file crate::NamedClassSource,
+            &'file crate::source_declarations::SourceClass,
+        ),
+    > + '_ {
+        self.classes
+            .iter()
+            .map(|id| self.sources.class(*id).expect("validated selected class"))
+    }
+
     /// Constructor fields in parameter order, then all body fields and methods
     /// in interleaved source order, for each selected class.
     pub fn members(&self) -> &[SymbolId] {

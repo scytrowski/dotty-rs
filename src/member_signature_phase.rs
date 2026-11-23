@@ -112,6 +112,16 @@ impl<'s, 'file> MemberSignaturePhase<'s, 'file> {
         Some(self.failures.swap_remove(index))
     }
 
+    /// Finishes as in [`Self::finish`] and indexes body eligibility for the same
+    /// selection. The snapshot includes selected empty classes. Its decisions
+    /// survive moving the signature diagnostics and remain tied to this session.
+    pub fn finish_with_body_work(self) -> (MemberSignatureReport, crate::ClassBodyWork<'file>) {
+        let selection = self.selection;
+        let report = self.finish();
+        let work = crate::ClassBodyWork::from_report(selection, &report);
+        (report, work)
+    }
+
     /// Releases the store and captures any errors and byte ranges using the
     /// original files. Classification performs no additional typing. Unattempted
     /// siblings remain distinguishable from members waiting on a rejected provider.
