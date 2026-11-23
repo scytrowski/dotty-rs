@@ -6,14 +6,13 @@ use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
     SymbolId, TextRange, Typed,
 };
-use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{ClassMember, DeclarationDiagnostic};
+use dotty::source_declarations::ClassMember;
 use dotty::typer::{SignatureCompletion, TyperDiagnostic};
 use dotty::{
-    ClassBodyError, ClassHeaderBindings, ClassHeaderError, MemberSignatureError, NameSourceError,
-    NamedClassSource, NamedClassSources, NamedClassSourcesError, ReportedTyperError,
+    ClassBodyError, ClassHeaderBindings, ClassHeaderError, MemberSignatureError, NamedClassSource,
+    NamedClassSources, NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError,
     SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
-    SourceDeclarationIndex, SyntaxDiagnostic,
+    SourceDeclarationIndex,
 };
 
 #[derive(Clone)]
@@ -31,9 +30,7 @@ pub enum Problem {
     Body(ClassBodyError),
     Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
-    Naming(NamerDiagnostic),
-    NamerFailure(NamerError),
-    Declaration(DeclarationDiagnostic),
+    Preparation(PreparationDiagnostic),
     Cycle {
         cycle: Arc<SignatureCycle>,
         location: Option<SourceSpan>,
@@ -72,7 +69,6 @@ pub struct Link {
 
 #[derive(Default)]
 pub struct FileResult {
-    pub syntax_diagnostics: Vec<SyntaxDiagnostic>,
     pub problems: Vec<Problem>,
     pub links: Vec<Link>,
 }
@@ -89,40 +85,13 @@ fn name(
         .map_err(|error| result.problems.push(Problem::Scan(error)))
         .ok()?
         .bind(&mut store.names);
-    let named = match parsed.name(filename, store, packages) {
-        Ok(named) => named,
-        Err(NameSourceError::Syntax(recovered)) => {
-            result.syntax_diagnostics = recovered.diagnostics;
-            return None;
-        }
-        Err(NameSourceError::Rejected(issues)) => {
-            result
-                .problems
-                .extend(issues.into_iter().map(Problem::Naming));
-            return None;
-        }
-        Err(NameSourceError::Namer { error, .. }) => {
-            result.problems.push(Problem::NamerFailure(error));
-            return None;
-        }
-    };
+    let (file, diagnostics) = parsed
+        .prepare_classes(filename, store, packages)
+        .into_parts();
     result
         .problems
-        .extend(named.diagnostics().iter().cloned().map(Problem::Naming));
-    match named.project_classes(store) {
-        Ok(projection) => {
-            result
-                .problems
-                .extend(projection.rejections.into_iter().map(Problem::Declaration));
-            Some(projection.file)
-        }
-        Err(failure) => {
-            result.problems.push(Problem::Declaration(
-                failure.error.diagnostic(&failure.named.syntax().ast),
-            ));
-            None
-        }
-    }
+        .extend(diagnostics.into_iter().map(Problem::Preparation));
+    file
 }
 
 // Seed every eligible declaration once. Subsequent attempts come from completed providers.
@@ -365,7 +334,9 @@ fn analyze_sources(
                     .get_mut(&source)
                     .unwrap()
                     .problems
-                    .push(Problem::Declaration(error.diagnostic(u.ast())));
+                    .push(Problem::Preparation(PreparationDiagnostic::Declaration(
+                        error.diagnostic(u.ast()),
+                    )));
                 continue;
             }
         };
@@ -393,6 +364,7 @@ fn analyze_sources(
 mod tests {
     use super::*;
     use dotty::typer::TyperError;
+    use dotty::{SyntaxDiagnostic, source_declarations::DeclarationDiagnostic};
 
     #[test]
     fn naming_and_projection_rejections_remain_typed_until_publication() {
@@ -412,17 +384,19 @@ mod tests {
         })
         .collect();
         let results = analyze(&files);
-        let [Problem::Naming(d)] = results["A.scala"].problems.as_slice() else {
+        let [Problem::Preparation(PreparationDiagnostic::Naming(d))] =
+            results["A.scala"].problems.as_slice()
+        else {
             panic!("expected a namer diagnostic")
         };
         assert!(
             matches!(d.issue(),dotty::namer::NamerIssue::InvalidVisibilityQualifier {qualifier,..} if qualifier == "Missing")
         );
         let [
-            Problem::Declaration(DeclarationDiagnostic {
+            Problem::Preparation(PreparationDiagnostic::Declaration(DeclarationDiagnostic {
                 error: dotty::source_declarations::DeclarationError::Unsupported { source, .. },
                 location: Some(span),
-            }),
+            })),
         ] = results["T.scala"].problems.as_slice()
         else {
             panic!("expected a located projection failure")
@@ -515,9 +489,12 @@ mod tests {
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
         let [
-            SyntaxDiagnostic::Lexer { diagnostic, .. },
-            SyntaxDiagnostic::Parser(parser),
-        ] = files[uri].syntax_diagnostics.as_slice()
+            Problem::Preparation(PreparationDiagnostic::Syntax(SyntaxDiagnostic::Lexer {
+                diagnostic,
+                ..
+            })),
+            Problem::Preparation(PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(parser))),
+        ] = files[uri].problems.as_slice()
         else {
             panic!("expected both phases")
         };

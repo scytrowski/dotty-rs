@@ -59,6 +59,9 @@ pub use named_source::{
     ClassProjection, ClassProjectionError, NameSourceError, NamedClassSource, NamedSource,
 };
 
+mod class_preparation;
+pub use class_preparation::{ClassPreparation, PreparationDiagnostic};
+
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
 
