@@ -99,3 +99,66 @@ fn reordered_named_values_constrain_their_own_formals_and_execute_in_written_ord
         );
     }
 }
+
+#[test]
+fn inferred_type_drives_search_for_leading_middle_and_trailing_holes() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, value, fmt) in [
+        ("tail", 0, 1),
+        ("leading", 1, 0),
+        ("gap", 0, 1),
+        ("wide", 0, 1),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        assert_eq!(result_arguments(&t, tree), [defs.int]);
+        let args = &call(&t, tree).args;
+        assert_eq!(qualified_name(&t, reference(&t, args[value])), (site, "b"));
+        assert_eq!(qualified_name(&t, reference(&t, args[fmt])), (site, "f"));
+        if site == "gap" {
+            assert!(matches!(
+                t.typed_ast().get(args[2]).kind,
+                TreeKind::Literal(_)
+            ))
+        }
+    }
+    for site in ["missing", "ambiguous"] {
+        let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, site);
+        let err = client_result(&mut t, &parsed, site).unwrap_err();
+        match err {
+            TyperError::MissingContextualArgument { tree_index, .. } if site == "missing" => {
+                assert_eq!(tree_index, rhs.index())
+            }
+            TyperError::AmbiguousContextualArgument {
+                tree_index,
+                candidate_names,
+                ..
+            } if site == "ambiguous" => {
+                assert_eq!(tree_index, rhs.index());
+                let mut names: Vec<_> = candidate_names
+                    .iter()
+                    .map(|(_, n)| t.store.names.resolve(n.text()))
+                    .collect();
+                names.sort();
+                assert_eq!(names, ["l", "r"]);
+            }
+            _ => panic!("{err:?}"),
+        }
+    }
+}
+
+#[test]
+fn omitted_evidence_alone_does_not_guess_unconstrained_type_parameters() {
+    let source = format!(
+        "{LIB}\n  def fromSearch(using f: Fmt[Int], b: Box[Int]): Any = middle(using flag = true)"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&source);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    assert!(matches!(
+        client_result(&mut t, &parsed, "fromSearch"),
+        Err(TyperError::UnconstrainedTypeParameter {
+            parameter_index: 0,
+            ..
+        })
+    ));
+}

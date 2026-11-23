@@ -275,7 +275,7 @@ impl SourceTyper<'_> {
                 binder,
             });
         };
-        if method.params.len() != arguments.len() + defaults.len() {
+        if named.is_none() && method.params.len() != arguments.len() + defaults.len() {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
                 tree_index,
@@ -303,13 +303,15 @@ impl SourceTyper<'_> {
 
         let mut inferred = vec![None; poly.params.len()];
         for (ordinal, parameter) in method.params.iter().enumerate() {
-            let argument_index = named
-                .and_then(|slots| slots[ordinal].as_ref())
-                .map_or(ordinal, |a| a.written);
-            let argument = if let Some(arg) = arguments.get(argument_index) {
-                arg.widened_type
+            let (argument_index, argument) = if let Some(slots) = named {
+                // Search runs after instantiation. A missing witness cannot
+                // constrain a still-free type parameter in this inference path.
+                let Some(arg) = &slots[ordinal] else { continue };
+                (arg.written, arguments[arg.written].widened_type)
+            } else if let Some(arg) = arguments.get(ordinal) {
+                (ordinal, arg.widened_type)
             } else {
-                defaults[ordinal - arguments.len()]
+                (ordinal, defaults[ordinal - arguments.len()])
             };
             self.infer_type_constraints(
                 parameter.ty,

@@ -13,3 +13,9 @@ class Client:
   def integer(): Box[Int] = new Box[Int]
   def boolean(): Box[Boolean] = new Box[Boolean]
   def effects(): Result[Int, Boolean] = pair(using y = boolean(), x = integer())
+  def front[A](using fmt: Fmt[A], value: Box[A]): Box[A] = value
+  def middle[A](using value: Box[A], fmt: Fmt[A], flag: Boolean): Box[A] = value
+  def tail(b: Box[Int])(using f: Fmt[Int]): Box[Int] = choose(using value = b)
+  def leading(b: Box[Int])(using f: Fmt[Int]): Box[Int] = front(using value = b)
+  def gap(b: Box[Int])(using f: Fmt[Int]): Box[Int] = middle(using b, flag = true)
+  def wide(b: Box[Int])(using f: Fmt[Int]): Any = choose(using value = b)
