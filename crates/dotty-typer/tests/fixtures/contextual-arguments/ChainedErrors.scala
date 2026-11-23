@@ -6,3 +6,5 @@ class Bad:
   def modernStar: TC[Int] = { import PlainStar.given; ask[Int] }
   def hidden: TC[Long] = { import Public.given; ask[Long] }
   def omitted: TC[Int] = { import WithoutFirst.given; ask[Int] }
+  def missingDep: TC[Box[Int]] = { import Conditional.given; ask[Box[Int]] }
+  def ambiguousDep(using left: TC[Int], right: TC[Int]): TC[Box[Int]] = { import Conditional.given; ask[Box[Int]] }

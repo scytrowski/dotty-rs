@@ -167,3 +167,70 @@ fn hidden_omitted_and_nonmatching_evidence_is_missing_at_the_original_call() {
         );
     }
 }
+
+#[test]
+fn conditional_reexport_applies_each_delegate_with_its_own_binders() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(CHAIN);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "poly").unwrap();
+    let TreeKind::Apply(arg) = &typer.typed_ast().get(evidence(&typer, call)).kind else {
+        panic!("conditional witness")
+    };
+    assert_eq!(
+        qualified_name(&typer, reference(&typer, arg.args[0])),
+        ("Public", "first")
+    );
+    let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(arg.function).kind else {
+        panic!("type application")
+    };
+    assert_eq!(typer.typed_ast().get(tapp.args[0]).ty, defs.int);
+    let public = reference(&typer, tapp.function);
+    let middle = provider_delegate(&mut typer, public);
+    let leaf = provider_delegate(&mut typer, middle);
+    for (method, owner) in [(public, "Public"), (middle, "Middle"), (leaf, "Leaf")] {
+        assert_eq!(qualified_name(&typer, method), (owner, "boxed"));
+        let SymbolInfo::Complete(binder) = *typer.store.symbols.info(method) else {
+            panic!()
+        };
+        let Type::Poly(poly) = typer.store.types.get(binder) else {
+            panic!()
+        };
+        let Type::Method(clause) = typer.store.types.get(poly.result) else {
+            panic!()
+        };
+        let Type::Applied { args, .. } = typer.store.types.get(clause.params[0].ty) else {
+            panic!()
+        };
+        assert!(
+            matches!(typer.store.types.get(args[0]),Type::ParamRef{binder:actual,index:0} if *actual==binder)
+        );
+    }
+    assert_ne!(
+        typer.store.symbols.info(public),
+        typer.store.symbols.info(middle)
+    );
+    assert_ne!(
+        typer.store.symbols.info(middle),
+        typer.store.symbols.info(leaf)
+    );
+}
+
+#[test]
+fn conditional_reexport_requires_one_unambiguous_witness_in_the_client() {
+    let (parsed, mut store, packages, defs, index, source) = errors_unit();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    assert!(matches!(
+        rejected_call(&mut typer, &parsed, "missingDep"),
+        TyperError::MissingContextualArgument { .. }
+    ));
+    let error = rejected_call(&mut typer, &parsed, "ambiguousDep");
+    let TyperError::AmbiguousContextualArgument { candidates, .. } = error else {
+        panic!("{error:?}")
+    };
+    let mut names: Vec<_> = candidates
+        .iter()
+        .map(|&sym| qualified_name(&typer, sym))
+        .collect();
+    names.sort();
+    assert_eq!(names, [("ambiguousDep", "left"), ("ambiguousDep", "right")]);
+}
