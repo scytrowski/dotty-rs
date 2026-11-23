@@ -636,4 +636,74 @@ mod tests {
                 .is_some()
         );
     }
+
+    #[test]
+    fn a_moved_report_leaves_navigation_only_for_committed_calls() {
+        use crate::{CheckedClassBody, ClassBodyError, core::NoResolver, typer::TyperWarning};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class C { def only(implicit x: Int): Int = x; def bad(): Int = only(false); def good(): Int = only(1) }";
+        let file = named(42, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let class = &file.classes()[0];
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                class.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
+            )
+            .into_parts();
+        assert!(matches!(body, CheckedClassBody::Partial(_)));
+        let mut errors = report.errors.into_iter();
+        assert!(
+            matches!(errors.next(), Some(ClassBodyError::Member{error:TyperError::ApplicationArgumentTypeMismatch{actual,expected,..},..}) if actual == defs.boolean && expected == defs.int)
+        );
+        assert!(errors.next().is_none());
+        let [(id, warning)] = report.diagnostics.as_slice() else {
+            panic!("expected good call warning")
+        };
+        assert_eq!(
+            (*id, warning.issue()),
+            (file.source(), &TyperWarning::ImplicitClauseWithoutUsing)
+        );
+        drop(report.diagnostics);
+        let calls = file.navigation().unwrap();
+        let definition = |needle| {
+            calls.definition_at_with_bindings(
+                text.find(needle).unwrap() as u32,
+                file.ast(),
+                &arena,
+                &store,
+                |owner| {
+                    assert_eq!(owner, class.symbol);
+                    body.bindings()
+                },
+                |id| sources.file(id)?.navigation().ok(),
+            )
+        };
+        assert!(definition("only(false)").is_none());
+        let target = definition("only(1)").unwrap();
+        assert_eq!(target.source, file.source());
+        assert_eq!(target.name.start() as usize, text.find("only(").unwrap());
+        let (invalid, report) = sources
+            .check_class_body(
+                class.constructor,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
+            )
+            .into_parts();
+        assert!(matches!(invalid, CheckedClassBody::Invalid));
+        assert!(invalid.bindings().is_none());
+        assert!(
+            matches!(report.errors.as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
+        );
+    }
 }

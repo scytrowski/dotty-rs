@@ -156,7 +156,60 @@ pub struct ClassBodyCheck {
     partial_bindings: Option<SourceTypedIndex>,
 }
 
+/// Owned diagnostics from one check, independent of the retained semantic data.
+#[derive(Debug)]
+pub struct ClassBodyReport {
+    /// One typed error per rejected member in declaration order, or one invalid class error.
+    pub errors: Vec<ClassBodyError>,
+    /// Committed typer diagnostics with their source IDs, in emission order.
+    pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
+}
+
+/// Semantic data retained after a class check, for use with its original session arena.
+#[derive(Debug)]
+pub enum CheckedClassBody {
+    /// All members succeeded. Move this body into planning or borrow its navigation bindings.
+    Complete(TypedClassBody),
+    /// A valid class had member errors. Only committed source-to-typed mappings survive.
+    Partial(SourceTypedIndex),
+    /// Class validation failed before typing began.
+    Invalid,
+}
+
+impl CheckedClassBody {
+    /// Borrows the committed mappings for direct-call navigation after diagnostics have
+    /// been consumed. A rejected class has no mappings. Use the original source and typed arenas.
+    pub fn bindings(&self) -> Option<&SourceTypedIndex> {
+        match self {
+            Self::Complete(body) => Some(body.bindings()),
+            Self::Partial(index) => Some(index),
+            Self::Invalid => None,
+        }
+    }
+}
+
 impl ClassBodyCheck {
+    /// Moves semantic data and typed reports into independent values. This preserves
+    /// successful siblings after a member error without cloning trees or rerunning the typer.
+    /// Only [`CheckedClassBody::Complete`] supplies a body suitable for class planning.
+    pub fn into_parts(self) -> (CheckedClassBody, ClassBodyReport) {
+        let (body, errors) = match self.body {
+            Ok(body) => (CheckedClassBody::Complete(body), Vec::new()),
+            Err(errors) => (
+                self.partial_bindings
+                    .map_or(CheckedClassBody::Invalid, CheckedClassBody::Partial),
+                errors,
+            ),
+        };
+        (
+            body,
+            ClassBodyReport {
+                errors,
+                diagnostics: self.diagnostics,
+            },
+        )
+    }
+
     pub(crate) fn invalid(class: SymbolId) -> Self {
         Self {
             body: Err(vec![ClassBodyError::InvalidClass(class)]),
