@@ -74,6 +74,9 @@ jobs:
       - name: Check binary contextual calls in the Rust typer
         run: cargo test --locked -p dotty-typer --lib typer::tests::contextual_binary
 
+      - name: Check source contextual export forwarders in the Rust typer
+        run: cargo test --locked -p dotty-typer --lib typer::tests::contextual_exports
+
       - name: Compare contextual argument fixtures and binary clients with Scala 3.9.0
         run: python3 crates/dotty-typer/tests/fixtures/contextual-arguments/check.py
 

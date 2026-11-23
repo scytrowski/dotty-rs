@@ -160,6 +160,7 @@ pub struct SourceTyper<'a> {
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     generated_factory_bodies: HashMap<SymbolId, TreeId<Typed>>,
+    export_definitions: HashMap<SymbolId, TreeId<Typed>>,
     function_literals: expression::FunctionLiteralIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
     expression_scope_owner: u64,
@@ -365,6 +366,7 @@ impl<'a> SourceTyper<'a> {
             typed_arena,
             typed_index: SourceTypedIndex::new(),
             generated_factory_bodies: HashMap::new(),
+            export_definitions: HashMap::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
             expression_scopes: Vec::new(),
             expression_scope_owner: next_expression_scope_owner(),
@@ -10314,6 +10316,7 @@ mod tests {
     mod contextual_arguments;
     mod contextual_binary;
     mod contextual_consumers;
+    mod contextual_exports;
     mod contextual_v1;
     mod enclosing_this_capture;
     mod issue_2282_generated_apply_inference;

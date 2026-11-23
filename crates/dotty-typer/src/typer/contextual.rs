@@ -11,6 +11,7 @@ pub(super) use conversions::{
     ConversionGoal, ConversionOperand, ConversionTarget, ConversionUse, MemberConversionGoal,
 };
 mod defaults;
+mod exports;
 mod extension;
 pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
@@ -1573,26 +1574,9 @@ impl SourceTyper<'_> {
                             "*" if legacy && !selector.imported_backquoted => matched = true,
                             "" => {
                                 if let Some(bound) = selector.bound {
-                                    let bound =
-                                        self.type_of_tpt_inner_journaled(bound, lexical, journal)?;
-                                    let owner = self.index.source_context(lexical).owner;
-                                    matched |= if bound == self.definitions.any_type {
-                                        true
-                                    } else if bound == self.definitions.nothing_type {
-                                        false
-                                    } else {
-                                        self.semantic_attempt(None, |typer, probe| {
-                                            let actual = typer.contextual_reference_signature(
-                                                evidence, owner, tree_index, probe,
-                                            )?;
-                                            Ok(typer
-                                                .contextual_provider(
-                                                    evidence, actual, bound, owner, tree_index,
-                                                    probe,
-                                                )?
-                                                .is_some())
-                                        })?
-                                    };
+                                    matched |= self.contextual_selector_matches(
+                                        evidence, bound, lexical, tree_index, journal,
+                                    )?;
                                 } else {
                                     matched = true;
                                 }
@@ -1608,6 +1592,31 @@ impl SourceTyper<'_> {
             }
         }
         Ok(())
+    }
+
+    fn contextual_selector_matches(
+        &mut self,
+        evidence: ContextualRef,
+        bound: TreeId<Untyped>,
+        lexical: SourceContextId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let bound = self.type_of_tpt_inner_journaled(bound, lexical, journal)?;
+        let owner = self.index.source_context(lexical).owner;
+        if bound == self.definitions.any_type {
+            return Ok(true);
+        }
+        if bound == self.definitions.nothing_type {
+            return Ok(false);
+        }
+        self.semantic_attempt(None, |typer, probe| {
+            let actual =
+                typer.contextual_reference_signature(evidence, owner, tree_index, probe)?;
+            Ok(typer
+                .contextual_provider(evidence, actual, bound, owner, tree_index, probe)?
+                .is_some())
+        })
     }
 
     fn contextual_members(
@@ -1896,6 +1905,16 @@ impl SourceTyper<'_> {
                 source: self.source,
                 tree_index,
                 expected,
+                candidate_names: maxima
+                    .iter()
+                    .map(|&i| {
+                        let entry = self.store.symbols.get(candidates[i].0.reference.symbol);
+                        (
+                            entry.owner.map(|owner| self.store.symbols.get(owner).name),
+                            entry.name,
+                        )
+                    })
+                    .collect(),
                 candidates: maxima
                     .iter()
                     .map(|&i| candidates[i].0.reference.symbol)

@@ -127,6 +127,7 @@ def main():
         client_output = Path(output) / "client"
         client_output.mkdir()
         classpath = os.pathsep.join((output, toolchain.classpath))
+        check_contextual_exports(toolchain, output, client_output, classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
             "val x$1: Int = this.next()",
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
@@ -200,6 +201,34 @@ def main():
         check_typer_output(toolchain, client_output, "BinaryDefaultsAmbiguous.scala", 1, (
             "[E172]", "Ambiguous given instances", "of parameter n of method offset",
         ), classpath)
+
+
+def check_contextual_exports(toolchain, output, client_output, classpath):
+    check_typer_output(toolchain, output, "ExportLibrary.scala", 0, (
+        "final given def ints: (exportsprint.Instances.ints : exportsprint.TC[Int])",
+        "final given def selected:", "final given def flags:",
+        "final implicit def old: (exportsprint.Legacy.old : exportsprint.TC[Int])",
+        "final given def boxed[A](using e: exportsprint.TC[A]):",
+        "exportsprint.TC[exportsprint.Box[A]] = exportsprint.Instances.boxed[A](e)",
+    ), toolchain.classpath)
+    check_typer_output(toolchain, client_output, "ExportClient.scala", 0, (
+        "this.need[Int](exportsprint.Instances.ints)",
+        "def named: exportsprint.TC[Int] = exportsprint.Named.ints",
+        "def aliasSelection: exportsprint.TC[Int] = exportsprint.Alias.selected",
+        "this.need[Int](exportsprint.Alias.selected)",
+        "this.need[Boolean](exportsprint.All.flags)",
+        "this.need[Int](exportsprint.Only.ints)", "this.need[Int](exportsprint.Old.old)",
+        "exportsprint.All.boxed[Int](exportsprint.All.ints)",
+    ), classpath)
+    check_typer_output(toolchain, client_output, "ExportErrors.scala", 1, (
+        "[E172]", "6 errors found",
+        "No given instance of type exportsprint.TC[Boolean] was found for parameter e",
+        "No given instance of type exportsprint.TC[Int] was found for parameter e",
+        "No given instance of type exportsprint.TC[Long] was found for parameter e",
+        "given instance another in object Other and given instance ints in object All",
+        "exportsprint.Conditional.boxed[Int](/* missing */summon[exportsprint.TC[Int]])",
+        "both parameter b and parameter a match type exportsprint.TC[Int]",
+    ), classpath)
 
 
 def check_typer_output(toolchain, output, source, code, required, classpath):

@@ -46,6 +46,14 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Match.** Rust resolves the constructor-form given to `given_Context`. The call of `narrow` and the call of `narrow$default$2` reuse the same evidence. The getter body calls `root` with its own copy of the contextual parameter. |
 | `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Match.** The complete definition returns its `B` parameter. The polymorphic getter takes only the type parameter. Its default constructs a fresh anonymous class owned by the getter, with parents `Object` and `Bar`, and widens the result to `Bar`. |
 
+The contextual CI job separately compares source-object exports on the shared
+`ExportLibrary.scala`, `ExportClient.scala` and `ExportErrors.scala` fixtures.
+Scala compiles the library before typing the clients. Rust names the combined
+source unit and checks the selected method and original delegate identities,
+the method-owned type and evidence parameters, and rollback on rejected calls.
+The eight positive client sites and six negative sites are project controls
+outside the eleven-site upstream sample.
+
 The audit also runs three project controls for an ordinary `class Box[A: TC]`.
 The positive control checks the private witness used by `summon[TC[A]]` in
 the class and the caller's witness passed to `new Box[Int]`. Two negative

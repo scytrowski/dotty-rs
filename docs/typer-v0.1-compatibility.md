@@ -56,6 +56,28 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 | Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary `implicit def` with concrete or inferred type arguments. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
 | Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
 
+### Contextual exports from source objects
+
+A source object can export a public contextual member declared by a
+package-owned object in the same source unit. Completing the exporting object's
+signature enters a fresh method in its declaration scope. An exported
+immutable value has the singleton result of the original qualified member.
+A renamed forwarder keeps that target while exposing its new name to clients.
+An unbounded `given` selector collects public evidence, a typed selector filters
+by the required type, and `*` includes legacy implicit values. Private members
+stay outside the exported scope.
+
+For a provider of the form `boxed[A](using e: TC[A]): TC[Box[A]]`, the exported
+method has its own binder. A caller importing `All.given` obtains
+`All.boxed[Int](All.ints)`. The generated body passes its own parameters to
+`Instances.boxed[A](e)`. Use `SourceTyper::type_export_forwarder_definition`
+with the selected method symbol to inspect that definition in the same session.
+
+The regression fixtures exercise source typing and compare it with Scala 3.9.0
+typer output. Chained and inherited exports, arbitrary stable qualifiers,
+general overloaded or multi-clause forwarding, and emission of these methods
+in Rust-produced TASTy or JVM classes remain outside this contract.
+
 When a receiver's instantiated method type has a contextual clause, term
 member selection supplies its arguments before lookup. In `summon[A].show` the selected evidence is the
 receiver of `show`. Missing or ambiguous evidence is diagnosed at the

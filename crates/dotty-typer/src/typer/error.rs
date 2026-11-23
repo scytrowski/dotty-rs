@@ -1691,8 +1691,10 @@ pub enum TyperError {
         tree_index: u32,
         /// Required semantic type identity in the caller’s type arena.
         expected: TypeId,
-        /// Candidates examined by lookup; preserves rejection details when available.
+        /// Maximal candidates in search order. A synthetic ID may expire on rollback.
         candidates: Vec<SymbolId>,
+        /// Owner and member spellings in candidate order, retained across rollback.
+        candidate_names: Vec<(Option<Name>, Name)>,
     },
     /// A contextual provider supplied extensions, but their overload resolution failed.
     ExtensionOverload {
