@@ -50,7 +50,12 @@ pub use class_field_signatures::{
 
 mod signature_dependencies;
 pub use signature_dependencies::{
-    SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+    SignatureAttempt, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+};
+
+mod member_signature_phase;
+pub use member_signature_phase::{
+    MemberSignatureFailure, MemberSignaturePhase, MemberSignatureReport,
 };
 
 mod member_signature_selection;
