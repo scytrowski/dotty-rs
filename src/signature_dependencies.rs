@@ -4,8 +4,77 @@ use std::{
     sync::Arc,
 };
 
-use crate::core::{SemanticStore, SourceSpan, SymbolId, SymbolOrigin};
+use crate::core::{SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo, SymbolOrigin};
 use crate::typer::SignatureCompletion;
+
+/// Outcome of one successful or blocked header or member signature attempt.
+#[derive(Debug)]
+#[must_use]
+pub struct SignatureAttempt {
+    /// Actual completion or the provider requested by the typer.
+    pub completion: SignatureCompletion,
+    /// Unresolved waiters to retry once. Direct waiters come first in registration
+    /// order. When the typer completes other providers in the same file, their
+    /// waiters follow in provider observation order and then registration order.
+    pub retry: Vec<SymbolId>,
+}
+
+// The typer can complete additional declarations recursively within its file.
+// Watch only providers on observed edges in that file.
+#[derive(Debug)]
+pub(crate) struct ObservedSignatures {
+    pub(crate) graph: SignatureDependencies,
+    watched: HashSet<SymbolId>,
+    providers: HashMap<SourceId, Vec<SymbolId>>,
+}
+
+impl ObservedSignatures {
+    pub(crate) fn new(phase: SignaturePhase) -> Self {
+        Self {
+            graph: SignatureDependencies::new(phase),
+            watched: HashSet::new(),
+            providers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        symbol: SymbolId,
+        completion: SignatureCompletion,
+        store: &SemanticStore,
+    ) -> SignatureAttempt {
+        let mut retry = self.graph.record(symbol, completion);
+        match completion {
+            SignatureCompletion::BlockedOn(provider) => {
+                if let SymbolOrigin::Source(source) = store.symbols.get(provider).origin
+                    && self.watched.insert(provider)
+                {
+                    self.providers.entry(source).or_default().push(provider);
+                }
+            }
+            SignatureCompletion::Complete(_) => {
+                if let SymbolOrigin::Source(source) = store.symbols.get(symbol).origin
+                    && let Some(providers) = self.providers.get_mut(&source)
+                {
+                    providers.retain(|id| {
+                        let SymbolInfo::Complete(ty) = *store.symbols.info(*id) else {
+                            return true;
+                        };
+                        self.watched.remove(id);
+                        if *id != symbol && !self.graph.failed.contains(id) {
+                            retry.extend(self.graph.record(*id, SignatureCompletion::Complete(ty)));
+                        }
+                        false
+                    });
+                }
+                retry.retain(|&waiter| {
+                    !matches!(store.symbols.info(waiter), SymbolInfo::Complete(_))
+                });
+            }
+        }
+        SignatureAttempt { completion, retry }
+    }
+}
 
 /// Which declarations are being completed in this pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

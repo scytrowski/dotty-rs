@@ -955,7 +955,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
     let seeds = (
         SourceId::from_index(6),
         "Seeds.scala",
-        "class Seeds { val seed = 40 }",
+        "class Seeds { val seed = 40 }; class OtherSeeds { val seed = 7 }",
     );
     for files in [[consumer, provider, seeds], [seeds, provider, consumer]] {
         let mut store = SemanticStore::new();
@@ -976,6 +976,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
         let answer = caller.classes()[0].fields().next().unwrap().symbol;
         let value = units[1].method_symbol();
         let seed = leaves.classes()[0].fields().next().unwrap().symbol;
+        assert_ne!(seed, leaves.classes()[1].fields().next().unwrap().symbol);
         let mut edges = Vec::new();
         let headers = super::complete_signatures_in_order(
             &units,
@@ -1464,10 +1465,16 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         assert_eq!(store.symbols.info(answer.symbol), &SymbolInfo::Missing);
 
         // With the dependency complete, the class field pass encounters the same call.
-        let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Field(failure) = retry else {
-            panic!("unexpected error on retry: {retry:?}")
-        };
+        let failure = dotty::try_complete_class_field_signatures(
+            class.symbol,
+            consumer.ast(),
+            consumer.index(),
+            &mut store,
+            defs,
+            &packages,
+            |dep| sources.declarations().member(dep).is_some(),
+        )
+        .unwrap_err();
         assert_eq!(failure.diagnostic(ast_for), diagnostic);
         let dotty::ClassFieldSignatureError::Field {
             class: owner,

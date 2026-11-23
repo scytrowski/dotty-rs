@@ -129,8 +129,28 @@ pub fn try_complete_member_signature(
     definitions: Definitions,
     packages: &Packages,
 ) -> Result<SignatureCompletion, MemberSignatureError> {
+    try_complete_selected_member(
+        member,
+        |symbol| declarations.member(symbol),
+        ast,
+        index,
+        store,
+        definitions,
+        packages,
+    )
+}
+
+pub(crate) fn try_complete_selected_member(
+    member: SymbolId,
+    declaration_for: impl Fn(SymbolId) -> Option<SourceDeclaration>,
+    ast: &AstArena<Untyped>,
+    index: &SourceSemanticIndex,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+) -> Result<SignatureCompletion, MemberSignatureError> {
     let invalid = || MemberSignatureError::InvalidMember(member);
-    let declaration = declarations.member(member).ok_or_else(invalid)?;
+    let declaration = declaration_for(member).ok_or_else(invalid)?;
     let Some(SourceDefinition::Canonical { source, tree }) = index.definition_of(member) else {
         return Err(invalid());
     };
@@ -155,7 +175,7 @@ pub fn try_complete_member_signature(
     }
 
     SourceTyper::new(ast, source, index, store, definitions, packages)
-        .try_complete_signature(member, |dep| declarations.member(dep).is_some())
+        .try_complete_signature(member, |dep| declaration_for(dep).is_some())
         .map_err(|error| MemberSignatureError::Typing {
             member,
             declaration,

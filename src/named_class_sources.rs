@@ -455,6 +455,7 @@ mod tests {
     }
 
     mod headers;
+    mod members;
 
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,

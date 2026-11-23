@@ -7,12 +7,12 @@ use dotty::core::{
     SymbolId, TextRange, Typed,
 };
 use dotty::source_declarations::ClassMember;
-use dotty::typer::{SignatureCompletion, TyperDiagnostic};
+use dotty::typer::TyperDiagnostic;
 use dotty::{
     ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, MemberSignatureError,
-    NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
-    ReportedTyperError, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
-    SourceDeclarationIndex,
+    MemberSignatureFailure, MemberSignaturePhase, NamedClassSource, NamedClassSources,
+    NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError, SignatureBlockage,
+    SignatureCycle, SourceDeclarationIndex,
 };
 
 #[derive(Clone)]
@@ -92,27 +92,6 @@ fn name(
         .problems
         .extend(diagnostics.into_iter().map(Problem::Preparation));
     file
-}
-
-// Seed every eligible declaration once. Subsequent attempts come from completed providers.
-fn complete<E>(
-    dependencies: &mut SignatureDependencies,
-    roots: &[SymbolId],
-    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, E>,
-    mut report: impl FnMut(SymbolId, E),
-) {
-    let mut ready: VecDeque<_> = roots.iter().copied().collect();
-    while let Some(symbol) = ready.pop_front() {
-        match attempt(symbol) {
-            Ok(outcome) => {
-                ready.extend(dependencies.record(symbol, outcome));
-            }
-            Err(error) => {
-                dependencies.record_failure(symbol);
-                report(symbol, error);
-            }
-        }
-    }
 }
 
 // Report one marker at each participant. A downstream waiter already has a provider report.
@@ -220,40 +199,45 @@ fn analyze_sources(
     }
     report_blockages(headers.blockages, sources.declarations(), store, results);
     let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
-    let mut members = Vec::new();
-    for &symbol in &headers.ready {
-        let (_, class) = sources.class(symbol).unwrap();
-        for member in &class.members {
-            let (ClassMember::Field(d) | ClassMember::Method(d)) = member;
-            members.push(d.symbol);
+    let selection = sources
+        .member_signatures(headers.ready.iter().copied(), store)
+        .expect("classes from this session's header report");
+    let mut signatures = MemberSignaturePhase::new(&selection, store, defs, packages);
+    queue.extend(selection.members().iter().copied());
+    while let Some(member) = queue.pop_front() {
+        if let Ok(attempt) = signatures.attempt(member) {
+            queue.extend(attempt.retry);
         }
     }
+    let signatures = signatures.finish();
     let mut signature_calls = HashSet::new();
-    let mut signatures = SignatureDependencies::new(SignaturePhase::Members);
-    complete(
-        &mut signatures,
-        &members,
-        |s| sources.try_complete_member_signature(s, store, defs, packages),
-        |s, error| {
-            let source = sources.declarations().get(s).unwrap().source;
-            let (file, problem) = match error.into_reported_error(ast_for) {
-                Ok(report) => {
-                    if let Some(key) = report.call_identity(&defs) {
-                        signature_calls.insert(key);
-                    }
-                    typing_problem(source, report)
+    for failure in signatures.failures {
+        let (file, problem) = match failure {
+            MemberSignatureFailure::Typing {
+                declaration,
+                report,
+            } => {
+                if let Some(key) = report.call_identity(&defs) {
+                    signature_calls.insert(key);
                 }
-                Err(invalid) => (source, Problem::MemberSignature(invalid)),
-            };
-            results.get_mut(&file).unwrap().problems.push(problem);
-        },
-    );
-    report_blockages(
-        signatures.blockages(members.iter().copied()),
-        sources.declarations(),
-        store,
-        results,
-    );
+                typing_problem(declaration.source, *report)
+            }
+            MemberSignatureFailure::InvalidMember(id) => {
+                let owner = sources
+                    .declarations()
+                    .get(id)
+                    .expect("selected member")
+                    .source;
+                (
+                    owner,
+                    Problem::MemberSignature(MemberSignatureError::InvalidMember(id)),
+                )
+            }
+        };
+        results.get_mut(&file).unwrap().problems.push(problem);
+    }
+    let blocked_members: HashSet<_> = signatures.blockages.iter().map(|(id, _)| *id).collect();
+    report_blockages(signatures.blockages, sources.declarations(), store, results);
     let mut bodies = HashMap::new();
     for symbol in headers.ready {
         let (file, c) = sources.class(symbol).unwrap();
@@ -273,7 +257,7 @@ fn analyze_sources(
                 member: ClassMember::Method(d) | ClassMember::Field(d),
                 ..
             } = &error
-                && signatures.waiting_on(d.symbol).is_some()
+                && blocked_members.contains(&d.symbol)
             {
                 continue;
             }
@@ -480,8 +464,7 @@ mod tests {
 
     #[test]
     fn constructor_failure_keeps_an_independent_class_navigable() {
-        let text =
-            "class Bad(x: Missing); class Good { def get(): Int = 7; def use(): Int = get() }";
+        let text = "class Bad(x: Missing) { def only(): Int = 1; val broken = only(false) }; class Good { def get() = 7; def use() = get() }";
         let uri = "Good.scala";
         let doc = Document {
             version: 1,
