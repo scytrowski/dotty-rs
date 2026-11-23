@@ -42,3 +42,8 @@ class Good:
   def bool: TC[Boolean] = { import BoolOnly.given; need[Boolean] }
   def diamond: TC[Int] = { import Both.*; need[Int] }
   def rankedControl: TC[Int] = { import High.given; need[Int] }
+object Shared extends Base[Int]:
+  export Ints.given
+class SharedClient:
+  def need[A](using e: TC[A]): TC[A] = e
+  def use: TC[Int] = { import Shared.given; need[Int] }

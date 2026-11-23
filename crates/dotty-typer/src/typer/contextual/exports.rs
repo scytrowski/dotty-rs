@@ -7,6 +7,11 @@ use dotty_core::types::{instantiate_method_result, instantiate_poly};
 // Cold qualifiers recursively enter source class completion before their scope is read.
 const MAX_EXPORT_QUALIFIER_DEPTH: usize = 16;
 
+enum ExportSelection {
+    Named(Name),
+    Wildcard(Name),
+}
+
 struct ExportBody {
     rhs: TreeId<Typed>,
     type_params: Vec<TreeId<Typed>>,
@@ -70,6 +75,9 @@ impl SourceTyper<'_> {
             let members = self.synthetic_module_scope(module)?;
             let prefix =
                 self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
+            let ancestors = self.contextual_ancestors(owner, journal)?;
+            let mut ineligible_named = Vec::new();
+            let mut eligible_named = HashSet::new();
             for target in self.contextual_members(members, journal)? {
                 let entry = self.store.symbols.get(target);
                 if !entry
@@ -80,6 +88,8 @@ impl SourceTyper<'_> {
                 {
                     continue;
                 }
+                let declaring_class = entry.owner;
+                let original_name = entry.name;
                 let stable = entry.kind == SymbolKind::Field
                     || matches!(entry.info, SymbolInfo::Complete(info) if self.store.export_target(target) == Some(info));
                 let contextual_flags = entry.flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT);
@@ -87,10 +97,27 @@ impl SourceTyper<'_> {
                     symbol: target,
                     receiver: Some(ContextualReceiver::Path(prefix)),
                 };
-                let Some(name) =
+                let Some(selection) =
                     self.contextual_export_name(site, &export.selectors, evidence, journal)?
                 else {
                     continue;
+                };
+                let shared = ancestors
+                    .iter()
+                    .any(|(class, _)| Some(*class) == declaring_class);
+                if declaring_class == Some(owner) || (shared && self.concrete_export_member(target))
+                {
+                    if matches!(selection, ExportSelection::Named(_)) {
+                        ineligible_named.push((original_name, target));
+                    }
+                    continue;
+                }
+                let name = match selection {
+                    ExportSelection::Named(name) => {
+                        eligible_named.insert(original_name);
+                        name
+                    }
+                    ExportSelection::Wildcard(name) => name,
                 };
                 if !(self.store.symbols.get(target).flags
                     & (SymbolFlags::MUTABLE | SymbolFlags::INLINE | SymbolFlags::ERASED))
@@ -136,8 +163,35 @@ impl SourceTyper<'_> {
                         position,
                     })?;
             }
+            if let Some((_, member)) = ineligible_named
+                .into_iter()
+                .find(|(name, _)| !eligible_named.contains(name))
+            {
+                return Err(TyperError::InheritedContextualExport {
+                    source: self.source,
+                    tree_index: site.tree.index(),
+                    member,
+                });
+            }
         }
         Ok(())
+    }
+
+    fn concrete_export_member(&self, symbol: SymbolId) -> bool {
+        // Source declarations without a body are deferred even without an explicit abstract modifier.
+        if let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(symbol) {
+            match &self.arena.get(tree).kind {
+                TreeKind::ValDef(def) => return def.rhs.is_some(),
+                TreeKind::DefDef(def) => return def.rhs.is_some(),
+                _ => {}
+            }
+        }
+        !self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(SymbolFlags::ABSTRACT)
     }
 
     fn contextual_export_name(
@@ -146,7 +200,7 @@ impl SourceTyper<'_> {
         selectors: &[dotty_core::ast::ImportSelector<Untyped>],
         evidence: ContextualRef,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<Name>, TyperError> {
+    ) -> Result<Option<ExportSelection>, TyperError> {
         let entry = self.store.symbols.get(evidence.symbol);
         let name = entry.name;
         let legacy = entry.flags.contains(SymbolFlags::IMPLICIT);
@@ -156,7 +210,7 @@ impl SourceTyper<'_> {
                     || !matches!(self.store.names.resolve(s.imported.text()), "*" | ""))
         }) {
             let Some(rename) = named.renamed else {
-                return Ok(Some(name));
+                return Ok(Some(ExportSelection::Named(name)));
             };
             let TreeKind::Ident(ident) = &self.arena.get(rename).kind else {
                 return Err(TyperError::MalformedSourceImport {
@@ -165,7 +219,7 @@ impl SourceTyper<'_> {
                 });
             };
             let visible = ident.backquoted || self.store.names.resolve(ident.name.text()) != "_";
-            return Ok(visible.then_some(ident.name));
+            return Ok(visible.then_some(ExportSelection::Named(ident.name)));
         }
         for selector in selectors.iter().filter(|s| !s.imported_backquoted) {
             let selected = match self.store.names.resolve(selector.imported.text()) {
@@ -183,7 +237,7 @@ impl SourceTyper<'_> {
                 _ => false,
             };
             if selected {
-                return Ok(Some(name));
+                return Ok(Some(ExportSelection::Wildcard(name)));
             }
         }
         Ok(None)

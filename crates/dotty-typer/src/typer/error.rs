@@ -324,6 +324,15 @@ pub enum TyperError {
         /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
+    /// A named export selected a concrete contextual declaration already inherited by the exporter.
+    InheritedContextualExport {
+        /// Source containing the export clause.
+        source: SourceId,
+        /// Export tree carrying the selector in the untyped source arena.
+        tree_index: u32,
+        /// Original contextual member selected on the export qualifier.
+        member: SymbolId,
+    },
     /// An import tree has an unexpected AST shape or stale child reference.
     MalformedSourceImport {
         /// Source buffer identity in the current compilation session.

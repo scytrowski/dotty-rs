@@ -149,3 +149,69 @@ fn legacy_wildcard_collapses_the_diamond_and_respects_a_plain_override() {
         TyperError::MissingContextualArgument { .. }
     ));
 }
+
+#[test]
+fn common_parent_members_survive_wildcard_export_but_cannot_be_aliased() {
+    let client =
+        include_str!("../../../../tests/fixtures/contextual-arguments/InheritedSharedNamed.scala");
+    let (parsed, mut store, packages, defs, index, source) = with_client(client);
+    let find_site = |name| {
+        parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, _)| index.export_site_at(source, tree))
+            .find(|site| {
+                store
+                    .names
+                    .resolve(store.symbols.get(site.owner).name.text())
+                    .trim_end_matches('$')
+                    == name
+            })
+            .unwrap()
+    };
+    let shared = find_site("Shared").owner;
+    let bad = find_site("SharedNamed");
+    let original = val_symbol(&parsed, &store, &index, source, "key").0;
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for warm in [false, true] {
+        if warm {
+            let call = client_result(&mut typer, &parsed, "use").unwrap();
+            let path = evidence(&typer, call);
+            assert_eq!(reference(&typer, path), original);
+            let TreeKind::Select(sel) = &typer.typed_ast().get(path).kind else {
+                panic!("qualified inherited witness")
+            };
+            assert_eq!(
+                qualified_name(&typer, reference(&typer, sel.qualifier)).1,
+                "Shared"
+            );
+            let scope = typer.store.scopes.get(index.scope_of(shared).unwrap());
+            assert!(scope.entered_symbols().all(|s| {
+                !typer
+                    .store
+                    .symbols
+                    .get(s)
+                    .flags
+                    .contains(SymbolFlags::EXPORTED)
+            }));
+        }
+        let checkpoint = typer.store.checkpoint();
+        for _ in 0..2 {
+            let error = typer.complete_symbol(bad.owner).unwrap_err();
+            assert!(
+                matches!(error,TyperError::InheritedContextualExport { source: s, tree_index, member } if s == source && tree_index == bad.tree.index() && member == original),
+                "{error:?}"
+            );
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+            let scope = typer.store.scopes.get(index.scope_of(bad.owner).unwrap());
+            assert!(scope.entered_symbols().all(|s| {
+                !typer
+                    .store
+                    .symbols
+                    .get(s)
+                    .flags
+                    .contains(SymbolFlags::EXPORTED)
+            }));
+        }
+    }
+}
