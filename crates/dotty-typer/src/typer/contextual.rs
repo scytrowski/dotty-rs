@@ -38,7 +38,7 @@ struct Provider {
 }
 
 #[derive(Default)]
-struct SearchHistory {
+pub(super) struct SearchHistory {
     active: Vec<(ContextualRef, TypeId, usize)>,
     dictionary: Dictionary,
     by_name_depth: usize,
@@ -296,6 +296,7 @@ impl SourceTyper<'_> {
                 &mut function,
                 callable,
                 &method,
+                Vec::new(),
                 context,
                 tree_index,
                 None,
@@ -1381,6 +1382,7 @@ impl SourceTyper<'_> {
                 &mut tree,
                 signature,
                 &method,
+                Vec::new(),
                 context,
                 tree_index,
                 Some(history),

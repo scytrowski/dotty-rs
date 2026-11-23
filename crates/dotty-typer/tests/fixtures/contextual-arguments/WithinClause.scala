@@ -13,4 +13,5 @@ class Client:
   def explicit(using p: Family, v: p.Out): p.Out = read(using p, v)
   def inferred(using p: Family, v: p.Out): p.Out = read
   def original(using p: Family, v: p.Out): Product = { import Makers.product; need }
+  def partial(using p: Family, v: p.Out): p.Out = read(using p)
   def oldDirect(using p: Family, v: p.Out): Product = { import Legacy.*; need }

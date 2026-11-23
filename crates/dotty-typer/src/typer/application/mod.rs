@@ -1011,7 +1011,10 @@ impl SourceTyper<'_> {
             });
         }
         let mut shared = Vec::new();
-        let defaults = if argument_trees.len() == method.params.len() {
+        let partial_using = application_kind == ApplyKind::Using
+            && !argument_trees.is_empty()
+            && argument_trees.len() < method.params.len();
+        let defaults = if argument_trees.len() == method.params.len() || partial_using {
             Vec::new()
         } else if argument_trees.len() < method.params.len()
             && method.kind == MethodKind::Plain
@@ -1214,7 +1217,20 @@ impl SourceTyper<'_> {
             ));
         }
         if method.kind != MethodKind::Plain {
-            return self.finish_contextual_call(
+            if partial_using {
+                (arguments, _) = self.contextual_call_arguments(
+                    &mut function,
+                    callable,
+                    &method,
+                    arguments,
+                    context,
+                    tree_index,
+                    None,
+                    &mut shared,
+                    info_journal,
+                )?;
+            }
+            let call = self.finish_contextual_call(
                 function,
                 callable,
                 method.result,
@@ -1222,7 +1238,8 @@ impl SourceTyper<'_> {
                 application_kind,
                 position,
                 tree_index,
-            );
+            )?;
+            return Ok(self.bind_default_operands(shared, call, position));
         }
         let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
             function,

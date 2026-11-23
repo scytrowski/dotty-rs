@@ -96,3 +96,71 @@ fn inferred_method_and_provider_clauses_use_the_selected_family_path() {
         TyperError::MissingContextualArgument { .. }
     ));
 }
+
+#[test]
+fn partial_using_keeps_the_supplied_path_and_searches_the_trailing_argument() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let tree = client_result(&mut typer, &parsed, "partial").unwrap();
+    assert_arguments(&typer, tree, "partial", &["p", "v"]);
+    let TreeKind::Apply(call) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    assert_eq!(call.kind, ApplyKind::Using);
+    let Type::TypeRef { prefix, .. } = typer.store.types.get(typer.typed_ast().get(tree).ty) else {
+        panic!()
+    };
+    assert_eq!(
+        typer.store.types.get(*prefix).reference_symbol(),
+        Some(reference(&typer, call.args[0]))
+    );
+    for site in ["partialMissing", "partialAmbiguous"] {
+        let (_, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, site);
+        let checkpoint = typer.store.checkpoint();
+        for _ in 0..2 {
+            let error = client_result(&mut typer, &parsed, site).unwrap_err();
+            match error {
+                TyperError::MissingContextualArgument {
+                    source: s,
+                    tree_index,
+                    ..
+                } if site == "partialMissing" => assert_eq!((s, tree_index), (source, rhs.index())),
+                TyperError::AmbiguousContextualArgument {
+                    source: s,
+                    tree_index,
+                    candidate_names,
+                    ..
+                } if site == "partialAmbiguous" => {
+                    assert_eq!((s, tree_index), (source, rhs.index()));
+                    let mut names: Vec<_> = candidate_names
+                        .iter()
+                        .map(|(_, n)| typer.store.names.resolve(n.text()))
+                        .collect();
+                    names.sort();
+                    assert_eq!(names, ["a", "b"]);
+                }
+                _ => panic!("{site}: {error:?}"),
+            }
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+        }
+    }
+}
+
+#[test]
+fn omitted_default_after_explicit_using_is_chosen_over_lexical_evidence() {
+    let text = "class C {
+        def choose(using a: Int, b: Boolean = false): Boolean = b
+        def run(using other: Boolean): Boolean = choose(using 7)
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let tree = client_result(&mut typer, &parsed, "run").unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(tree).kind else {
+        panic!()
+    };
+    assert_eq!(call.kind, ApplyKind::Using);
+    assert_eq!(
+        qualified_name(&typer, reference(&typer, call.args[1])),
+        ("C", "choose$default$2")
+    );
+}
