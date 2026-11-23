@@ -390,6 +390,7 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
 // even when different files reuse the same input tree slots.
 #[derive(Debug, Default)]
 struct TypedHeaders {
+    ready: Vec<SymbolId>,
     arena: AstArena<Typed>,
     bindings: ClassHeaderBindings,
 }
@@ -397,7 +398,6 @@ struct TypedHeaders {
 #[derive(Debug)]
 enum SignatureError {
     Header(dotty::ClassHeaderError),
-    Field(dotty::ClassFieldSignatureError),
     Member(dotty::MemberSignatureError),
     Cycle(std::sync::Arc<dotty::SignatureCycle>),
 }
@@ -406,32 +406,6 @@ impl From<dotty::ClassHeaderError> for SignatureError {
     fn from(error: dotty::ClassHeaderError) -> Self {
         Self::Header(error)
     }
-}
-
-// Follow the provider immediately. The facade supplies the exact symbols to retry.
-fn follow_signature(
-    root: SymbolId,
-    phase: dotty::SignaturePhase,
-    first_dependency: Option<SymbolId>,
-    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, SignatureError>,
-) -> Result<(), SignatureError> {
-    let mut dependencies = dotty::SignatureDependencies::new(phase);
-    let mut ready = vec![root];
-    let mut initial = first_dependency.map(SignatureCompletion::BlockedOn);
-    while let Some(symbol) = ready.pop() {
-        let outcome = match initial.take() {
-            Some(observed) => observed,
-            None => attempt(symbol)?,
-        };
-        ready.extend(dependencies.record(symbol, outcome).into_iter().rev());
-        if let SignatureCompletion::BlockedOn(provider) = outcome {
-            if let Some(cycle) = provider_cycle(&dependencies, provider) {
-                return Err(SignatureError::Cycle(cycle));
-            }
-            ready.push(provider);
-        }
-    }
-    Ok(())
 }
 
 fn provider_cycle(
@@ -482,6 +456,7 @@ fn complete_headers(
             }
         }
     }
+    headers.ready = phase.finish().ready;
     Ok(headers)
 }
 
@@ -522,68 +497,52 @@ fn complete_methods_in_order(
 ) -> Result<TypedHeaders, SignatureError> {
     let headers = complete_headers(sources, store, definitions, packages, &mut observe)?;
 
-    for (unit, class) in sources.classes() {
-        while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
-            dotty::try_complete_class_field_signatures(
-                class.symbol,
-                unit.ast(),
-                unit.index(),
-                store,
-                definitions,
-                packages,
-                |dep| sources.declarations().member(dep).is_some(),
-            )
-            .map_err(SignatureError::Field)?
-        {
-            observe(field, SignatureCompletion::BlockedOn(dependency));
-            complete_member_path(
-                field,
-                Some(dependency),
-                sources,
-                store,
-                definitions,
-                packages,
-                &mut observe,
-            )?;
-        }
-    }
-    for symbol in roots {
-        if !matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
-            complete_member_path(
-                symbol,
-                None,
-                sources,
-                store,
-                definitions,
-                packages,
-                &mut observe,
-            )?;
-        }
-    }
+    let selection = sources
+        .member_signatures(headers.ready.iter().copied(), store)
+        .expect("headers completed for these indexed classes");
+    complete_member_paths(
+        &selection,
+        selection.field_roots().iter().copied().chain(roots),
+        store,
+        definitions,
+        packages,
+        &mut observe,
+    )?;
     Ok(headers)
 }
 
-fn complete_member_path(
-    root: SymbolId,
-    first_dependency: Option<SymbolId>,
-    sources: &NamedClassSources,
+fn complete_member_paths(
+    selection: &dotty::MemberSignatureSelection<'_, '_>,
+    roots: impl IntoIterator<Item = SymbolId>,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<(), SignatureError> {
-    follow_signature(
-        root,
-        dotty::SignaturePhase::Members,
-        first_dependency,
-        |symbol| {
-            let completion = sources
-                .try_complete_member_signature(symbol, store, definitions, packages)
-                .map_err(SignatureError::Member)?;
-            observe(symbol, completion);
-            Ok(completion)
-        },
-    )
+    let mut phase = dotty::MemberSignaturePhase::new(selection, store, definitions, packages);
+    let mut ready = Vec::new();
+    for root in roots {
+        if phase.is_ready(root) {
+            continue;
+        }
+        ready.push(root);
+        while let Some(symbol) = ready.pop() {
+            let Ok(attempt) = phase.attempt(symbol) else {
+                return Err(SignatureError::Member(
+                    phase.into_failure(symbol).expect("rejected member"),
+                ));
+            };
+            observe(symbol, attempt.completion);
+            ready.extend(attempt.retry.into_iter().rev());
+            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
+                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                    return Err(SignatureError::Cycle(cycle));
+                }
+                ready.push(provider);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn with_plan<R>(
@@ -1316,14 +1275,16 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
         let lookup = |source| sources.file(source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        let selection = sources
+            .member_signatures(headers.ready.iter().copied(), &store)
+            .unwrap();
         let mut blocked = Vec::new();
         let mut reports = Vec::new();
         for unit in &units {
             for member in unit.method_symbols() {
-                let result = complete_member_path(
-                    member,
-                    None,
-                    &sources,
+                let result = complete_member_paths(
+                    &selection,
+                    [member],
                     &mut store,
                     defs,
                     &packages,
