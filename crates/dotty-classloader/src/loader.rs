@@ -5537,6 +5537,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             decoded_cache,
             &mut decoded_cache_hit,
             &mut ancestry,
+            None,
         );
         self.collect_resource_observations = was_collecting_resources;
         if let (Some(started), Some(profile)) = (profile_started, self.active_load_profile.as_mut())
@@ -5581,11 +5582,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
         decoded_cache_hit: &mut bool,
         ancestry: &mut Vec<BinaryName>,
+        selected_resource: Option<ClassResource>,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
-        let result = self.complete_module_inner(name, decoded_cache, decoded_cache_hit, ancestry);
+        let result = self.complete_module_inner(
+            name,
+            decoded_cache,
+            decoded_cache_hit,
+            ancestry,
+            selected_resource,
+        );
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
@@ -5602,6 +5610,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
         decoded_cache_hit: &mut bool,
         ancestry: &mut Vec<BinaryName>,
+        selected_resource: Option<ClassResource>,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let identity = self.ensure_module_identity_inner(name)?;
         match self.store.symbols.get(identity.module_class).info {
@@ -5664,12 +5673,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SymbolInfo::Missing => {}
         }
 
-        let lookup_started = self.collect_load_profiles.then(Instant::now);
-        let lookup_result = self.class_path.find_class(name);
-        self.record_resource_lookup(lookup_started, &lookup_result);
-        let resource = lookup_result
-            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
-            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+        let resource = match selected_resource {
+            Some(resource) => resource,
+            None => {
+                let lookup_started = self.collect_load_profiles.then(Instant::now);
+                let lookup_result = self.class_path.find_class(name);
+                self.record_resource_lookup(lookup_started, &lookup_result);
+                lookup_result
+                    .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
+                    .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?
+            }
+        };
         if resource.format() != ClassFormat::Tasty {
             return Err(ClassLoadError::IdentityConflict {
                 name: name.clone(),
@@ -5991,7 +6005,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         class_file: &ClassFile<'_>,
         origin: &ClassOrigin,
-    ) -> Result<Option<ModuleIdentity>, ClassLoadError> {
+    ) -> Result<Option<(ModuleIdentity, ClassResource)>, ClassLoadError> {
         let Some(stem) = name.as_internal().strip_suffix('$') else {
             return Ok(None);
         };
@@ -6028,7 +6042,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             if self.session.origins.get(&identity.module_class) == Some(origin)
                 && self.module_identity_is_valid(&object, identity)
             {
-                return Ok(Some(identity.clone()));
+                return Ok(Some((identity.clone(), resource)));
             }
             return Err(ClassLoadError::IdentityConflict {
                 name: name.clone(),
@@ -6036,7 +6050,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
         }
         let Some(decoded) = tasty_symbol::decode_module_identity(resource.bytes(), &object)
-            .map_err(|e| ClassLoadError::InvalidTastyFile(object.clone(), e))?
+            .map_err(|e| {
+                self.dependency_failure_context =
+                    Some((object.clone(), origin.clone(), ClassFormat::Tasty));
+                ClassLoadError::InvalidTastyFile(object.clone(), e)
+            })?
         else {
             return Ok(None);
         };
@@ -6047,7 +6065,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
         }
-        result.map(Some)
+        result.map(|identity| Some((identity, resource)))
     }
 
     fn publish_module_identity(
@@ -6409,7 +6427,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                             actual,
                         });
                     }
-                    if let Some(identity) =
+                    if let Some((identity, _)) =
                         self.paired_module_identity(name, &class_file, &origin)?
                     {
                         return Ok(std::ops::ControlFlow::Break(identity.module_class));
@@ -6437,9 +6455,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
             }))
         })();
-        let header = header.inspect_err(|_| {
-            self.dependency_failure_context =
-                Some((name.clone(), origin.clone(), resource.format()));
+        let header = header.inspect_err(|error| {
+            if error_binary_name(error.root_cause()) == Some(name) {
+                self.dependency_failure_context =
+                    Some((name.clone(), origin.clone(), resource.format()));
+            }
         })?;
 
         let (flags, base_flags, tasty_visibility, classfile_visibility, semantic_owner) =
@@ -8330,14 +8350,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
         }
 
-        if let Some(identity) = self.paired_module_identity(name, &class_file, &resource_origin)? {
+        if let Some((identity, resource)) =
+            self.paired_module_identity(name, &class_file, &resource_origin)?
+        {
             return self
                 .complete_module_dependencies(
                     &identity.object_name,
                     &mut HashMap::new(),
                     &mut false,
                     inheritance_ancestry,
+                    Some(resource),
                 )
+                .inspect_err(|error| {
+                    if matches!(error.root_cause(), ClassLoadError::InvalidTastyFile(failing, _) if failing == name) {
+                        self.dependency_failure_context = Some((name.clone(), resource_origin.clone(), ClassFormat::Tasty));
+                    }
+                })
                 .map(|module| module.module_class);
         }
 
@@ -17892,6 +17920,23 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn paired_module_failure_identifies_the_malformed_tasty_resource() {
+        let binary = BinaryName::from_internal("audits/Single$");
+        let object = BinaryName::from_internal("audits/Single");
+        let origin = ClassOrigin::Jar("broken.jar".into());
+        let mut resources = resources_for_module_pair(&object, &binary, &origin);
+        resources.get_mut(&object).unwrap().0.clear();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        let failure = loader.load_class_detailed(&binary).unwrap_err();
+        assert!(
+            matches!(failure.root_cause(), ClassLoadError::InvalidTastyFile(name, _) if name == &object)
+        );
+        assert_eq!(failure.origin, Some(origin));
+        assert_eq!(failure.format, Some(ClassFormat::Tasty));
     }
 
     fn resources_for_module_pair(
