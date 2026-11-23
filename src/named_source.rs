@@ -221,6 +221,8 @@ mod tests {
     use super::*;
     use crate::core::{Packages, SemanticStore, TreeKind};
 
+    mod projection;
+
     #[test]
     fn navigation_is_lazy_and_shares_original_overload_name_tokens() {
         let text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";

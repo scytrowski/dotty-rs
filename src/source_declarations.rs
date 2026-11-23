@@ -132,6 +132,19 @@ pub fn source_classes(
     index: &SourceSemanticIndex,
     store: &SemanticStore,
 ) -> Result<Vec<SourceClass>, DeclarationError> {
+    read_source_classes(ast, root, source, index, store, Err)
+}
+
+// A callback can retain one unsupported site per package statement. A malformed
+// root or inconsistent binding always rejects the complete projection.
+pub(crate) fn read_source_classes(
+    ast: &AstArena<Untyped>,
+    root: TreeId<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+    mut unsupported: impl FnMut(DeclarationError) -> Result<(), DeclarationError>,
+) -> Result<Vec<SourceClass>, DeclarationError> {
     let reader = Reader {
         ast,
         source,
@@ -148,11 +161,15 @@ pub fn source_classes(
             store.symbols.contains(id) && store.symbols.get(id).kind == SymbolKind::Package
         })
         .ok_or(DeclarationError::InvalidBinding { source, tree: root })?;
-    package
-        .stats
-        .iter()
-        .map(|&tree| reader.class(tree, owner))
-        .collect()
+    let mut classes = Vec::new();
+    for &tree in &package.stats {
+        match reader.class(tree, owner) {
+            Ok(class) => classes.push(class),
+            Err(error @ DeclarationError::Unsupported { .. }) => unsupported(error)?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(classes)
 }
 
 // The same identity check is used when a JVM planner receives individual inputs.
