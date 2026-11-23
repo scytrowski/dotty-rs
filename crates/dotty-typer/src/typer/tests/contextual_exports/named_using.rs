@@ -127,3 +127,35 @@ fn reordering_keeps_prior_strict_clauses_first_and_by_name_operands_lazy() {
         TreeKind::Apply(_)
     ));
 }
+
+#[test]
+fn searches_only_unfilled_slots_and_reports_the_failed_goal() {
+    let (parsed, mut store, packages, defs, index, source) = clients();
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, expected) in [
+        ("hole", [Some("i"), None, Some("t")]),
+        ("mixed", [None, Some("b"), Some("t")]),
+    ] {
+        let tree = client_result(&mut t, &parsed, site).unwrap();
+        for (&arg, name) in args(&t, tree).iter().zip(expected) {
+            if let Some(name) = name {
+                assert_eq!(qualified_name(&t, reference(&t, arg)), (site, name))
+            } else {
+                assert!(matches!(t.typed_ast().get(arg).kind, TreeKind::Literal(_)))
+            }
+        }
+    }
+    for site in ["missing", "ambiguous", "misplaced"] {
+        let checkpoint = t.store.checkpoint();
+        let err = client_result(&mut t, &parsed, site).unwrap_err();
+        match err {
+            TyperError::MissingContextualArgument { .. } if site == "missing" => {}
+            TyperError::AmbiguousContextualArgument {
+                candidate_names, ..
+            } if site == "ambiguous" => assert_eq!(candidate_names.len(), 2),
+            TyperError::PositionalAfterNamedArgument { .. } if site == "misplaced" => {}
+            _ => panic!("{site}: {err:?}"),
+        }
+        assert_eq!(t.store.checkpoint(), checkpoint);
+    }
+}

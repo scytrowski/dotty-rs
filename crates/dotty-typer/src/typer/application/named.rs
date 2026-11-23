@@ -35,6 +35,7 @@ impl SourceTyper<'_> {
             .map(|(i, p)| (*p.name.as_name(), i))
             .collect();
         let mut slots: Vec<_> = (0..method.params.len()).map(|_| None).collect();
+        let mut next_unfilled = 0;
         for (written, &tree) in trees.iter().enumerate() {
             let (ordinal, value) = if let TreeKind::NamedArg(arg) = self.arena.get(tree).kind {
                 let ordinal = ordinals
@@ -46,6 +47,12 @@ impl SourceTyper<'_> {
                     })?;
                 (*ordinal, arg.arg)
             } else {
+                if written != next_unfilled {
+                    return Err(TyperError::PositionalAfterNamedArgument {
+                        source: self.source,
+                        tree_index: tree.index(),
+                    });
+                }
                 (written, tree)
             };
             let Some(slot) = slots.get_mut(ordinal) else {
@@ -64,6 +71,9 @@ impl SourceTyper<'_> {
                 });
             }
             *slot = Some(NamedArgument { written, value });
+            while slots.get(next_unfilled).is_some_and(Option::is_some) {
+                next_unfilled += 1;
+            }
         }
         Ok(Some(slots))
     }

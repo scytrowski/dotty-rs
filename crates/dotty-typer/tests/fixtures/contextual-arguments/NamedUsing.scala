@@ -10,3 +10,5 @@ class Client:
   def tickBool(): Boolean = true
   def tickInt(): Int = 7
   def effects(): Int = legacy(using flag = tickBool(), n = tickInt())
+  def hole(using i: Int, t: Tag): Int = pick(using flag = true)
+  def mixed(t: Tag)(using b: Boolean): Int = pick(using 7, text = t)

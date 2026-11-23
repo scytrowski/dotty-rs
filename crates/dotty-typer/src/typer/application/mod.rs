@@ -1013,14 +1013,6 @@ impl SourceTyper<'_> {
         }
         let named =
             self.named_using_arguments(application_kind, &method, &argument_trees, tree_index)?;
-        if let Some(slots) = &named
-            && slots.iter().take(argument_trees.len()).any(Option::is_none)
-        {
-            return Err(TyperError::UsingApplicationDeferred {
-                source: self.source,
-                tree_index,
-            });
-        }
         let mut shared = Vec::new();
         let partial_using = application_kind == ApplyKind::Using
             && !argument_trees.is_empty()
@@ -1083,24 +1075,37 @@ impl SourceTyper<'_> {
                 ..
             }) if self.is_any_ref_identity_symbol(*symbol)
         );
-        for (argument_index, (argument_tree, parameter)) in
-            argument_trees.iter().zip(&method.params).enumerate()
-        {
-            let argument_tree = named
-                .as_ref()
-                .and_then(|s| s[argument_index].as_ref())
-                .map_or(argument_tree, |a| &a.value);
+        let count = named.as_ref().map_or(argument_trees.len(), Vec::len);
+        for (argument_index, parameter) in method.params.iter().take(count).enumerate() {
             let formal_ty = if method.kind == MethodKind::Plain {
                 parameter.ty
             } else {
                 self.contextual_parameter_type(callable, parameter.ty, &arguments, tree_index)?
+            };
+            let slot = named.as_ref().and_then(|s| s[argument_index].as_ref());
+            let (written, argument_tree) = match (slot, &named) {
+                (Some(a), _) => (a.written, &a.value),
+                (None, Some(_)) => {
+                    let parameter = dotty_core::MethodParam {
+                        ty: formal_ty,
+                        ..*parameter
+                    };
+                    arguments.push(self.search_contextual_argument(
+                        &parameter,
+                        context,
+                        tree_index,
+                        info_journal,
+                    )?);
+                    continue;
+                }
+                (None, None) => (argument_index, &argument_trees[argument_index]),
             };
             let expected_type = match self.store.types.try_get(formal_ty) {
                 Some(Type::ByName { result }) => *result,
                 _ => formal_ty,
             };
             let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
-                let typed_argument = typed_arguments[argument_index];
+                let typed_argument = typed_arguments[written];
                 debug_assert_eq!(
                     self.typed_arena.get(typed_argument.typed).ty,
                     typed_argument.own_type
@@ -1215,19 +1220,16 @@ impl SourceTyper<'_> {
                     });
                 }
             }
-            if let Some(slot) = named.as_ref().and_then(|s| s[argument_index].as_ref())
-                && slot.value != argument_trees[slot.written]
-            {
-                self.record_typed_child(argument_trees[slot.written], argument, new_mappings)?;
+            if *argument_tree != argument_trees[written] {
+                self.record_typed_child(argument_trees[written], argument, new_mappings)?;
             }
             arguments.push(argument);
         }
         if let Some(slots) = &named
             && slots
                 .iter()
-                .flatten()
                 .enumerate()
-                .any(|(i, a)| i != a.written)
+                .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
         {
             function = self.order_named_operands(
                 function,
@@ -1255,7 +1257,7 @@ impl SourceTyper<'_> {
             ));
         }
         if method.kind != MethodKind::Plain {
-            if partial_using {
+            if partial_using && named.is_none() {
                 (arguments, _) = self.contextual_call_arguments(
                     &mut function,
                     callable,

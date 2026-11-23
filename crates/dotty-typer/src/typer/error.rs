@@ -1784,6 +1784,13 @@ pub enum TyperError {
         /// Parameter name written at the call site.
         name: Name,
     },
+    /// An out-of-order named argument left an earlier parameter unfilled before a positional argument.
+    PositionalAfterNamedArgument {
+        /// Source file containing the call.
+        source: SourceId,
+        /// Index of the misplaced positional argument.
+        tree_index: u32,
+    },
     /// A parameter already has a positional or named argument.
     DuplicateNamedArgument {
         /// Source file containing the explicit argument.
