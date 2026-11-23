@@ -329,56 +329,44 @@ fn analyze_sources(
         store,
         results,
     );
-    let mut checks = HashMap::new();
-    for u in sources.files() {
-        let source = u.source();
-        for c in u.classes() {
-            if unavailable.contains(&c.symbol) {
+    let mut bodies = HashMap::new();
+    for (file, c) in sources.classes() {
+        let source = file.source();
+        if unavailable.contains(&c.symbol) {
+            continue;
+        }
+        let (body, report) = sources
+            .check_class_body(c.symbol, store, defs, packages, &mut arena, NoResolver)
+            .into_parts();
+        for (source, diagnostic) in report.diagnostics {
+            results
+                .get_mut(&source)
+                .unwrap()
+                .problems
+                .push(Problem::TyperWarning { source, diagnostic });
+        }
+        for error in report.errors {
+            if let ClassBodyError::Member {
+                member: ClassMember::Method(d) | ClassMember::Field(d),
+                ..
+            } = &error
+                && signatures.waiting_on(d.symbol).is_some()
+            {
                 continue;
             }
-            let mut check = dotty::check_class_body(
-                c,
-                u.ast(),
-                u.index(),
-                store,
-                defs,
-                packages,
-                &mut arena,
-                NoResolver,
-            );
-            for (source, diagnostic) in check.diagnostics.drain(..) {
-                results
-                    .get_mut(&source)
-                    .unwrap()
-                    .problems
-                    .push(Problem::TyperWarning { source, diagnostic });
+            let (file, problem) = call_problem(source, error.into_call_diagnostic(ast_for), |e| {
+                e.diagnostic(ast_for)
+            });
+            if let Problem::Call(call) = &problem
+                && call
+                    .identity(&defs)
+                    .is_some_and(|key| signature_calls.contains(&key))
+            {
+                continue;
             }
-            if let Err(errors) = &mut check.body {
-                for error in errors.drain(..) {
-                    if let ClassBodyError::Member {
-                        member: ClassMember::Method(d) | ClassMember::Field(d),
-                        ..
-                    } = &error
-                        && signatures.waiting_on(d.symbol).is_some()
-                    {
-                        continue;
-                    }
-                    let (file, problem) =
-                        call_problem(source, error.into_call_diagnostic(ast_for), |e| {
-                            e.diagnostic(ast_for)
-                        });
-                    if let Problem::Call(call) = &problem
-                        && call
-                            .identity(&defs)
-                            .is_some_and(|key| signature_calls.contains(&key))
-                    {
-                        continue;
-                    }
-                    results.get_mut(&file).unwrap().problems.push(problem);
-                }
-            }
-            checks.insert(c.symbol, check);
+            results.get_mut(&file).unwrap().problems.push(problem);
         }
+        bodies.insert(c.symbol, body);
     }
     for u in sources.files() {
         let source = u.source();
@@ -397,12 +385,12 @@ fn analyze_sources(
             }
         };
         for (origin, _) in calls.call_names().iter() {
-            if let Some(t) = calls.definition_at(
+            if let Some(t) = calls.definition_at_with_bindings(
                 origin.start(),
                 u.ast(),
                 &arena,
                 store,
-                |s| checks.get(&s),
+                |s| bodies.get(&s)?.bindings(),
                 |id| sources.file(id).and_then(|x| x.navigation().ok()),
             ) {
                 results.get_mut(&source).unwrap().links.push(Link {
