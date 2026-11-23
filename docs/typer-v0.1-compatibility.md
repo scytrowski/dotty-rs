@@ -74,6 +74,16 @@ method has its own binder. A caller importing `All.given` obtains
 `Instances.boxed[A](e)`. Use `SourceTyper::type_export_forwarder_definition`
 with the selected method symbol to inspect that definition in the same session.
 
+A conditional provider can be monomorphic or take a leading type parameter
+clause. Each nonempty `using` or legacy `implicit` clause retains its own
+parameters and application. For example, an exported `curried[A,B](using
+k: Key[A])(using t: Tag[B])` supplies `Curried.curried[Int, Boolean](k)(t)`
+at the client. Its body selects the immediate target and forwards both clauses.
+Type parameter bounds and dependencies on earlier clauses use the forwarder's
+own parameters. In an exported `product(using f: Family, v: f.Out)`, the
+type of the generated `v` selects `Out` on the generated `f`. Each re-export
+introduces its own parameters and delegates to the immediately preceding method.
+
 For chained exports, each generated method selects its immediate delegate.
 When `Middle` exports `Leaf.ints` as `first` and `Public` exports
 `Middle.given`, a call requiring `TC[Int]` after importing `Public.given` selects
@@ -99,7 +109,7 @@ Exceeding this limit returns a typing error and restores the enclosing transacti
 
 The regression fixtures exercise source typing and compare it with Scala 3.9.0
 typer output. Binary export targets, arbitrary stable qualifiers,
-general overloaded or multi-clause forwarding, and emission of these methods
+overload groups, interleaved type parameters, ordinary value clauses, and emission of these methods
 in Rust-produced TASTy or JVM classes remain outside this contract.
 
 When a receiver's instantiated method type has a contextual clause, term
@@ -121,7 +131,47 @@ applications and the same set of nominal declarations rules out that branch.
 A concrete alternative can still supply the missing argument. Other type
 shapes continue to use the existing recursion and resource limits.
 
-Dependent clause application substitutes stable argument paths. Within a
+Dependent contextual arguments are checked in declaration order. For
+`read(using f: Family, v: f.Out): f.Out`, selecting a stable `p` as the first
+argument makes the second expected type and the result `p.Out`. A value of
+`q.Out` from another family does not satisfy this requirement. At an explicit
+`read(using p)` call the typer keeps the supplied prefix and fills the omitted
+suffix. An available default getter takes precedence for an omitted explicit
+using argument. The same path substitution applies when searching all arguments
+or materializing a conditional provider with an implicit or using clause.
+
+For an unambiguously selected method with a known contextual or legacy implicit
+signature, an explicit `using` clause can bind arguments by name. Missing slots
+are filled in parameter order, so `read(using v = w)` can first select `p`
+and check `w: p.Out`. Reordered strict operands execute once in written order
+after the receiver and earlier clauses. By-name arguments stay deferred.
+An explicit clause selects an available default getter for an omitted slot and
+warns when a unique contextual argument would have been available (Scala E220).
+Unknown names, duplicate bindings and misplaced positional arguments are diagnosed
+at the offending argument. The NamedUsing fixtures cover source methods, an
+exported given alias and a legacy implicit method.
+
+For a selected polymorphic method, a named argument supplies constraints for its
+declared parameter. Given `choose[A](using value: Box[A], fmt: Fmt[A])` and a
+`b: Box[Int]`, `choose(using value = b)` infers `Int` and searches for
+`Fmt[Int]`, including in a context expecting `Any`. A default getter replays
+the inferred type arguments. The PolyNamed fixtures cover reordered operands,
+bounds, a generic given export and legacy implicit methods.
+
+An omitted witness can also constrain the selected method. For a source class
+or trait with one invariant parameter, an open goal such as `Box[A]` can infer
+`A` from a contextual value of type `Box[Int]`. The typer uses lexical and
+imported values before implicit scope, checks independent type parameter bounds
+before ranking candidates, and retains the selected witness. Written arguments
+constrain their formals first. Omitted witnesses are then resolved in declaration
+order: a later `Fmt[Int]` cannot break an earlier tie between `Box[Int]` and
+`Box[Boolean]`. Putting `Fmt[A]` first allows both searches to succeed.
+The OmittedWitness fixtures cover independent type parameters, exported and
+legacy callees, default getters and the first failing search. Expected-result
+inference for open goals, competing polymorphic or conditional providers, and
+overload selection by argument name remain outside this subset.
+
+Within a
 simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.
 Higher-kinded inference and general proofs from opaque bounds remain open.
@@ -2324,7 +2374,9 @@ root and its source attribution.
 ### Class headers and inferred member signatures across source files
 
 The standalone compiler client names the sources and completes their constructor
-signatures. Its `dotty::NamedClassSources` collection routes header and member
+signatures by class symbol through `NamedClassSources::complete_constructor_signature`.
+A symbol outside the selected classes produces `ClassHeaderError::InvalidClass`
+before typing. The same collection routes header and member
 signature attempts to the canonical source file and index. The collection's
 declaration index includes the source ID, enclosing class and symbol kind.
 The header phase accepts indexed classes and the member phase accepts indexed
@@ -2408,7 +2460,10 @@ For example, if `Base` expects an `Int`, checking
 Clients that publish after analysis can instead convert the three phase errors
 with `into_reported_error`. The result retains the original typer error, the
 enclosing symbols and its optional validated byte span. Structural errors are
-returned in their original wrapper. For a raw header or constructor failure,
+returned in their original wrapper. For indexed constructors and headers,
+`complete_constructor_signature` and `try_complete_class_header_reported`
+capture the original error and optional location in `ClassHeaderError::Typing`.
+For a raw header or constructor failure,
 `ReportedTyperError::from_class` takes the class and optional member.
 `call_identity` is available for supported call retries within one analysis.
 Use the original document version for the byte range and discard retry keys

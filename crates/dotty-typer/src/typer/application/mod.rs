@@ -8,6 +8,7 @@ use super::*;
 pub(super) mod constructors;
 pub use constructors::ConstructorCandidate;
 mod inference;
+mod named;
 pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::{InferenceLocation, PolyApplicationInference};
 
@@ -821,28 +822,34 @@ impl SourceTyper<'_> {
             mut typed_arguments,
             is_constructor_application,
         } = request;
+        let named =
+            self.named_using_arguments(application_kind, callable, &argument_trees, tree_index)?;
+        let mut inferred_witnesses = HashMap::new();
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
-                let expected_parameters = match self.store.types.try_get(poly.result) {
-                    Some(Type::Method(method)) => method
-                        .params
-                        .iter()
-                        .map(|parameter| match self.store.types.try_get(parameter.ty) {
-                            Some(Type::ByName { result }) => *result,
-                            _ => parameter.ty,
-                        })
-                        .collect::<Vec<_>>(),
-                    _ => Vec::new(),
-                };
-                let mut arguments = Vec::with_capacity(argument_trees.len());
-                for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
-                    let is_lambda = self.is_function_literal_value(*argument_tree);
+                let mut operands: Vec<_> = argument_trees.iter().copied().enumerate().collect();
+                if let Some(slots) = &named {
+                    for (ordinal, slot) in slots.iter().enumerate() {
+                        if let Some(arg) = slot {
+                            operands[arg.written] = (ordinal, arg.value);
+                        }
+                    }
+                }
+                let mut arguments = Vec::with_capacity(operands.len());
+                for (ordinal, argument_tree) in operands {
+                    let is_lambda = self.is_function_literal_value(argument_tree);
                     let typed = if is_lambda {
-                        if let Some(expected) = expected_parameters.get(argument_index).copied() {
+                        if let Some(Type::Method(method)) = self.store.types.try_get(poly.result)
+                            && let Some(param) = method.params.get(ordinal)
+                        {
+                            let expected = match self.store.types.try_get(param.ty) {
+                                Some(Type::ByName { result }) => *result,
+                                _ => param.ty,
+                            };
                             self.type_value_expression_expected_with_poly_binder(
-                                *argument_tree,
+                                argument_tree,
                                 context,
                                 expected,
                                 Some(callable),
@@ -851,7 +858,7 @@ impl SourceTyper<'_> {
                             )?
                         } else {
                             self.type_value_expression_inner(
-                                *argument_tree,
+                                argument_tree,
                                 context,
                                 info_journal,
                                 new_mappings,
@@ -859,7 +866,7 @@ impl SourceTyper<'_> {
                         }
                     } else {
                         self.type_value_expression_inner(
-                            *argument_tree,
+                            argument_tree,
                             context,
                             info_journal,
                             new_mappings,
@@ -896,18 +903,61 @@ impl SourceTyper<'_> {
                 tree_index,
                 info_journal,
             )?;
-            let type_arguments = self.infer_poly_application_with_defaults(
-                PolyApplicationInference {
-                    binder: callable,
-                    poly: &poly,
-                    arguments: &arguments,
-                    application_kind,
-                    tree_index,
-                    unused_covariant_parameter,
-                },
+            let inference = PolyApplicationInference {
+                binder: callable,
+                poly: &poly,
+                arguments: &arguments,
+                application_kind,
+                tree_index,
+                unused_covariant_parameter,
+            };
+            let mut constraints = self.collect_application_constraints(
+                &inference,
+                named.as_deref(),
                 copy_defaults.as_deref().unwrap_or_default(),
                 info_journal,
             )?;
+            if let Some(slots) = &named
+                && constraints.contains(&None)
+                && let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned()
+            {
+                for (ordinal, (slot, param)) in slots.iter().zip(&method.params).enumerate() {
+                    if !constraints.contains(&None) {
+                        break;
+                    }
+                    if slot.is_some() || self.has_omitted_default(function, ordinal, param.ty) {
+                        continue;
+                    }
+                    let expected = self.partially_inferred_formal(
+                        &inference,
+                        ordinal,
+                        param.ty,
+                        &constraints,
+                    )?;
+                    if !self.type_contains_param_ref(expected, callable)? {
+                        let parameter = dotty_core::MethodParam {
+                            ty: expected,
+                            ..*param
+                        };
+                        let witness = self.search_contextual_argument(
+                            &parameter,
+                            context,
+                            tree_index,
+                            info_journal,
+                        )?;
+                        inferred_witnesses.insert(ordinal, witness);
+                    } else if let Some(witness) = self.infer_omitted_witness(
+                        expected,
+                        &inference,
+                        &mut constraints,
+                        context,
+                        info_journal,
+                    )? {
+                        inferred_witnesses.insert(ordinal, witness);
+                    }
+                }
+            }
+            let type_arguments = self.finish_application_inference(&inference, constraints)?;
             let instantiated =
                 dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
                     .map_err(TyperError::PolyInstantiation)?;
@@ -967,7 +1017,7 @@ impl SourceTyper<'_> {
                     error => error,
                 })?;
             }
-            if copy_defaults.is_some() {
+            if copy_defaults.is_some() || named.is_some() {
                 let mut b = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
                 let targs = type_arguments
                     .iter()
@@ -997,7 +1047,10 @@ impl SourceTyper<'_> {
             });
         }
         let mut shared = Vec::new();
-        let defaults = if argument_trees.len() == method.params.len() {
+        let partial_using = application_kind == ApplyKind::Using
+            && !argument_trees.is_empty()
+            && argument_trees.len() < method.params.len();
+        let defaults = if argument_trees.len() == method.params.len() || partial_using {
             Vec::new()
         } else if argument_trees.len() < method.params.len()
             && method.kind == MethodKind::Plain
@@ -1055,15 +1108,49 @@ impl SourceTyper<'_> {
                 ..
             }) if self.is_any_ref_identity_symbol(*symbol)
         );
-        for (argument_index, (argument_tree, parameter)) in
-            argument_trees.iter().zip(&method.params).enumerate()
-        {
-            let expected_type = match self.store.types.try_get(parameter.ty) {
+        let count = if partial_using {
+            method.params.len()
+        } else {
+            argument_trees.len()
+        };
+        for (argument_index, parameter) in method.params.iter().take(count).enumerate() {
+            let formal_ty = if method.kind == MethodKind::Plain {
+                parameter.ty
+            } else {
+                self.contextual_parameter_type(callable, parameter.ty, &arguments, tree_index)?
+            };
+            let slot = named.as_ref().and_then(|s| s[argument_index].as_ref());
+            let (written, argument_tree) = match slot {
+                Some(a) => (a.written, &a.value),
+                None if named.is_some() || argument_index >= argument_trees.len() => {
+                    if let Some(witness) = inferred_witnesses.remove(&argument_index) {
+                        arguments.push(witness);
+                        continue;
+                    }
+                    let parameter = dotty_core::MethodParam {
+                        ty: formal_ty,
+                        ..*parameter
+                    };
+                    arguments.push(self.omitted_using_argument(
+                        &mut function,
+                        argument_index,
+                        &parameter,
+                        context,
+                        tree_index,
+                        position,
+                        &mut shared,
+                        info_journal,
+                    )?);
+                    continue;
+                }
+                None => (argument_index, &argument_trees[argument_index]),
+            };
+            let expected_type = match self.store.types.try_get(formal_ty) {
                 Some(Type::ByName { result }) => *result,
-                _ => parameter.ty,
+                _ => formal_ty,
             };
             let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
-                let typed_argument = typed_arguments[argument_index];
+                let typed_argument = typed_arguments[written];
                 debug_assert_eq!(
                     self.typed_arena.get(typed_argument.typed).ty,
                     typed_argument.own_type
@@ -1161,7 +1248,7 @@ impl SourceTyper<'_> {
                                 self.store,
                                 self.source,
                                 tree_index,
-                                argument_index,
+                                written,
                                 actual,
                                 expected_type,
                             )
@@ -1177,6 +1264,9 @@ impl SourceTyper<'_> {
                         error: Box::new(error),
                     });
                 }
+            }
+            if *argument_tree != argument_trees[written] {
+                self.record_typed_child(argument_trees[written], argument, new_mappings)?;
             }
             arguments.push(argument);
         }
@@ -1195,7 +1285,7 @@ impl SourceTyper<'_> {
             ));
         }
         if method.kind != MethodKind::Plain {
-            return self.finish_contextual_call(
+            let call = self.finish_contextual_call(
                 function,
                 callable,
                 method.result,
@@ -1203,7 +1293,26 @@ impl SourceTyper<'_> {
                 application_kind,
                 position,
                 tree_index,
-            );
+            )?;
+            // Compute dependent result paths from the original operands before
+            // introducing temporaries solely for evaluation order.
+            if let Some(slots) = &named
+                && slots
+                    .iter()
+                    .enumerate()
+                    .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
+            {
+                self.order_named_operands(
+                    call,
+                    slots,
+                    &method,
+                    &mut shared,
+                    context,
+                    tree_index,
+                    info_journal,
+                )?;
+            }
+            return Ok(self.bind_default_operands(shared, call, position));
         }
         let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
             function,

@@ -133,7 +133,11 @@ same JVM unit. Unit validation checks the direct parent and its public
 no-argument constructor before emission.
 
 For `class Derived(start: Int) extends Base(start)`, keep one
-`jvm_class_plan::ClassHeaderBindings` per session. Use `dotty::try_complete_class_header` for each
+`dotty::ClassHeaderBindings` per session. With named classes, use
+`NamedClassSources::complete_constructor_signature` and
+`NamedClassSources::try_complete_class_header_reported`. The JVM planner borrows
+the bindings collected by the frontend directly. The lower-level
+`dotty::try_complete_class_header` is also available for each
 attempt, passing the class symbol, its source AST and naming index, the store,
 definitions and packages, the mutable session arena and bindings, and a predicate
 that identifies dependencies the client can schedule. On `Complete`, the function

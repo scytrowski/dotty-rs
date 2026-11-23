@@ -287,6 +287,35 @@ impl fmt::Display for TypeRebindError {
     }
 }
 
+/// Copies binders in a semantic type graph so another declaration can own
+/// an independent signature. References to copied binders follow their new
+/// identities. Unchanged non-binder types can retain their original IDs.
+/// The root and all referenced IDs must belong to the supplied store.
+/// Traversal errors, including excessive depth, roll back the entire copy.
+///
+/// ```
+/// use dotty_core::{Definitions, SemanticStore, types::{MethodKind, MethodType, Type, freshen_type_binders}};
+/// let mut store = SemanticStore::default();
+/// let result = Definitions::bootstrap(&mut store).int;
+/// let original = store.types.alloc(Type::Method(MethodType {
+///     params: vec![], kind: MethodKind::Plain, result,
+/// }));
+/// let copy = freshen_type_binders(&mut store, original).unwrap();
+/// assert_ne!(original, copy);
+/// assert_eq!(store.types.get(original), store.types.get(copy));
+/// ```
+pub fn freshen_type_binders(
+    store: &mut SemanticStore,
+    root: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    let checkpoint = store.checkpoint();
+    let result = Rebinder::new(store).ty(root);
+    if result.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    result
+}
+
 /// Replaces references to exact semantic symbols throughout a type graph.
 ///
 /// Only symbol-designated `TypeRef` and `TermRef` nodes are eligible. Names
@@ -366,7 +395,54 @@ pub fn instantiate_method_result(
     if method.params.len() != paths.len() {
         return Err(TypeRebindError::InvalidMethodApplication { source });
     }
-    let result = method.result;
+    instantiate_method_component(store, source, method.result, paths)
+}
+
+/// Returns the type of the parameter immediately after the supplied argument
+/// prefix. Position and binder identity determine which references to replace.
+/// Each entry in `paths` is the stable type of the corresponding earlier
+/// argument, or `None` if it has no stable path. Only referenced entries need
+/// a path. All IDs belong to the same store. An exhausted clause, invalid
+/// graph, or unavailable required path returns an error and rolls back the copy.
+///
+/// ```
+/// use dotty_core::{Definitions, SemanticStore, TermName};
+/// use dotty_core::types::{instantiate_next_method_parameter, MethodKind, MethodParam, MethodType, Type};
+/// let mut store = SemanticStore::new();
+/// let defs = Definitions::bootstrap(&mut store);
+/// let slot = store.types.reserve();
+/// let dependency = store.types.alloc(Type::ParamRef { binder: slot.id(), index: 0 });
+/// let mut parameter = |name, ty| MethodParam {
+///     name: TermName::new(store.names.intern(name)), ty, erased: false, varargs: false,
+/// };
+/// let method = store.types.fill(slot, Type::Method(MethodType {
+///     params: vec![parameter("family", defs.any_type), parameter("item", dependency)],
+///     kind: MethodKind::Contextual, result: defs.int,
+/// }));
+/// // Model a caller whose first argument is a stable singleton.
+/// let path = store.types.alloc(Type::ThisType { class: defs.object_class });
+/// assert_eq!(instantiate_next_method_parameter(&mut store, method, &[Some(path)]), Ok(path));
+/// ```
+pub fn instantiate_next_method_parameter(
+    store: &mut SemanticStore,
+    source: TypeId,
+    paths: &[Option<TypeId>],
+) -> Result<TypeId, TypeRebindError> {
+    let Some(Type::Method(method)) = store.types.try_get(source) else {
+        return Err(TypeRebindError::InvalidMethodApplication { source });
+    };
+    let Some(param) = method.params.get(paths.len()) else {
+        return Err(TypeRebindError::InvalidMethodApplication { source });
+    };
+    instantiate_method_component(store, source, param.ty, paths)
+}
+
+fn instantiate_method_component(
+    store: &mut SemanticStore,
+    source: TypeId,
+    component: TypeId,
+    paths: &[Option<TypeId>],
+) -> Result<TypeId, TypeRebindError> {
     for &path in paths.iter().flatten() {
         if !store.types.contains(path) {
             return Err(TypeRebindError::InvalidType { id: path });
@@ -378,7 +454,7 @@ pub fn instantiate_method_result(
     let checkpoint = store.checkpoint();
     let mut rebinder = Rebinder::new(store);
     rebinder.method_arguments = Some((source, paths.to_vec()));
-    let result = rebinder.ty(result);
+    let result = rebinder.ty(component);
     if result.is_err() {
         store.rollback_to(checkpoint);
     }
@@ -3046,6 +3122,23 @@ mod tests {
     }
 
     #[test]
+    fn freshening_an_incomplete_signature_rolls_back_the_new_binder() {
+        let mut store = SemanticStore::new();
+        let unfilled = store.types.reserve().id();
+        let method = store.types.alloc(Type::Method(MethodType {
+            params: vec![],
+            kind: MethodKind::Contextual,
+            result: unfilled,
+        }));
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            freshen_type_binders(&mut store, method),
+            Err(TypeRebindError::UnfilledType { id: unfilled })
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+    }
+
+    #[test]
     fn a_failure_deep_in_the_graph_rolls_back_the_binder_and_every_copy() {
         let mut f = Fixture::new();
         let x = SymbolId::new(80);
@@ -3093,6 +3186,44 @@ mod tests {
             Type::Recursive { parent } => *parent,
             other => panic!("not recursive: {other:?}"),
         }
+    }
+
+    #[test]
+    fn instantiate_next_parameter_uses_only_paths_from_this_clause_in_order() {
+        let mut f = Fixture::new();
+        let a = SymbolId::new(30);
+        let b = SymbolId::new(31);
+        let leaf = f.leaf;
+        let a_ref = term_ref_to(&mut f, a);
+        let dependent = f.applied(&[a_ref]);
+        let params = [
+            method_param(&mut f, a, "a", leaf),
+            method_param(&mut f, b, "b", dependent),
+        ];
+        let binder =
+            method_type_from_symbols(&mut f.store, &params, leaf, MethodKind::Contextual).unwrap();
+        let original = get_method(&f, binder).params[1].ty;
+        assert_eq!(
+            instantiate_next_method_parameter(&mut f.store, binder, &[]),
+            Ok(leaf)
+        );
+        for id in [40, 41] {
+            let path = term_ref_to(&mut f, SymbolId::new(id));
+            let ty =
+                instantiate_next_method_parameter(&mut f.store, binder, &[Some(path)]).unwrap();
+            assert!(matches!(f.store.types.get(ty),Type::Applied{args,..} if args == &[path]));
+        }
+        let checkpoint = f.store.checkpoint();
+        assert_eq!(
+            instantiate_next_method_parameter(&mut f.store, binder, &[None]),
+            Err(TypeRebindError::MissingMethodArgumentPath { binder, index: 0 })
+        );
+        assert_eq!(
+            instantiate_next_method_parameter(&mut f.store, binder, &[None, None]),
+            Err(TypeRebindError::InvalidMethodApplication { source: binder })
+        );
+        assert_eq!(f.store.checkpoint(), checkpoint);
+        assert_eq!(get_method(&f, binder).params[1].ty, original);
     }
 
     #[test]

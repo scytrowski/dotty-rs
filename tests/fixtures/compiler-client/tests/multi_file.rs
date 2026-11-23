@@ -13,21 +13,19 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use dotty::ClassHeaderBindings;
+use dotty::NamedClassSource as NamedUnit;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{
-    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
-};
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
-use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
+use dotty::source_declarations::{Declaration, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{DetachedSource, NamedClassSources, SourceDiagnostic, SyntaxDiagnostic};
-use dotty::{NameSourceError, NamedClassSource as NamedUnit};
+use dotty::{DetachedSource, NamedClassSources, PreparationDiagnostic, SyntaxDiagnostic};
 
 trait FixtureMethods {
     fn methods(&self) -> impl Iterator<Item = Declaration> + '_;
@@ -71,35 +69,6 @@ impl FixtureMethods for NamedUnit {
             definitions,
             packages,
         )
-    }
-}
-
-#[derive(Debug)]
-enum FrontendDiagnostic {
-    Syntax(SyntaxDiagnostic),
-    Naming(NamerDiagnostic),
-    Structural(NamerError),
-    Declaration(DeclarationError, Option<dotty::core::SourceSpan>),
-}
-
-impl FrontendDiagnostic {
-    fn render(&self) -> SourceDiagnostic {
-        match self {
-            Self::Syntax(diagnostic) => diagnostic.render(),
-            Self::Naming(diagnostic) => SourceDiagnostic::from_namer(diagnostic),
-            Self::Structural(error) => SourceDiagnostic {
-                code: None,
-                severity: dotty::core::DiagnosticSeverity::Error,
-                message: error.to_string(),
-                location: None,
-            },
-            Self::Declaration(error, location) => SourceDiagnostic {
-                code: None,
-                severity: dotty::core::DiagnosticSeverity::Error,
-                message: error.to_string(),
-                location: *location,
-            },
-        }
     }
 }
 
@@ -179,40 +148,16 @@ fn name_units_with_diagnostics(
     parsed: Vec<DetachedSource>,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> (Vec<NamedUnit>, Vec<FrontendDiagnostic>) {
+) -> (Vec<NamedUnit>, Vec<PreparationDiagnostic>) {
     let mut units = Vec::new();
     let mut reports = Vec::new();
     for (&(_, name, _), detached) in files.iter().zip(parsed) {
-        match detached.bind(&mut store.names).name(name, store, packages) {
-            Ok(named) => {
-                reports.extend(
-                    named
-                        .diagnostics()
-                        .iter()
-                        .cloned()
-                        .map(FrontendDiagnostic::Naming),
-                );
-                match named.into_classes(store) {
-                    Ok(unit) => units.push(unit),
-                    Err(failure) => reports.push(FrontendDiagnostic::Declaration(
-                        failure.error,
-                        failure.error.location(&failure.named.syntax().ast),
-                    )),
-                }
-            }
-            Err(NameSourceError::Syntax(recovered)) => reports.extend(
-                recovered
-                    .diagnostics
-                    .into_iter()
-                    .map(FrontendDiagnostic::Syntax),
-            ),
-            Err(NameSourceError::Rejected(issues)) => {
-                reports.extend(issues.into_iter().map(FrontendDiagnostic::Naming))
-            }
-            Err(NameSourceError::Namer { error, .. }) => {
-                reports.push(FrontendDiagnostic::Structural(error))
-            }
-        }
+        let (file, diagnostics) = detached
+            .bind(&mut store.names)
+            .prepare_classes(name, store, packages)
+            .into_parts();
+        units.extend(file);
+        reports.extend(diagnostics);
     }
     (units, reports)
 }
@@ -295,6 +240,95 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
 }
 
 #[test]
+fn projected_siblings_emit_and_the_scala_consumer_runs_in_both_input_orders() {
+    let model = (
+        SourceId::from_index(17),
+        "Model.scala",
+        "package demo\nclass A { def value(): Int = 40 }; trait T; class B { def value(): Int = 7 }",
+    );
+    let caller = (
+        SourceId::from_index(2),
+        "Consumer.scala",
+        "package demo\nclass Consumer { def first(a: A): Int = a.value(); def second(b: B): Int = b.value() }",
+    );
+    let broken = (
+        SourceId::from_index(43),
+        "Broken.scala",
+        "class Broken { val n: Int 1 }",
+    );
+    for files in [[model, caller, broken], [broken, caller, model]] {
+        for workers in [1, 2] {
+            let (artifacts, reports) = {
+                let mut store = SemanticStore::new();
+                let defs = Definitions::bootstrap(&mut store);
+                let mut packages = Packages::new();
+                let (units, reports) = name_units_with_diagnostics(
+                    &files,
+                    parsing::parse_files(&files, workers),
+                    &mut store,
+                    &mut packages,
+                );
+                let sources = NamedClassSources::new(&units, &store).unwrap();
+                let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+                let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
+                let plan = JvmCompilationUnit {
+                    classes: class_plans(&units, &bodies, &output, &store).unwrap(),
+                    store: &store,
+                    typed_ast: &output.arena,
+                };
+                let prepared = plan.prepare_emission(&defs).unwrap();
+                (emit_batch(&prepared, &plan.classes, 2).0, reports)
+            };
+            let mut names: Vec<_> = artifacts
+                .iter()
+                .map(GeneratedClass::internal_name)
+                .collect();
+            names.sort_unstable();
+            assert_eq!(names, ["demo/A", "demo/B", "demo/Consumer"]);
+            assert_eq!(
+                run_java_client("projected-siblings", "ProjectedClassClient", &artifacts)
+                    .lines()
+                    .collect::<Vec<_>>(),
+                ["40", "7"]
+            );
+            assert_eq!(reports.len(), 2);
+            let (omission, syntax) = if files[0].0 == model.0 {
+                (&reports[0], &reports[1])
+            } else {
+                (&reports[1], &reports[0])
+            };
+            assert!(
+                matches!(omission, PreparationDiagnostic::Declaration(report) if matches!(report.error, dotty::source_declarations::DeclarationError::Unsupported {source,..} if source == model.0))
+            );
+            assert!(matches!(
+                syntax,
+                PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(_))
+            ));
+            for (diagnostic, input, site, code) in [
+                (omission, model, "trait T", "declaration.unsupported"),
+                (
+                    syntax,
+                    broken,
+                    "1",
+                    "parser.declaration.expected_value_equals",
+                ),
+            ] {
+                assert_eq!(diagnostic.code(), Some(code));
+                let span = diagnostic.location().unwrap();
+                assert_eq!((diagnostic.source(), span.source()), (input.0, input.0));
+                assert_eq!(
+                    dotty::core::SourceText::new(input.2)
+                        .unwrap()
+                        .slice(span.span().range())
+                        .unwrap(),
+                    site
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
     let source = SourceId::from_index(7);
     let file = "A.scala";
@@ -324,7 +358,8 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
         let [report] = reports.as_slice() else {
             panic!("{reports:?}")
         };
-        let FrontendDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }) = report else {
+        let PreparationDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }) = report
+        else {
             panic!("expected a lexer issue: {report:?}");
         };
         assert_eq!(
@@ -355,51 +390,33 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
 // even when different files reuse the same input tree slots.
 #[derive(Debug, Default)]
 struct TypedHeaders {
+    ready: Vec<SymbolId>,
     arena: AstArena<Typed>,
     bindings: ClassHeaderBindings,
 }
 
 #[derive(Debug)]
 enum SignatureError {
-    Typing(TyperError),
-    Field(dotty::ClassFieldSignatureError),
+    Header(dotty::ClassHeaderError),
     Member(dotty::MemberSignatureError),
     Cycle(std::sync::Arc<dotty::SignatureCycle>),
 }
 
-impl From<TyperError> for SignatureError {
-    fn from(error: TyperError) -> Self {
-        Self::Typing(error)
+impl From<dotty::ClassHeaderError> for SignatureError {
+    fn from(error: dotty::ClassHeaderError) -> Self {
+        Self::Header(error)
     }
 }
 
-// Follow the provider immediately. The facade supplies the exact symbols to retry.
-fn follow_signature(
-    root: SymbolId,
-    phase: dotty::SignaturePhase,
-    first_dependency: Option<SymbolId>,
-    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, SignatureError>,
-) -> Result<(), SignatureError> {
-    let mut dependencies = dotty::SignatureDependencies::new(phase);
-    let mut ready = vec![root];
-    let mut initial = first_dependency.map(SignatureCompletion::BlockedOn);
-    while let Some(symbol) = ready.pop() {
-        let outcome = match initial.take() {
-            Some(observed) => observed,
-            None => attempt(symbol)?,
-        };
-        ready.extend(dependencies.record(symbol, outcome).into_iter().rev());
-        if let SignatureCompletion::BlockedOn(provider) = outcome {
-            if dependencies.waiting_on(provider).is_some()
-                && let Some((_, dotty::SignatureBlockage::CycleMember(cycle))) =
-                    dependencies.blockages([provider]).pop()
-            {
-                return Err(SignatureError::Cycle(cycle));
-            }
-            ready.push(provider);
-        }
+fn provider_cycle(
+    dependencies: &dotty::SignatureDependencies,
+    provider: SymbolId,
+) -> Option<std::sync::Arc<dotty::SignatureCycle>> {
+    dependencies.waiting_on(provider)?;
+    match dependencies.blockages([provider]).pop()? {
+        (_, dotty::SignatureBlockage::CycleMember(cycle)) => Some(cycle),
+        _ => None,
     }
-    Ok(())
 }
 
 fn complete_headers(
@@ -409,36 +426,37 @@ fn complete_headers(
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    // Parent applications need the declaring file's constructor signature.
-    for unit in sources.files() {
-        let mut typer = unit.typer(store, definitions, packages);
-        for class in unit.classes() {
-            typer.complete_symbol(class.constructor)?;
-        }
-    }
     let mut headers = TypedHeaders::default();
+    let mut phase = dotty::ClassHeaderPhase::try_prepare(
+        sources,
+        store,
+        definitions,
+        packages,
+        &mut headers.arena,
+        &mut headers.bindings,
+    )
+    .map_err(|failure| SignatureError::Header(failure.error))?;
     for (_, root) in sources.classes() {
-        if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
+        if phase.is_ready(root.symbol) {
             continue;
         }
-        follow_signature(
-            root.symbol,
-            dotty::SignaturePhase::Headers,
-            None,
-            |symbol| {
-                let completion = sources.try_complete_class_header(
-                    symbol,
-                    store,
-                    definitions,
-                    packages,
-                    &mut headers.arena,
-                    &mut headers.bindings,
-                )?;
-                observe(symbol, completion);
-                Ok(completion)
-            },
-        )?;
+        let mut ready = vec![root.symbol];
+        while let Some(symbol) = ready.pop() {
+            let Ok(attempt) = phase.attempt(symbol) else {
+                let failure = phase.into_failure(symbol).expect("rejected header");
+                return Err(SignatureError::Header(failure.error));
+            };
+            observe(symbol, attempt.completion);
+            ready.extend(attempt.retry.into_iter().rev());
+            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
+                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                    return Err(SignatureError::Cycle(cycle));
+                }
+                ready.push(provider);
+            }
+        }
     }
+    headers.ready = phase.finish().ready;
     Ok(headers)
 }
 
@@ -479,68 +497,52 @@ fn complete_methods_in_order(
 ) -> Result<TypedHeaders, SignatureError> {
     let headers = complete_headers(sources, store, definitions, packages, &mut observe)?;
 
-    for (unit, class) in sources.classes() {
-        while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
-            dotty::try_complete_class_field_signatures(
-                class.symbol,
-                unit.ast(),
-                unit.index(),
-                store,
-                definitions,
-                packages,
-                |dep| sources.declarations().member(dep).is_some(),
-            )
-            .map_err(SignatureError::Field)?
-        {
-            observe(field, SignatureCompletion::BlockedOn(dependency));
-            complete_member_path(
-                field,
-                Some(dependency),
-                sources,
-                store,
-                definitions,
-                packages,
-                &mut observe,
-            )?;
-        }
-    }
-    for symbol in roots {
-        if !matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
-            complete_member_path(
-                symbol,
-                None,
-                sources,
-                store,
-                definitions,
-                packages,
-                &mut observe,
-            )?;
-        }
-    }
+    let selection = sources
+        .member_signatures(headers.ready.iter().copied(), store)
+        .expect("headers completed for these indexed classes");
+    complete_member_paths(
+        &selection,
+        selection.field_roots().iter().copied().chain(roots),
+        store,
+        definitions,
+        packages,
+        &mut observe,
+    )?;
     Ok(headers)
 }
 
-fn complete_member_path(
-    root: SymbolId,
-    first_dependency: Option<SymbolId>,
-    sources: &NamedClassSources,
+fn complete_member_paths(
+    selection: &dotty::MemberSignatureSelection<'_, '_>,
+    roots: impl IntoIterator<Item = SymbolId>,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<(), SignatureError> {
-    follow_signature(
-        root,
-        dotty::SignaturePhase::Members,
-        first_dependency,
-        |symbol| {
-            let completion = sources
-                .try_complete_member_signature(symbol, store, definitions, packages)
-                .map_err(SignatureError::Member)?;
-            observe(symbol, completion);
-            Ok(completion)
-        },
-    )
+    let mut phase = dotty::MemberSignaturePhase::new(selection, store, definitions, packages);
+    let mut ready = Vec::new();
+    for root in roots {
+        if phase.is_ready(root) {
+            continue;
+        }
+        ready.push(root);
+        while let Some(symbol) = ready.pop() {
+            let Ok(attempt) = phase.attempt(symbol) else {
+                return Err(SignatureError::Member(
+                    phase.into_failure(symbol).expect("rejected member"),
+                ));
+            };
+            observe(symbol, attempt.completion);
+            ready.extend(attempt.retry.into_iter().rev());
+            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
+                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                    return Err(SignatureError::Cycle(cycle));
+                }
+                ready.push(provider);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn with_plan<R>(
@@ -1273,14 +1275,16 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
         let lookup = |source| sources.file(source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        let selection = sources
+            .member_signatures(headers.ready.iter().copied(), &store)
+            .unwrap();
         let mut blocked = Vec::new();
         let mut reports = Vec::new();
         for unit in &units {
             for member in unit.method_symbols() {
-                let result = complete_member_path(
-                    member,
-                    None,
-                    &sources,
+                let result = complete_member_paths(
+                    &selection,
+                    [member],
                     &mut store,
                     defs,
                     &packages,

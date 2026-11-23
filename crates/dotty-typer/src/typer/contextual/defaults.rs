@@ -10,9 +10,10 @@ struct DefaultCall {
 
 impl SourceTyper<'_> {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn contextual_call_arguments(
+    pub(in crate::typer) fn contextual_call_arguments(
         &mut self,
         function: &mut TreeId<Typed>,
+        binder: TypeId,
         method: &MethodType,
         context: ExpressionContext,
         tree_index: u32,
@@ -23,6 +24,10 @@ impl SourceTyper<'_> {
         let mut args = Vec::with_capacity(method.params.len());
         let mut kind = ApplyKind::Regular;
         for (ordinal, param) in method.params.iter().enumerate() {
+            let param = dotty_core::MethodParam {
+                ty: self.contextual_parameter_type(binder, param.ty, &args, tree_index)?,
+                ..*param
+            };
             let default = self.default_call(*function, ordinal, param.ty);
             // A missing candidate may have opened a recursive dictionary before
             // reaching a missing dependency. Its symbols follow the probe's lifetime.
@@ -34,9 +39,9 @@ impl SourceTyper<'_> {
                     .as_deref_mut()
                 {
                     Some(h) => {
-                        typer.contextual_parameter_value(param, context, tree_index, h, nested)
+                        typer.contextual_parameter_value(&param, context, tree_index, h, nested)
                     }
-                    None => typer.search_contextual_argument(param, context, tree_index, nested),
+                    None => typer.search_contextual_argument(&param, context, tree_index, nested),
                 };
             let Some(default) = default else {
                 args.push(search(self, journal)?);
@@ -57,6 +62,41 @@ impl SourceTyper<'_> {
             }
         }
         Ok((args, kind))
+    }
+
+    /// Explicit using prefers the selected default, even when a given would succeed.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::typer) fn omitted_using_argument(
+        &mut self,
+        function: &mut TreeId<Typed>,
+        ordinal: usize,
+        param: &dotty_core::MethodParam,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        shared: &mut Vec<TreeId<Typed>>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(default) = self.default_call(*function, ordinal, param.ty) else {
+            return self.search_contextual_argument(param, context, tree_index, journal);
+        };
+        let getter =
+            self.apply_default_getter(default, function, shared, context, tree_index, journal)?;
+        if let Some(span) = position
+            && self
+                .semantic_attempt(None, |t, j| {
+                    t.search_contextual_argument(param, context, tree_index, j)
+                        .map(|_| ())
+                })
+                .is_ok()
+        {
+            self.diagnostics.push(TyperDiagnostic::with_issue(
+                dotty_core::DiagnosticSeverity::Warning,
+                span.span().range(),
+                TyperWarning::DefaultShadowsGiven { name: param.name },
+            ));
+        }
+        Ok(getter)
     }
 
     /// Fill omitted trailing arguments using the selected getter and its earlier clauses.
@@ -100,6 +140,15 @@ impl SourceTyper<'_> {
         let result = self.typed_arena.get(expr).ty;
         TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .block(shared, expr, result, position)
+    }
+
+    pub(in crate::typer) fn has_omitted_default(
+        &self,
+        function: TreeId<Typed>,
+        ordinal: usize,
+        expected: TypeId,
+    ) -> bool {
+        self.default_call(function, ordinal, expected).is_some()
     }
 
     fn default_call(
@@ -255,8 +304,7 @@ impl SourceTyper<'_> {
         let mut target = call.root;
         let mut getter = match original.kind {
             TreeKind::Select(sel) => {
-                let receiver =
-                    self.share_default_operand(sel.qualifier, stats, context, journal)?;
+                let receiver = self.share_strict_operand(sel.qualifier, stats, context, journal)?;
                 let prefix = self.typed_arena.get(receiver).ty;
                 let getter_type = self.store.types.alloc(Type::term_ref(prefix, call.getter));
                 if receiver != sel.qualifier {
@@ -345,7 +393,7 @@ impl SourceTyper<'_> {
                             if matches!(self.store.types.get(param.ty), Type::ByName { .. }) {
                                 arg
                             } else {
-                                self.share_default_operand(arg, stats, context, journal)?
+                                self.share_strict_operand(arg, stats, context, journal)?
                             },
                         );
                     }
@@ -355,9 +403,9 @@ impl SourceTyper<'_> {
                             .iter()
                             .zip(&app.args)
                             .map(|(&copy, &arg)| (copy == arg).then_some(arg));
-                        self.instantiate_contextual_result(
+                        self.instantiate_contextual_component(
                             signature,
-                            previous.result,
+                            MethodComponent::Result(previous.result),
                             paths,
                             tree_index,
                         )?
@@ -437,7 +485,7 @@ impl SourceTyper<'_> {
         Ok(true)
     }
 
-    fn share_default_operand(
+    pub(in crate::typer) fn share_strict_operand(
         &mut self,
         tree: TreeId<Typed>,
         stats: &mut Vec<TreeId<Typed>>,
@@ -465,7 +513,13 @@ impl SourceTyper<'_> {
             }
         }
         let position = node.position;
-        let value_type = self.widen_expression_type_journaled(ty, journal, 0)?;
+        // A temporary for a stable field aliases that very path. Later formals
+        // may refer to its member types even when the field access must be lifted.
+        let value_type = if self.is_stable_selection_prefix(ty)? {
+            ty
+        } else {
+            self.widen_expression_type_journaled(ty, journal, 0)?
+        };
         let name = dotty_core::TermName::new(self.store.names.intern("defaultArg$"));
         let symbol = self.store.symbols.alloc(dotty_core::Symbol {
             name: *name.as_name(),

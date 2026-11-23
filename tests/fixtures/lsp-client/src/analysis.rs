@@ -6,14 +6,13 @@ use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
     SymbolId, TextRange, Typed,
 };
-use dotty::jvm_class_plan::ClassHeaderBindings;
-use dotty::namer::{NamerDiagnostic, NamerError};
-use dotty::source_declarations::{ClassMember, DeclarationError};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic};
+use dotty::source_declarations::ClassMember;
+use dotty::typer::TyperDiagnostic;
 use dotty::{
-    ClassBodyError, MemberSignatureError, NameSourceError, NamedClassSource, NamedClassSources,
-    NamedClassSourcesError, ReportedTyperError, SignatureBlockage, SignatureCycle,
-    SignatureDependencies, SignaturePhase, SourceDeclarationIndex, SyntaxDiagnostic,
+    ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, MemberSignatureError,
+    MemberSignatureFailure, MemberSignaturePhase, NamedClassSource, NamedClassSources,
+    NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError, SignatureBlockage,
+    SignatureCycle, SourceDeclarationIndex,
 };
 
 #[derive(Clone)]
@@ -26,16 +25,12 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Typing(ReportedTyperError),
+    Header(ClassHeaderError),
     MemberSignature(MemberSignatureError),
     Body(ClassBodyError),
     Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
-    Naming(NamerDiagnostic),
-    NamerFailure(NamerError),
-    Declaration {
-        error: DeclarationError,
-        location: Option<SourceSpan>,
-    },
+    Preparation(PreparationDiagnostic),
     Cycle {
         cycle: Arc<SignatureCycle>,
         location: Option<SourceSpan>,
@@ -58,6 +53,13 @@ fn typing_problem(owner: SourceId, report: ReportedTyperError) -> (SourceId, Pro
     )
 }
 
+fn header_problem(owner: SourceId, error: ClassHeaderError) -> (SourceId, Problem) {
+    match error {
+        ClassHeaderError::Typing(report) => typing_problem(owner, *report),
+        invalid @ ClassHeaderError::InvalidClass(_) => (owner, Problem::Header(invalid)),
+    }
+}
+
 pub struct Link {
     pub origin: TextRange,
     pub uri: String,
@@ -67,7 +69,6 @@ pub struct Link {
 
 #[derive(Default)]
 pub struct FileResult {
-    pub syntax_diagnostics: Vec<SyntaxDiagnostic>,
     pub problems: Vec<Problem>,
     pub links: Vec<Link>,
 }
@@ -84,67 +85,23 @@ fn name(
         .map_err(|error| result.problems.push(Problem::Scan(error)))
         .ok()?
         .bind(&mut store.names);
-    let named = match parsed.name(filename, store, packages) {
-        Ok(named) => named,
-        Err(NameSourceError::Syntax(recovered)) => {
-            result.syntax_diagnostics = recovered.diagnostics;
-            return None;
-        }
-        Err(NameSourceError::Rejected(issues)) => {
-            result
-                .problems
-                .extend(issues.into_iter().map(Problem::Naming));
-            return None;
-        }
-        Err(NameSourceError::Namer { error, .. }) => {
-            result.problems.push(Problem::NamerFailure(error));
-            return None;
-        }
-    };
+    let (file, diagnostics) = parsed
+        .prepare_classes(filename, store, packages)
+        .into_parts();
     result
         .problems
-        .extend(named.diagnostics().iter().cloned().map(Problem::Naming));
-    named
-        .into_classes(store)
-        .map_err(|failure| {
-            result.problems.push(Problem::Declaration {
-                error: failure.error,
-                location: failure.error.location(&failure.named.syntax().ast),
-            });
-        })
-        .ok()
-}
-
-// Seed every eligible declaration once. Subsequent attempts come from completed providers.
-fn complete<E>(
-    dependencies: &mut SignatureDependencies,
-    roots: &[SymbolId],
-    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, E>,
-    mut report: impl FnMut(SymbolId, E),
-) {
-    let mut ready: VecDeque<_> = roots.iter().copied().collect();
-    while let Some(symbol) = ready.pop_front() {
-        match attempt(symbol) {
-            Ok(outcome) => {
-                ready.extend(dependencies.record(symbol, outcome));
-            }
-            Err(error) => {
-                dependencies.record_failure(symbol);
-                report(symbol, error);
-            }
-        }
-    }
+        .extend(diagnostics.into_iter().map(Problem::Preparation));
+    file
 }
 
 // Report one marker at each participant. A downstream waiter already has a provider report.
 fn report_blockages(
-    dependencies: &SignatureDependencies,
-    roots: &[SymbolId],
+    blockages: Vec<(SymbolId, SignatureBlockage)>,
     declarations: &SourceDeclarationIndex,
     store: &SemanticStore,
     results: &mut HashMap<SourceId, FileResult>,
 ) {
-    for (symbol, cause) in dependencies.blockages(roots.iter().copied()) {
+    for (symbol, cause) in blockages {
         match cause {
             SignatureBlockage::CycleMember(cycle) if cycle.path()[0] == symbol => {
                 for (member, location) in cycle.declarations(store) {
@@ -226,101 +183,65 @@ fn analyze_sources(
 ) {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
-    let mut unavailable = HashSet::new();
-    let mut classes = Vec::new();
-    let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
+    let mut phase =
+        ClassHeaderPhase::prepare(sources, store, defs, packages, &mut arena, &mut bindings);
+    let mut queue: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
+    while let Some(symbol) = queue.pop_front() {
+        if let Ok(attempt) = phase.attempt(symbol) {
+            queue.extend(attempt.retry);
+        }
+    }
+    let headers = phase.finish();
+    for failure in headers.failures {
+        let owner = failure.source.expect("attempted an indexed class");
+        let (source, problem) = header_problem(owner, failure.error);
+        results.get_mut(&source).unwrap().problems.push(problem);
+    }
+    report_blockages(headers.blockages, sources.declarations(), store, results);
     let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
-    for u in sources.files() {
-        let source = u.source();
-        let mut typer = SourceTyper::new(u.ast(), u.source(), u.index(), store, defs, packages);
-        for c in u.classes() {
-            match typer.complete_symbol(c.constructor) {
-                Ok(_) => classes.push(c.symbol),
-                Err(e) => {
-                    headers.record_failure(c.symbol);
-                    unavailable.insert(c.symbol);
-                    let (file, problem) = typing_problem(
-                        source,
-                        ReportedTyperError::from_class(e, c.symbol, Some(c.constructor), ast_for),
-                    );
-                    results.get_mut(&file).unwrap().problems.push(problem);
-                }
-            }
+    let selection = sources
+        .member_signatures(headers.ready.iter().copied(), store)
+        .expect("classes from this session's header report");
+    let mut signatures = MemberSignaturePhase::new(&selection, store, defs, packages);
+    queue.extend(selection.members().iter().copied());
+    while let Some(member) = queue.pop_front() {
+        if let Ok(attempt) = signatures.attempt(member) {
+            queue.extend(attempt.retry);
         }
     }
-    complete(
-        &mut headers,
-        &classes,
-        |symbol| {
-            sources.try_complete_class_header(
-                symbol,
-                store,
-                defs,
-                packages,
-                &mut arena,
-                &mut bindings,
-            )
-        },
-        |symbol, error| {
-            let source = sources.declarations().get(symbol).unwrap().source;
-            unavailable.insert(symbol);
-            let (file, problem) = typing_problem(
-                source,
-                ReportedTyperError::from_class(error, symbol, None, ast_for),
-            );
-            results.get_mut(&file).unwrap().problems.push(problem);
-        },
-    );
-    unavailable.extend(
-        classes
-            .iter()
-            .copied()
-            .filter(|&s| headers.waiting_on(s).is_some()),
-    );
-    report_blockages(&headers, &classes, sources.declarations(), store, results);
-    let mut members = Vec::new();
-    for (_, class) in sources.classes() {
-        if unavailable.contains(&class.symbol) {
-            continue;
-        }
-        for member in &class.members {
-            let (ClassMember::Field(d) | ClassMember::Method(d)) = member;
-            members.push(d.symbol);
-        }
-    }
+    let signatures = signatures.finish();
     let mut signature_calls = HashSet::new();
-    let mut signatures = SignatureDependencies::new(SignaturePhase::Members);
-    complete(
-        &mut signatures,
-        &members,
-        |s| sources.try_complete_member_signature(s, store, defs, packages),
-        |s, error| {
-            let source = sources.declarations().get(s).unwrap().source;
-            let (file, problem) = match error.into_reported_error(ast_for) {
-                Ok(report) => {
-                    if let Some(key) = report.call_identity(&defs) {
-                        signature_calls.insert(key);
-                    }
-                    typing_problem(source, report)
+    for failure in signatures.failures {
+        let (file, problem) = match failure {
+            MemberSignatureFailure::Typing {
+                declaration,
+                report,
+            } => {
+                if let Some(key) = report.call_identity(&defs) {
+                    signature_calls.insert(key);
                 }
-                Err(invalid) => (source, Problem::MemberSignature(invalid)),
-            };
-            results.get_mut(&file).unwrap().problems.push(problem);
-        },
-    );
-    report_blockages(
-        &signatures,
-        &members,
-        sources.declarations(),
-        store,
-        results,
-    );
+                typing_problem(declaration.source, *report)
+            }
+            MemberSignatureFailure::InvalidMember(id) => {
+                let owner = sources
+                    .declarations()
+                    .get(id)
+                    .expect("selected member")
+                    .source;
+                (
+                    owner,
+                    Problem::MemberSignature(MemberSignatureError::InvalidMember(id)),
+                )
+            }
+        };
+        results.get_mut(&file).unwrap().problems.push(problem);
+    }
+    let blocked_members: HashSet<_> = signatures.blockages.iter().map(|(id, _)| *id).collect();
+    report_blockages(signatures.blockages, sources.declarations(), store, results);
     let mut bodies = HashMap::new();
-    for (file, c) in sources.classes() {
+    for symbol in headers.ready {
+        let (file, c) = sources.class(symbol).unwrap();
         let source = file.source();
-        if unavailable.contains(&c.symbol) {
-            continue;
-        }
         let (body, report) = sources
             .check_class_body(c.symbol, store, defs, packages, &mut arena, NoResolver)
             .into_parts();
@@ -336,7 +257,7 @@ fn analyze_sources(
                 member: ClassMember::Method(d) | ClassMember::Field(d),
                 ..
             } = &error
-                && signatures.waiting_on(d.symbol).is_some()
+                && blocked_members.contains(&d.symbol)
             {
                 continue;
             }
@@ -365,10 +286,9 @@ fn analyze_sources(
                     .get_mut(&source)
                     .unwrap()
                     .problems
-                    .push(Problem::Declaration {
-                        error,
-                        location: error.location(u.ast()),
-                    });
+                    .push(Problem::Preparation(PreparationDiagnostic::Declaration(
+                        error.diagnostic(u.ast()),
+                    )));
                 continue;
             }
         };
@@ -396,6 +316,7 @@ fn analyze_sources(
 mod tests {
     use super::*;
     use dotty::typer::TyperError;
+    use dotty::{SyntaxDiagnostic, source_declarations::DeclarationDiagnostic};
 
     #[test]
     fn naming_and_projection_rejections_remain_typed_until_publication() {
@@ -415,17 +336,19 @@ mod tests {
         })
         .collect();
         let results = analyze(&files);
-        let [Problem::Naming(d)] = results["A.scala"].problems.as_slice() else {
+        let [Problem::Preparation(PreparationDiagnostic::Naming(d))] =
+            results["A.scala"].problems.as_slice()
+        else {
             panic!("expected a namer diagnostic")
         };
         assert!(
             matches!(d.issue(),dotty::namer::NamerIssue::InvalidVisibilityQualifier {qualifier,..} if qualifier == "Missing")
         );
         let [
-            Problem::Declaration {
-                error: DeclarationError::Unsupported { source, .. },
+            Problem::Preparation(PreparationDiagnostic::Declaration(DeclarationDiagnostic {
+                error: dotty::source_declarations::DeclarationError::Unsupported { source, .. },
                 location: Some(span),
-            },
+            })),
         ] = results["T.scala"].problems.as_slice()
         else {
             panic!("expected a located projection failure")
@@ -518,9 +441,12 @@ mod tests {
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
         let [
-            SyntaxDiagnostic::Lexer { diagnostic, .. },
-            SyntaxDiagnostic::Parser(parser),
-        ] = files[uri].syntax_diagnostics.as_slice()
+            Problem::Preparation(PreparationDiagnostic::Syntax(SyntaxDiagnostic::Lexer {
+                diagnostic,
+                ..
+            })),
+            Problem::Preparation(PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(parser))),
+        ] = files[uri].problems.as_slice()
         else {
             panic!("expected both phases")
         };
@@ -534,6 +460,28 @@ mod tests {
             parser.issue(),
             ParseIssue::Declaration(DeclarationIssue::ExpectedValueEquals { .. })
         ));
+    }
+
+    #[test]
+    fn constructor_failure_keeps_an_independent_class_navigable() {
+        let text = "class Bad(x: Missing) { def only(): Int = 1; val broken = only(false) }; class Good { def get() = 7; def use() = get() }";
+        let uri = "Good.scala";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new(text.into()).unwrap()),
+        };
+        let results = analyze(&[(uri.to_owned(), doc)].into());
+        let file = &results[uri];
+        let [Problem::Typing(error)] = file.problems.as_slice() else {
+            panic!("expected only the Bad constructor error");
+        };
+        assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
+        let [link] = file.links.as_slice() else {
+            panic!("expected Good.use to resolve Good.get")
+        };
+        assert_eq!(link.uri, uri);
+        assert_eq!(link.origin.start() as usize, text.rfind("get").unwrap());
+        assert_eq!(link.name.start() as usize, text.find("get").unwrap());
     }
 
     #[test]

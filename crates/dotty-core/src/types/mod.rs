@@ -24,7 +24,8 @@ pub use method::{
 };
 pub use rebind::{
     InstantiatedPoly, InstantiatedTypeLambda, MethodParamSpec, TypeParamSpec, TypeRebindError,
-    close_over_this, instantiate_method_result, instantiate_poly, instantiate_type_lambda,
+    close_over_this, freshen_type_binders, instantiate_method_result,
+    instantiate_next_method_parameter, instantiate_poly, instantiate_type_lambda,
     method_type_from_symbols, poly_type_from_symbols, rebind_type_lambda, substitute_this_type,
     substitute_type_symbols, type_lambda_from_symbols,
 };

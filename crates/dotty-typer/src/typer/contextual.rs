@@ -15,6 +15,7 @@ mod exports;
 mod extension;
 pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
+mod open_goal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextualRef {
@@ -38,7 +39,7 @@ struct Provider {
 }
 
 #[derive(Default)]
-struct SearchHistory {
+pub(super) struct SearchHistory {
     active: Vec<(ContextualRef, TypeId, usize)>,
     dictionary: Dictionary,
     by_name_depth: usize,
@@ -108,6 +109,11 @@ impl AdaptationSearch {
 struct ContextualScope {
     scope: ScopeId,
     imports: Vec<(TreeId<Untyped>, SourceContextId)>,
+}
+
+enum MethodComponent {
+    Parameter(TypeId),
+    Result(TypeId),
 }
 
 impl SourceTyper<'_> {
@@ -289,6 +295,7 @@ impl SourceTyper<'_> {
             }
             let (arguments, application_kind) = self.contextual_call_arguments(
                 &mut function,
+                callable,
                 &method,
                 context,
                 tree_index,
@@ -373,9 +380,9 @@ impl SourceTyper<'_> {
                 .map_err(|_| deferred)?;
             arg_ty
         } else if self.type_contains_param_ref(result, binder)? {
-            self.instantiate_contextual_result(
+            self.instantiate_contextual_component(
                 binder,
-                result,
+                MethodComponent::Result(result),
                 args.iter().copied().map(Some),
                 tree_index,
             )?
@@ -388,12 +395,30 @@ impl SourceTyper<'_> {
         )
     }
 
-    /// An unavailable path matters only when the result actually refers to
-    /// that argument. The core rebinder checks this while substituting.
-    fn instantiate_contextual_result(
+    pub(super) fn contextual_parameter_type(
         &mut self,
         binder: TypeId,
-        result: TypeId,
+        formal: TypeId,
+        previous: &[TreeId<Typed>],
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        if !self.type_contains_param_ref(formal, binder)? {
+            return Ok(formal);
+        }
+        self.instantiate_contextual_component(
+            binder,
+            MethodComponent::Parameter(formal),
+            previous.iter().copied().map(Some),
+            tree_index,
+        )
+    }
+
+    /// An unavailable path matters only when the result actually refers to
+    /// that argument. The core rebinder checks this while substituting.
+    fn instantiate_contextual_component(
+        &mut self,
+        binder: TypeId,
+        component: MethodComponent,
         arguments: impl Iterator<Item = Option<TreeId<Typed>>>,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
@@ -408,22 +433,30 @@ impl SourceTyper<'_> {
             };
             paths.push(path);
         }
-        dotty_core::types::instantiate_method_result(self.store, binder, &paths).map_err(|error| {
-            match error {
-                dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
-                    TyperError::DependentMethodApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                        binder,
-                        result,
-                    }
-                }
-                error => TyperError::TypeRebinding {
+        let (result, instantiated) = match component {
+            MethodComponent::Parameter(ty) => (
+                ty,
+                dotty_core::types::instantiate_next_method_parameter(self.store, binder, &paths),
+            ),
+            MethodComponent::Result(ty) => (
+                ty,
+                dotty_core::types::instantiate_method_result(self.store, binder, &paths),
+            ),
+        };
+        instantiated.map_err(|error| match error {
+            dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
+                TyperError::DependentMethodApplicationDeferred {
                     source: self.source,
                     tree_index,
-                    error,
-                },
+                    binder,
+                    result,
+                }
             }
+            error => TyperError::TypeRebinding {
+                source: self.source,
+                tree_index,
+                error,
+            },
         })
     }
 
@@ -542,17 +575,10 @@ impl SourceTyper<'_> {
             }
         }
         let divergences = history.divergences;
-        for level in self.contextual_scopes(context, tree_index)? {
-            let refs = self.contextual_scope_refs(level, tree_index, journal)?;
-            if let Some(winner) =
-                self.choose_contextual_refs(refs, expected, context, tree_index, history, journal)?
-            {
-                return Ok(winner);
-            }
-        }
-        let companions = self.companion_refs(expected, tree_index, journal)?;
-        if let Some(winner) = self
-            .choose_contextual_refs(companions, expected, context, tree_index, history, journal)?
+        if let Some(winner) =
+            self.search_contextual_scopes(expected, context, tree_index, journal, |t, refs, j| {
+                t.choose_contextual_refs(refs, expected, context, tree_index, history, j)
+            })?
         {
             return Ok(winner);
         }
@@ -568,6 +594,29 @@ impl SourceTyper<'_> {
             tree_index,
             expected,
         })
+    }
+
+    /// Examine one lexical/import level at a time; implicit scope is the last resort.
+    fn search_contextual_scopes<T>(
+        &mut self,
+        expected: TypeId,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        mut select: impl FnMut(
+            &mut Self,
+            Vec<ContextualRef>,
+            &mut Vec<(SymbolId, SymbolInfo)>,
+        ) -> Result<Option<T>, TyperError>,
+    ) -> Result<Option<T>, TyperError> {
+        for level in self.contextual_scopes(context, site)? {
+            let refs = self.contextual_scope_refs(level, site, journal)?;
+            if let Some(winner) = select(self, refs, journal)? {
+                return Ok(Some(winner));
+            }
+        }
+        let companions = self.companion_refs(expected, site, journal)?;
+        select(self, companions, journal)
     }
 
     fn contextual_scopes(
@@ -1347,6 +1396,7 @@ impl SourceTyper<'_> {
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             let (args, kind) = self.contextual_call_arguments(
                 &mut tree,
+                signature,
                 &method,
                 context,
                 tree_index,

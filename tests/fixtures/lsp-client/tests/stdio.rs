@@ -353,11 +353,80 @@ fn repairing_an_unknown_type_clears_the_marker_and_preserves_overload_navigation
             prefix.encode_utf16().count()
         };
         let location = range(0, start, start + "Missing".len());
-        client.diagnostics(uri,1,json!([{"range":location,"severity":1,"source":"dotty","code":"typer.type_name_not_found","message":"Unknown type name"}]));
-        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
-        client.edit(uri, 2, location, "Int");
+        let unknown = json!([{"range":location,"severity":1,"source":"dotty","code":"typer.type_name_not_found","message":"Unknown type name"}]);
+        client.diagnostics(uri, 1, unknown.clone());
+        let child = "file:///fixture/Child.scala";
+        let child_text = format!("class Child(start: Int) extends Broken(start) {{\n{caller}\n}}");
+        client.open(child, &child_text);
+        client.diagnostics(uri, 1, unknown);
+        client.diagnostics(child, 1, json!([]));
+        let column = caller.find("take").unwrap();
+        let position =
+            json!({"textDocument":{"uri":child},"position":{"line":1,"character":column + 1}});
+        assert_eq!(
+            client.request("textDocument/definition", position.clone()),
+            Value::Null
+        );
+        client.definition(column, 2, BOOL_METHOD);
+
+        client.edit(uri, 2, location.clone(), "Int");
         client.diagnostics(uri, 2, json!([]));
-        client.definition(caller.find("take").unwrap(), 2, BOOL_METHOD);
+        client.diagnostics(child, 1, json!([]));
+        let resolved = client.request("textDocument/definition", position.clone());
+        assert_eq!(
+            resolved,
+            json!([{
+                "originSelectionRange":range(1,column,column+4),
+                "targetUri":A, "targetSelectionRange":range(2,6,10),
+                "targetRange":range(2,2,BOOL_METHOD.len())
+            }])
+        );
+        client.definition(column, 2, BOOL_METHOD);
+
+        client.edit(uri, 3, range(0, start, start + 3), "Missing");
+        client.diagnostics(
+            uri,
+            3,
+            json!([{"range":location,"severity":1,"source":"dotty",
+            "code":"typer.type_name_not_found","message":"Unknown type name"}]),
+        );
+        client.diagnostics(child, 1, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", position),
+            Value::Null
+        );
+        client.definition(column, 2, BOOL_METHOD);
+        client.shutdown();
+    }
+}
+
+#[test]
+fn adding_and_repairing_a_trait_keeps_a_later_class_navigable() {
+    let prefix = "/* 😀 */ ";
+    for (encoding, column) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+    ] {
+        let mut client = Client::start(encoding, vec![A, B]);
+        client.open(
+            A,
+            &format!("class First\n{prefix}\nclass A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"),
+        );
+        let caller = "  def read(a: A): Int = a.take(false)";
+        client.open(B, &format!("class B {{\n{caller}\n}}"));
+        let take = caller.find("take").unwrap();
+        client.definition(take, 4, BOOL_METHOD);
+
+        client.edit(A, 2, range(1, column, column), "trait T");
+        client.diagnostics(A, 2, json!([{
+            "source": "dotty", "severity": 1, "range": range(1, column, column + 7),
+            "code": "declaration.unsupported", "message": "Unsupported declaration in the ordinary-class view"
+        }]));
+        client.definition(take, 4, BOOL_METHOD);
+
+        client.edit(A, 3, range(1, column, column + 5), "class");
+        client.diagnostics(A, 3, json!([]));
+        client.definition(take, 4, BOOL_METHOD);
         client.shutdown();
     }
 }
@@ -412,6 +481,60 @@ fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
         );
         client.edit(uri, 5, range(2, 15, 15), "; ");
         client.diagnostics(uri, 5, json!([]));
+        client.shutdown();
+    }
+}
+
+#[test]
+fn a_document_recovers_navigation_when_preparation_first_yields_classes() {
+    let caller = "  def good(): Int = a.take(false)";
+    let header = "class B(a: A) {";
+    let take = caller.find("take").unwrap();
+    let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":take+1}});
+    let unknown = header.find('A').unwrap();
+    let missing_class = json!([{"source":"dotty", "severity":1, "range":range(0,unknown,unknown+1),
+        "code":"typer.type_name_not_found", "message":"Unknown type name"}]);
+    for (encoding, literal, qualifier, trait_col) in [("utf-8", 46, 21, 11), ("utf-16", 44, 19, 9)]
+    {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &format!("class A {{\n{INT_METHOD}\n{BOOL_METHOD}\n}}"));
+        client.open(B, &format!("{header}\n{caller}\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
+
+        client.edit(
+            A,
+            2,
+            range(3, 1, 1),
+            "\n/* 😀 */ trait T\nclass Outer {\n  /* 😀 */ private[Missing] val hidden: Int 1\n}",
+        );
+        client.diagnostics(A, 2, json!([{"source":"dotty","severity":1,"range":range(6,literal,literal+1),
+            "code":"parser.declaration.expected_value_equals","message":"Expected '=' before the initializer"}]));
+        client.diagnostics(B, 1, missing_class.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(A, 3, range(6, literal, literal), "= ");
+        client.diagnostics(A, 3, json!([{"source":"dotty","severity":1,"range":range(6,qualifier,qualifier+7),
+            "code":"namer.visibility.invalid_qualifier","message":"Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package"}]));
+        client.diagnostics(B, 1, missing_class.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(A, 4, range(6, qualifier - 1, qualifier + 8), "");
+        client.diagnostics(A, 4, json!([{"source":"dotty","severity":1,"range":range(4,trait_col,trait_col+7),
+            "code":"declaration.unsupported","message":"Unsupported declaration in the ordinary-class view"}]));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
+
+        client.edit(A, 5, range(4, trait_col, trait_col + 5), "class");
+        client.diagnostics(A, 5, json!([]));
+        client.diagnostics(B, 1, json!([]));
+        client.definition(take, 2, BOOL_METHOD);
         client.shutdown();
     }
 }
@@ -572,6 +695,67 @@ fn repairing_a_cross_file_header_cycle_clears_only_its_participants() {
         client.edit(B, 2, range(0, end, end + parent_a.len()), "");
         client.diagnostics(A, 2, json!([independent]));
         client.diagnostics(B, 2, json!([]));
+        client.shutdown();
+    }
+}
+
+#[test]
+fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() {
+    let seeds = "file:///fixture/Seeds.scala";
+    let prefix = "  /* 😀 */ val seed = ";
+    let middle_method = "  def take() = seeds.seed";
+    let caller = "  def read(m: Middle) = m.take()";
+    let bad = "  def bad(): Int = only(1)";
+    let call = caller.find("take").unwrap();
+    let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":call+1}});
+    let link = json!([{
+        "originSelectionRange":range(1,call,call+4), "targetUri":A,
+        "targetSelectionRange":range(1,6,10), "targetRange":range(1,2,middle_method.len())
+    }]);
+    let arity = |line, start, end| {
+        json!([{"range":range(line,start,end), "severity":1,
+        "source":"dotty","code":"typer.application_arity_mismatch","message":"Expected 0 arguments, got 1"}])
+    };
+    let independent = arity(3, bad.find("only").unwrap(), bad.len());
+    for (encoding, start) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+    ] {
+        let mut client = Client::start(encoding, vec![A, seeds]);
+        client.open(
+            seeds,
+            &format!("class Seeds {{\n  def value(): Int = 40\n{prefix}value()\n}}"),
+        );
+        client.open(
+            A,
+            &format!("class Middle(seeds: Seeds) {{\n{middle_method}\n}}"),
+        );
+        client.open(
+            B,
+            &format!("class Consumer {{\n{caller}\n  def only(): Int = 7\n{bad}\n}}"),
+        );
+        client.diagnostics(B, 1, independent.clone());
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            link
+        );
+
+        let argument = start + "value(".len();
+        client.edit(seeds, 2, range(2, argument, argument), "1");
+        client.diagnostics(B, 1, independent.clone());
+        client.diagnostics(seeds, 2, arity(2, start, start + "value(1)".len()));
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            Value::Null
+        );
+
+        client.edit(seeds, 3, range(2, argument, argument + 1), "");
+        client.diagnostics(B, 1, independent.clone());
+        client.diagnostics(seeds, 3, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            link
+        );
         client.shutdown();
     }
 }

@@ -1,11 +1,11 @@
 //! Ordered access to the named class sources selected by the caller.
 use std::{collections::HashMap, fmt};
 
-use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
+use crate::core::{AstArena, Definitions, Packages, SymbolKind, TypeId, Typed};
 use crate::core::{SemanticStore, SourceId, SymbolId};
-use crate::jvm_class_plan::ClassHeaderBindings;
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
+use crate::{ClassHeaderBindings, ClassHeaderError, ReportedTyperError};
 use crate::{
     MemberSignatureError, NamedClassSource, SourceDeclaration, SourceDeclarationIndex,
     SourceDeclarationIndexError,
@@ -121,6 +121,73 @@ impl<'a> NamedClassSources<'a> {
         Some((self.file(declaration.source)?, declaration))
     }
 
+    /// Completes the primary constructor of the supplied class in its declaring
+    /// file. Supply the naming session's store, definitions and packages. The
+    /// returned type belongs to that store. Prepare the constructors of eligible
+    /// classes before attempting their headers.
+    ///
+    /// An ineligible class yields [`ClassHeaderError::InvalidClass`] before
+    /// typing. A rejected constructor rolls back its attempt and retains both the
+    /// class and constructor symbols in the report.
+    pub fn complete_constructor_signature(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> Result<TypeId, ClassHeaderError> {
+        let (file, view) = self
+            .class(class)
+            .ok_or(ClassHeaderError::InvalidClass(class))?;
+        crate::typer::SourceTyper::new(
+            file.ast(),
+            file.source(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+        )
+        .complete_symbol(view.constructor)
+        .map_err(|error| self.header_error(class, Some(view.constructor), error))
+    }
+
+    /// Prepares the requested constructors in caller order, one per iterator step.
+    /// Consume the iterator before attempting headers. Collect into a `Result`
+    /// to stop at the first error, or visit every outcome to recover across files.
+    /// A failed attempt preserves earlier successful constructor signatures.
+    /// All inputs, symbols and returned IDs belong to this naming session.
+    pub fn prepare_class_constructors(
+        &self,
+        classes: impl IntoIterator<Item = SymbolId>,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> impl Iterator<Item = Result<SymbolId, crate::ClassHeaderFailure>> {
+        classes.into_iter().map(move |class| {
+            self.complete_constructor_signature(class, store, definitions, packages)
+                .map(|_| class)
+                .map_err(|error| crate::ClassHeaderFailure {
+                    class,
+                    source: self.class(class).map(|(file, _)| file.source()),
+                    error,
+                })
+        })
+    }
+
+    fn header_error(
+        &self,
+        class: SymbolId,
+        member: Option<SymbolId>,
+        error: TyperError,
+    ) -> ClassHeaderError {
+        ClassHeaderError::Typing(Box::new(ReportedTyperError::from_class(
+            error,
+            class,
+            member,
+            |id| self.file(id).map(NamedClassSource::ast),
+        )))
+    }
+
     /// Attempts one header using the declaring file and the indexed classes
     /// as eligible dependencies. Prepare constructor signatures first. Reuse the
     /// same session store, typed arena and bindings on every attempt, including
@@ -160,6 +227,31 @@ impl<'a> NamedClassSources<'a> {
                     .is_some_and(|d| d.kind == SymbolKind::Class)
             },
         )
+    }
+
+    /// Attempts the header under the same contract as [`Self::try_complete_class_header`],
+    /// capturing any typer failure before the source session ends. The report
+    /// identifies the requested class and carries the actual failure's optional
+    /// byte span, including for a recursively checked parent. No member is
+    /// attributed to a header attempt. An ineligible symbol yields
+    /// [`ClassHeaderError::InvalidClass`] without changing the session.
+    pub fn try_complete_class_header_reported(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        bindings: &mut ClassHeaderBindings,
+    ) -> Result<SignatureCompletion, ClassHeaderError> {
+        self.try_complete_class_header(class, store, definitions, packages, arena, bindings)
+            .map_err(|error| {
+                if self.class(class).is_some() {
+                    self.header_error(class, None, error)
+                } else {
+                    ClassHeaderError::InvalidClass(class)
+                }
+            })
     }
 
     /// Attempts one field or method signature after header completion. The
@@ -362,6 +454,9 @@ mod tests {
         assert!(sources.class(other.classes()[0].symbol).is_none());
     }
 
+    mod headers;
+    mod members;
+
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,
         store: &mut SemanticStore,
@@ -546,6 +641,70 @@ mod tests {
             }
         }
         arena
+    }
+
+    #[test]
+    fn projected_classes_navigate_past_an_omitted_owner() {
+        use crate::core::{NoResolver, TreeKind};
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class A { def value() = 40 }; class Dropped { def value() = 2; value() }; class B { def value(): Int = 7 }";
+        let model = crate::parse_source(SourceId::from_index(7), text, Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("Model.scala", &mut store, &mut packages)
+            .unwrap()
+            .project_classes(&store)
+            .unwrap();
+        let file = &model.file;
+        assert_eq!(model.rejections.len(), 1);
+        let caller_text = "class Caller { def read(b: B): Int = b.value() }";
+        let caller = named(42, caller_text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&caller, file], &store).unwrap();
+        let TreeKind::PackageDef(pkg) = &file.ast().get(file.named().syntax().root).kind else {
+            panic!()
+        };
+        let omitted = pkg.stats[1];
+        let TreeKind::TypeDef(def) = &file.ast().get(omitted).kind else {
+            panic!()
+        };
+        let TreeKind::Template(template) = &file.ast().get(def.rhs).kind else {
+            panic!()
+        };
+        for tree in [omitted, template.constructor, template.body[0]] {
+            let symbol = file.index().symbol_at(file.source(), tree).unwrap();
+            assert!(sources.declaration(symbol).is_none());
+        }
+
+        let target_class = &file.classes()[1];
+        let method = target_class.methods().next().unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let owner = caller.classes()[0].symbol;
+        let body =
+            sources.check_class_body(owner, &mut store, defs, &packages, &mut arena, NoResolver);
+        let calls = caller.navigation().unwrap();
+        let offset = caller_text.find("value").unwrap() as u32;
+        assert_eq!(
+            calls.checked_method_at(offset, caller.ast(), &arena, &store, |_| Some(&body)),
+            Some(method.symbol)
+        );
+        let target = calls
+            .definition_at(
+                offset,
+                caller.ast(),
+                &arena,
+                &store,
+                |_| Some(&body),
+                |source| sources.file(source)?.navigation().ok(),
+            )
+            .unwrap();
+        assert_eq!(target.source, file.source());
+        assert_eq!(target.name.start() as usize, text.rfind("value").unwrap());
+        assert_eq!(
+            sources.declaration(method.symbol).unwrap().1.class,
+            target_class.symbol
+        );
     }
 
     #[test]

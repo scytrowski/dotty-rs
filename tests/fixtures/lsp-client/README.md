@@ -22,23 +22,29 @@ the call. A second scenario checks an inferred field in Consumer.scala against
 a method in Provider.scala in both file orders. Signature and body checking
 report one error at `provider.value(1)`. Editing it to `provider.value()`
 clears the diagnostic. The fixture uses
-`ReportedTyperError` for both call and ordinary typing failures. Signature and
-body errors supply the enclosing class and member through `into_reported_error`.
+`ReportedTyperError` for both call and ordinary typing failures. The member signature report supplies the enclosing class, member and captured
+byte range. Body errors provide the same context through `into_reported_error`.
 Within one analysis the fixture suppresses a body retry when the signature
 already produced the same `CallErrorIdentity`. It renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 
-For a header error in `extends Base(start)`, the fixture captures the typer
-failure with `ReportedTyperError::from_class`. A protocol test checks that the
+The fixture drives `ClassHeaderPhase` in queue order. Its final report supplies
+the classes eligible for member checking, dependency blockages and the original
+constructor and header errors. A protocol test checks that the
 marker on the parent argument clears after an unsaved change to its type.
 Another test opens a constructor with an unknown type after an emoji. It checks
 the range in both position encodings, repairs the type in memory and resolves
 a call to the same overload in a separate file before and after the repair.
+A class waiting on the broken constructor stays free of secondary diagnostics.
+Its own call becomes navigable once the base class is repaired.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 
-The fixture records header and member dependencies separately. Completion wakes
+The fixture uses `MemberSignaturePhase` for members selected from ready classes.
+A protocol test breaks the initializer of `seed`, checks the original diagnostic
+and an independent sibling error, then repairs the initializer and verifies the
+cross-file definition link in both UTF-8 and UTF-16. Completion wakes
 direct waiters, and diagnostics for a cycle point to each participating
 declaration. A stdio regression repairs a cross-file inheritance cycle and
 keeps an independent call error in the same document through the edit.
@@ -50,14 +56,20 @@ A subsequent edit puts two declarations on one line. Inserting a semicolon
 clears the resulting separator diagnostic.
 Both clients bind the result of `dotty::parse_source` with `DetachedSource::bind`
 to obtain owned `SyntaxDiagnostic::Lexer` and `SyntaxDiagnostic::Parser` values.
-The LSP fixture names clean files through `ParsedSource::name` and collects their
-ordinary-class views in `NamedClassSources`. It uses this collection to resolve signatures by
+Both clients use `ParsedSource::prepare_classes` to collect prepared files for
+`NamedClassSources` and retain the original `PreparationDiagnostic` payloads.
+A stdio test inserts a trait between two classes, checks its diagnostic after
+an emoji in both position encodings, and follows a call from a second document
+to the overload in the later class. Editing the trait into a class clears the
+marker and preserves the link. It uses this collection to resolve signatures by
 symbol and find the caller and target files for direct-call navigation.
 The stdio test continues navigating between two clean files while a third
 moves through parser rejection, namer rejection and repair.
-The server renders syntax diagnostics during publication and uses
-`SourceDiagnostic::from_namer` for naming issues. The fixture publishes
-their stable codes in the LSP diagnostic's `code` field.
+The server renders preparation diagnostics at publication and sends each
+available stable code in the LSP diagnostic's `code` field. A cross-file
+stdio test checks that navigation resumes on the first partially prepared
+version, while the model still reports an omitted trait. The final edit
+clears that report in both position encodings.
 
 A separate protocol test opens a field with a missing equals sign and a trailing
 unterminated comment. Closing the comment removes its marker while the parser

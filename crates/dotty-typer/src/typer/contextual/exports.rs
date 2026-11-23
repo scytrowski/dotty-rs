@@ -2,7 +2,7 @@
 
 use super::*;
 use dotty_core::ast::{DefDef, TypeDef, ValDef};
-use dotty_core::types::{instantiate_method_result, instantiate_poly};
+use dotty_core::types::{freshen_type_binders, instantiate_method_result, instantiate_poly};
 
 // Cold qualifiers recursively enter source class completion before their scope is read.
 const MAX_EXPORT_QUALIFIER_DEPTH: usize = 16;
@@ -250,36 +250,35 @@ impl SourceTyper<'_> {
         signature: TypeId,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
+        let mut body = match self.store.types.get(signature) {
+            Type::Poly(poly) if !poly.params.is_empty() => poly.result,
+            _ => signature,
+        };
         let unsupported = || TyperError::UnsupportedExpression {
             source: self.source,
             tree_index,
-            expression_kind: "exported provider requires one type parameter and one using parameter",
+            expression_kind: "unsupported contextual export parameter clauses",
         };
-        let Type::Poly(mut poly) = self.store.types.get(signature).clone() else {
-            return Err(unsupported());
-        };
-        if poly.params.len() != 1
-            || !matches!(self.store.types.get(poly.result), Type::Method(m) if m.kind == MethodKind::Contextual
-            && matches!(m.params.as_slice(), [p] if !p.erased && !p.varargs)
-            && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_)))
-        {
+        let mut depth = 0;
+        while let Type::Method(clause) = self.store.types.get(body) {
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH
+                || clause.kind == MethodKind::Plain
+                || clause.params.is_empty()
+                || clause.params.iter().any(|p| p.erased || p.varargs)
+            {
+                return Err(unsupported());
+            }
+            depth += 1;
+            body = clause.result;
+        }
+        if depth == 0 || matches!(self.store.types.get(body), Type::Poly(_)) {
             return Err(unsupported());
         }
-        let fresh = self.store.types.reserve();
-        let arg = self.store.types.alloc(Type::ParamRef {
-            binder: fresh.id(),
-            index: 0,
-        });
-        let instance = instantiate_poly(self.store, signature, &[arg]).map_err(|error| {
-            TyperError::TypeRebinding {
-                source: self.source,
-                tree_index,
-                error,
-            }
-        })?;
-        poly.params[0].bounds = instance.bounds[0];
-        poly.result = instance.result;
-        Ok(self.store.types.fill(fresh, Type::Poly(poly)))
+        freshen_type_binders(self.store, signature).map_err(|error| TyperError::TypeRebinding {
+            source: self.source,
+            tree_index,
+            error,
+        })
     }
 
     /// Materializes a source object's exported contextual method and its delegation
@@ -389,97 +388,167 @@ impl SourceTyper<'_> {
         })
     }
 
+    fn export_type_application(
+        &mut self,
+        method: SymbolId,
+        body: &mut ExportBody,
+        signature: TypeId,
+    ) -> Result<TypeId, TyperError> {
+        let Some(Type::Poly(poly)) = self.store.types.try_get(signature) else {
+            return Ok(signature);
+        };
+        let params = poly.params.clone();
+        let position = self.store.symbols.get(method).position;
+        let mut declarations = Vec::with_capacity(params.len());
+        let mut args = Vec::with_capacity(params.len());
+        // Bounds can refer to other parameters of this same binder.
+        for param in params {
+            let symbol = self.export_parameter(
+                method,
+                *param.name.as_name(),
+                SymbolKind::TypeParameter,
+                SymbolFlags::EMPTY,
+                SymbolInfo::Missing,
+            );
+            let arg = self
+                .store
+                .types
+                .alloc(Type::type_ref(self.definitions.no_prefix, symbol));
+            declarations.push((param, symbol, arg));
+            args.push(arg);
+        }
+        let instance = instantiate_poly(self.store, signature, &args)
+            .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?;
+        let mut type_args = Vec::with_capacity(args.len());
+        for ((param, symbol, arg), bound) in declarations.into_iter().zip(instance.bounds) {
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(bound));
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let bound_tree = builder.type_tree(bound, position);
+            type_args.push(builder.type_tree(arg, position));
+            let definition = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                symbol,
+                Tree {
+                    ty: arg,
+                    position,
+                    kind: TreeKind::TypeDef(TypeDef {
+                        name: param.name,
+                        rhs: bound_tree,
+                        metadata: (),
+                        variance: param.declared_variance,
+                    }),
+                },
+            );
+            body.type_params.push(definition);
+        }
+        body.rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).type_apply(
+            body.rhs,
+            type_args,
+            instance.result,
+            position,
+        );
+        Ok(instance.result)
+    }
+
     fn build_export_provider_body(
         &mut self,
         method: SymbolId,
         select: TreeId<Typed>,
     ) -> Result<ExportBody, TyperError> {
         let invalid = || TyperError::SourceProvenanceMissing { symbol: method };
-        let position = self.store.symbols.get(method).position;
         let SymbolInfo::Complete(signature) = *self.store.symbols.info(method) else {
             return Err(invalid());
         };
-        let Some(Type::Poly(poly)) = self.store.types.try_get(signature) else {
-            return Err(invalid());
+        let mut body = ExportBody {
+            rhs: select,
+            type_params: Vec::new(),
+            value_param_clauses: Vec::new(),
         };
-        let &[parameter] = poly.params.as_slice() else {
+        let mut callable = self.export_type_application(method, &mut body, signature)?;
+        while let Type::Method(clause) = self.store.types.get(callable) {
+            if body.value_param_clauses.len() >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(invalid());
+            }
+            let clause = clause.clone();
+            callable = self.export_value_application(method, &mut body, callable, clause)?;
+        }
+        if body.value_param_clauses.is_empty() {
             return Err(invalid());
+        }
+        Ok(body)
+    }
+
+    fn export_value_application(
+        &mut self,
+        method: SymbolId,
+        body: &mut ExportBody,
+        callable: TypeId,
+        clause: dotty_core::types::MethodType,
+    ) -> Result<TypeId, TyperError> {
+        let position = self.store.symbols.get(method).position;
+        let flags = match clause.kind {
+            MethodKind::Contextual => SymbolFlags::GIVEN,
+            MethodKind::Implicit => SymbolFlags::IMPLICIT,
+            MethodKind::Plain => {
+                return Err(TyperError::SourceProvenanceMissing { symbol: method });
+            }
         };
-        let symbol = self.export_parameter(
-            method,
-            *parameter.name.as_name(),
-            SymbolKind::TypeParameter,
-            SymbolFlags::EMPTY,
-            SymbolInfo::Missing,
-        );
-        let arg = self
-            .store
-            .types
-            .alloc(Type::type_ref(self.definitions.no_prefix, symbol));
-        let instance = instantiate_poly(self.store, signature, &[arg]).map_err(|_| invalid())?;
-        let bound = instance.bounds[0];
-        self.store
-            .symbols
-            .set_info(symbol, SymbolInfo::Complete(bound));
-        let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-        let bound_tree = builder.type_tree(bound, position);
-        let type_arg = builder.type_tree(arg, position);
-        let type_apply = builder.type_apply(select, vec![type_arg], instance.result, position);
-        let type_def = self.typed_index.alloc_synthetic_definition(
-            &mut self.typed_arena,
-            symbol,
-            Tree {
-                ty: arg,
-                position,
-                kind: TreeKind::TypeDef(TypeDef {
-                    name: parameter.name,
-                    rhs: bound_tree,
-                    metadata: (),
-                    variance: parameter.declared_variance,
-                }),
-            },
-        );
-        let Type::Method(clause) = self.store.types.get(instance.result) else {
-            return Err(invalid());
+        let mut params = Vec::new();
+        let mut paths = Vec::new();
+        let mut arguments = Vec::new();
+        for formal in clause.params {
+            // Later formals can select a type on one of the parameters we
+            // just allocated for this forwarder.
+            let ty = if self.type_contains_param_ref(formal.ty, callable)? {
+                dotty_core::types::instantiate_next_method_parameter(self.store, callable, &paths)
+                    .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?
+            } else {
+                formal.ty
+            };
+            let witness = self.export_parameter(
+                method,
+                *formal.name.as_name(),
+                SymbolKind::Parameter,
+                flags,
+                SymbolInfo::Complete(ty),
+            );
+            let path = self
+                .store
+                .types
+                .alloc(Type::term_ref(self.definitions.no_prefix, witness));
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let tpt = builder.type_tree(ty, position);
+            let ref_tree = builder.ident(*formal.name.as_name(), path, position);
+
+            let param = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                witness,
+                Tree {
+                    ty,
+                    position,
+                    kind: TreeKind::ValDef(ValDef {
+                        name: formal.name,
+                        tpt,
+                        rhs: None,
+                        metadata: (),
+                    }),
+                },
+            );
+            params.push(param);
+            paths.push(Some(path));
+            arguments.push(ref_tree);
+        }
+        let result = if self.type_contains_param_ref(clause.result, callable)? {
+            instantiate_method_result(self.store, callable, &paths)
+                .map_err(|_| TyperError::SourceProvenanceMissing { symbol: method })?
+        } else {
+            clause.result
         };
-        let &[formal] = clause.params.as_slice() else {
-            return Err(invalid());
-        };
-        let witness = self.export_parameter(
-            method,
-            *formal.name.as_name(),
-            SymbolKind::Parameter,
-            SymbolFlags::GIVEN,
-            SymbolInfo::Complete(formal.ty),
-        );
-        let path = self
-            .store
-            .types
-            .alloc(Type::term_ref(self.definitions.no_prefix, witness));
-        let result = instantiate_method_result(self.store, instance.result, &[Some(path)])
-            .map_err(|_| invalid())?;
-        let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-        let tpt = builder.type_tree(formal.ty, position);
-        let ref_tree = builder.ident(*formal.name.as_name(), path, position);
-        let rhs = builder.apply(type_apply, vec![ref_tree], result, position);
-        let param = self.typed_index.alloc_synthetic_definition(
-            &mut self.typed_arena,
-            witness,
-            Tree {
-                ty: formal.ty,
-                position,
-                kind: TreeKind::ValDef(ValDef {
-                    name: formal.name,
-                    tpt,
-                    rhs: None,
-                    metadata: (),
-                }),
-            },
-        );
-        Ok(ExportBody {
-            rhs,
-            type_params: vec![type_def],
-            value_param_clauses: vec![vec![param]],
-        })
+        body.rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .apply(body.rhs, arguments, result, position);
+        body.value_param_clauses.push(params);
+        Ok(result)
     }
 }

@@ -9,12 +9,18 @@ use super::*;
 pub enum TyperWarning {
     /// Positional arguments were passed to a legacy implicit parameter clause.
     ImplicitClauseWithoutUsing,
+    /// An omitted explicit using argument selected its default over available evidence (Scala E220).
+    DefaultShadowsGiven {
+        /// Parameter for which implicit search would have succeeded.
+        name: dotty_core::TermName,
+    },
 }
 
 impl TyperWarning {
     /// Stable identifier for classification independently of presentation.
     pub const fn code(self) -> &'static str {
         match self {
+            Self::DefaultShadowsGiven { .. } => "typer.default_shadows_given",
             Self::ImplicitClauseWithoutUsing => "typer.implicit_clause_without_using",
         }
     }
@@ -1774,6 +1780,31 @@ pub enum TyperError {
         expected: usize,
         /// Observed argument or parameter count.
         actual: usize,
+    },
+    /// The selected clause has no parameter with this name.
+    UnknownNamedArgument {
+        /// Source file containing the explicit argument.
+        source: SourceId,
+        /// Index of the offending argument in the source tree.
+        tree_index: u32,
+        /// Parameter name written at the call site.
+        name: Name,
+    },
+    /// An out-of-order named argument left an earlier parameter unfilled before a positional argument.
+    PositionalAfterNamedArgument {
+        /// Source file containing the call.
+        source: SourceId,
+        /// Index of the misplaced positional argument.
+        tree_index: u32,
+    },
+    /// A parameter already has a positional or named argument.
+    DuplicateNamedArgument {
+        /// Source file containing the explicit argument.
+        source: SourceId,
+        /// Index of the offending argument in the source tree.
+        tree_index: u32,
+        /// Parameter name written at the call site.
+        name: Name,
     },
     /// An erased parameter cannot be supplied by ordinary expression typing.
     ErasedApplicationParameterDeferred {

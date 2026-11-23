@@ -36,7 +36,12 @@ pub use dotty_classloader::classloader;
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
 mod class_header;
-pub use class_header::try_complete_class_header;
+pub use class_header::{
+    ClassHeaderBindings, ClassHeaderError, ClassHeaderFailure, try_complete_class_header,
+};
+
+mod class_header_phase;
+pub use class_header_phase::{ClassHeaderAttempt, ClassHeaderPhase, ClassHeaderReport};
 
 mod class_field_signatures;
 pub use class_field_signatures::{
@@ -45,8 +50,16 @@ pub use class_field_signatures::{
 
 mod signature_dependencies;
 pub use signature_dependencies::{
-    SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+    SignatureAttempt, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
 };
+
+mod member_signature_phase;
+pub use member_signature_phase::{
+    MemberSignatureFailure, MemberSignaturePhase, MemberSignatureReport,
+};
+
+mod member_signature_selection;
+pub use member_signature_selection::{MemberSelectionError, MemberSignatureSelection};
 
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
@@ -55,7 +68,12 @@ mod named_class_sources;
 pub use named_class_sources::{NamedClassSources, NamedClassSourcesError};
 
 mod named_source;
-pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, NamedSource};
+pub use named_source::{
+    ClassProjection, ClassProjectionError, NameSourceError, NamedClassSource, NamedSource,
+};
+
+mod class_preparation;
+pub use class_preparation::{ClassPreparation, PreparationDiagnostic};
 
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};

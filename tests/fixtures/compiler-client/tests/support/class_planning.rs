@@ -955,7 +955,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
     let seeds = (
         SourceId::from_index(6),
         "Seeds.scala",
-        "class Seeds { val seed = 40 }",
+        "class Seeds { val seed = 40 }; class OtherSeeds { val seed = 7 }",
     );
     for files in [[consumer, provider, seeds], [seeds, provider, consumer]] {
         let mut store = SemanticStore::new();
@@ -976,6 +976,7 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
         let answer = caller.classes()[0].fields().next().unwrap().symbol;
         let value = units[1].method_symbol();
         let seed = leaves.classes()[0].fields().next().unwrap().symbol;
+        assert_ne!(seed, leaves.classes()[1].fields().next().unwrap().symbol);
         let mut edges = Vec::new();
         let headers = super::complete_signatures_in_order(
             &units,
@@ -1464,10 +1465,16 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         assert_eq!(store.symbols.info(answer.symbol), &SymbolInfo::Missing);
 
         // With the dependency complete, the class field pass encounters the same call.
-        let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Field(failure) = retry else {
-            panic!("unexpected error on retry: {retry:?}")
-        };
+        let failure = dotty::try_complete_class_field_signatures(
+            class.symbol,
+            consumer.ast(),
+            consumer.index(),
+            &mut store,
+            defs,
+            &packages,
+            |dep| sources.declarations().member(dep).is_some(),
+        )
+        .unwrap_err();
         assert_eq!(failure.diagnostic(ast_for), diagnostic);
         let dotty::ClassFieldSignatureError::Field {
             class: owner,
@@ -1902,7 +1909,7 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
             &mut packages,
         );
         let mut attempts = Vec::new();
-        super::complete_headers(
+        let headers = super::complete_headers(
             &NamedClassSources::new(&units, &store).unwrap(),
             &mut store,
             defs,
@@ -1932,6 +1939,13 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
             );
         } else {
             assert_eq!(attempts, [(first, None), (mid, None), (last, None)]);
+        }
+
+        for unit in &units {
+            let class = &unit.classes()[0];
+            for parent in &class.parents {
+                assert!(headers.bindings.get(unit.source(), *parent).is_some());
+            }
         }
 
         let artifacts = super::compile(files);
@@ -2007,6 +2021,13 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
             &packages,
             headers,
         );
+        let roots = [leaf, mid].map(|class| {
+            output
+                .bindings
+                .get(derived.0, class.parents[0])
+                .expect("completed parent application")
+        });
+        assert_ne!(roots[0], roots[1]);
         // Plan Mid before Leaf using the same retained header and body bindings.
         let classes = super::named_classes(&units)
             .rev()
@@ -2132,17 +2153,18 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } else {
             assert!(blocked.is_empty());
         }
-        let super::SignatureError::Typing(error) = error else {
+        let super::SignatureError::Header(dotty::ClassHeaderError::Typing(report)) = error else {
             panic!("expected a header typing error, got {error:?}")
         };
+        assert_eq!(report.class(), Some(child.symbol));
+        let error = report.error();
         assert!(
             matches!(error, TyperError::ApplicationArgumentTypeMismatch {
-            argument_index: 0, actual, expected, ..
-        } if actual == defs.boolean && expected == defs.int),
+                argument_index: 0, actual, expected, ..
+            } if *actual == defs.boolean && *expected == defs.int),
             "{error:?}"
         );
-        let diagnostic =
-            dotty::TypingDiagnostic::from_typer(&error, |id| sources.file(id).map(|u| u.ast()));
+        let diagnostic = report.render();
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic
@@ -2155,7 +2177,7 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             dotty::core::TextRange::new(start, start + 5).unwrap()
         );
         for ast in [Some(units[parent_index].ast()), None] {
-            let unlocated = dotty::TypingDiagnostic::from_typer(&error, |_| ast);
+            let unlocated = dotty::TypingDiagnostic::from_typer(error, |_| ast);
             assert_eq!(unlocated.location, None);
             assert_eq!(unlocated.message, diagnostic.message);
         }
@@ -2234,8 +2256,9 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     let good_root = headers.bindings.get(good.source(), good_parent).unwrap();
     let bad = &units[2];
     let class = &bad.classes()[0];
-    bad.typer(&mut store, defs, &packages)
-        .complete_symbol(class.constructor)
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    sources
+        .complete_constructor_signature(class.symbol, &mut store, defs, &packages)
         .unwrap();
     let parent = class.parents[0];
     let TreeKind::Apply(call) = &bad.ast().get(parent).kind else {
@@ -2243,18 +2266,19 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     };
     let argument = call.args[0];
     let before = headers.arena.checkpoint();
-    let error = dotty::try_complete_class_header(
-        class.symbol,
-        bad.ast(),
-        bad.index(),
-        &mut store,
-        defs,
-        &packages,
-        &mut headers.arena,
-        &mut headers.bindings,
-        |_| true,
-    )
-    .unwrap_err();
+    let error = sources
+        .try_complete_class_header_reported(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+            &mut headers.bindings,
+        )
+        .unwrap_err();
+    let dotty::ClassHeaderError::Typing(report) = error else {
+        panic!("expected a typed rejection")
+    };
     let dotty::typer::TyperError::ApplicationArgumentTypeMismatch {
         source,
         tree_index,
@@ -2262,14 +2286,14 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         actual,
         expected,
         ..
-    } = error
+    } = report.error()
     else {
-        panic!("unexpected error for Bad: {error:?}")
+        panic!("unexpected error for Bad: {report:?}")
     };
-    assert_eq!(source, bad.source());
-    assert_eq!(tree_index, parent.index());
-    assert_eq!(argument_index, 0);
-    assert_eq!((actual, expected), (defs.boolean, defs.int));
+    assert_eq!(*source, bad.source());
+    assert_eq!(*tree_index, parent.index());
+    assert_eq!(*argument_index, 0);
+    assert_eq!((*actual, *expected), (defs.boolean, defs.int));
     assert_eq!(
         store.symbols.info(class.symbol),
         &dotty::core::SymbolInfo::Missing
