@@ -12,7 +12,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
-| Resolve source symbols and attempt signatures across files | [`NamedClassBatch`], [`NamedClassBatch::declaration`], [`NamedClassBatch::try_complete_member_signature`] |
+| Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
 | Plan source methods and classes for the JVM | [`jvm_method_plan`], [`jvm_class_plan`], [`jvm`] |
@@ -95,10 +95,11 @@ converting byte ranges to line/column coordinates for an editor.
 
 ## Follow a signature dependency into another source file
 
-A [`NamedClassBatch`] borrows named files from one session and owns one
+[`NamedClassSources`] borrows [`NamedClassSource`] files from one session and owns one
 declaration index. File order comes from the input iterator. IDs can be sparse.
-The batch leaves the store available for typing and the call-navigation data
-lazy. Build a fresh batch when replacing the files for a new analysis session.
+If two files have the same ID, construction returns [`NamedClassSourcesError::DuplicateSource`].
+Construction leaves the store available for typing. Each file prepares its call
+index on demand. Build a new collection for the files in each analysis session.
 
 This client asks for a field in `B.scala`. The typer identifies the field it
 needs from `A.scala`, so the client can complete that declaration and retry.
@@ -108,7 +109,7 @@ The same lookup supplies the original AST for a diagnostic in either file.
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, Typed};
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::typer::{SignatureCompletion, SourceTyper};
-use dotty::{NamedClassBatch, parse_source};
+use dotty::{NamedClassSources, parse_source};
 
 let mut store = SemanticStore::new();
 let defs = Definitions::bootstrap(&mut store);
@@ -123,26 +124,26 @@ for (id, name, text) in [
         .name(name, &mut store, &mut packages)?
         .into_classes(&store)?);
 }
-let batch = NamedClassBatch::new(&files, &store)?;
+let sources = NamedClassSources::new(&files, &store)?;
 let mut arena = AstArena::<Typed>::new();
 let mut bindings = ClassHeaderBindings::default();
-for (file, class) in batch.classes() {
+for (file, class) in sources.classes() {
     SourceTyper::new(file.ast(), file.source(), file.index(), &mut store, defs, &packages)
         .complete_symbol(class.constructor)?;
 }
-for (_, class) in batch.classes() {
-    let outcome = batch.try_complete_class_header(
+for (_, class) in sources.classes() {
+    let outcome = sources.try_complete_class_header(
         class.symbol, &mut store, defs, &packages, &mut arena, &mut bindings,
     )?;
     assert!(matches!(outcome, SignatureCompletion::Complete(_)));
 }
 
 let answer = files[0].classes()[0].fields().next().unwrap().symbol;
-let mut attempt = |symbol| batch.try_complete_member_signature(symbol, &mut store, defs, &packages);
+let mut attempt = |symbol| sources.try_complete_member_signature(symbol, &mut store, defs, &packages);
 let SignatureCompletion::BlockedOn(seed) = attempt(answer)? else {
     return Err("expected a dependency on A.seed".into());
 };
-let (file, declaration) = batch.declaration(seed).ok_or("missing provider")?;
+let (file, declaration) = sources.declaration(seed).ok_or("missing provider")?;
 assert_eq!(file.source(), SourceId::from_index(7));
 assert_eq!(declaration.class, files[1].classes()[0].symbol);
 assert_eq!(attempt(seed)?, SignatureCompletion::Complete(defs.int));
@@ -240,8 +241,9 @@ belongs in [`classloader`], not in the source frontend.
 
 ## Follow signature dependencies between source files
 
-Use [`SignatureDependencies`] with the outcomes of [`try_complete_class_header`]
-or [`try_complete_member_signature`]. Keep one tracker per phase for one set of
+Use [`SignatureDependencies`] with the outcomes of
+[`NamedClassSources::try_complete_class_header`] or
+[`NamedClassSources::try_complete_member_signature`]. Keep one tracker per phase for one set of
 named files. Record attempts in observation order. The tracker borrows no
 arenas, owns no worker threads, and leaves the choice of the next file to the
 client. Drop it on edits or renaming, since a fresh session can reuse symbol IDs.
@@ -249,7 +251,7 @@ client. Drop it on edits or renaming, since a fresh session can reuse symbol IDs
 This example tries `Leaf` before `Base`, then inspects a separate two-file cycle.
 
 ```rust
-use dotty::{SignatureBlockage, SignatureDependencies, SignaturePhase, try_complete_class_header};
+use dotty::{NamedClassSources, SignatureBlockage, SignatureDependencies, SignaturePhase};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::typer::{SignatureCompletion, SourceTyper};
@@ -276,25 +278,23 @@ let files = [
 # }
 # let mut arena = AstArena::new();
 # let mut bindings = ClassHeaderBindings::default();
-// Each index selects the declaring file of one class in the batch.
-let mut attempt = |file: usize| {
-    let unit = &units[file];
-    try_complete_class_header(unit.classes()[0].symbol, unit.ast(), unit.index(), &mut store,
-        defs, &packages, &mut arena, &mut bindings, |dep| units.iter().any(|u| u.classes()[0].symbol == dep))
+let sources = NamedClassSources::new(&units, &store)?;
+let mut attempt = |symbol| {
+    sources.try_complete_class_header(symbol, &mut store, defs, &packages, &mut arena, &mut bindings)
 };
 let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
 let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);
 
-let outcome = attempt(0)?;
+let outcome = attempt(leaf)?;
 assert_eq!(outcome, SignatureCompletion::BlockedOn(base));
 assert!(headers.record(leaf, outcome).is_empty());
-assert_eq!(headers.record(base, attempt(1)?), [leaf]);
-let retry = attempt(0)?;
+assert_eq!(headers.record(base, attempt(base)?), [leaf]);
+let retry = attempt(leaf)?;
 assert!(matches!(retry, SignatureCompletion::Complete(_)));
 headers.record(leaf, retry);
 
-headers.record(a, attempt(2)?);
-headers.record(b, attempt(3)?);
+headers.record(a, attempt(a)?);
+headers.record(b, attempt(b)?);
 let blocked = headers.blockages([a, b]);
 let SignatureBlockage::CycleMember(cycle) = &blocked[0].1 else {
     return Err("expected a header cycle".into());

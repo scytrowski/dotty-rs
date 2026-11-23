@@ -11,9 +11,9 @@ use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{ClassMember, DeclarationError};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
-    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassBatch, NamedClassBatchError,
-    NamedClassSource, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
-    SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic,
+    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassSource, NamedClassSources,
+    NamedClassSourcesError, SignatureBlockage, SignatureCycle, SignatureDependencies,
+    SignaturePhase, SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Call(CallDiagnostic),
-    Batch(NamedClassBatchError),
+    Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
     Naming(NamerDiagnostic),
     NamerFailure(NamerError),
@@ -216,11 +216,11 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             units.push(unit);
         }
     }
-    match NamedClassBatch::new(&units, &store) {
-        Ok(batch) => analyze_batch(&batch, &mut store, defs, &packages, &uris, &mut results),
+    match NamedClassSources::new(&units, &store) {
+        Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &uris, &mut results),
         Err(error) => {
             for result in results.values_mut() {
-                result.problems.push(Problem::Batch(error));
+                result.problems.push(Problem::Sources(error));
             }
         }
     }
@@ -230,8 +230,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         .collect()
 }
 
-fn analyze_batch(
-    batch: &NamedClassBatch<'_>,
+fn analyze_sources(
+    sources: &NamedClassSources<'_>,
     store: &mut SemanticStore,
     defs: Definitions,
     packages: &Packages,
@@ -243,7 +243,7 @@ fn analyze_batch(
     let mut unavailable = HashSet::new();
     let mut classes = Vec::new();
     let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-    let ast_for = |id: SourceId| batch.file(id).map(NamedClassSource::ast);
+    let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
     let typer_problem = |file, error: TyperError| {
         call_problem(
             file,
@@ -251,7 +251,7 @@ fn analyze_batch(
             |error| SourceDiagnostic::from_typer(&error, ast_for),
         )
     };
-    for u in batch.files() {
+    for u in sources.files() {
         let source = u.source();
         let mut typer = SourceTyper::new(u.ast(), u.source(), u.index(), store, defs, packages);
         for c in u.classes() {
@@ -270,7 +270,7 @@ fn analyze_batch(
         &mut headers,
         &classes,
         |symbol| {
-            batch.try_complete_class_header(
+            sources.try_complete_class_header(
                 symbol,
                 store,
                 defs,
@@ -280,7 +280,7 @@ fn analyze_batch(
             )
         },
         |symbol, error| {
-            let source = batch.declarations().get(symbol).unwrap().source;
+            let source = sources.declarations().get(symbol).unwrap().source;
             unavailable.insert(symbol);
             let (file, problem) = typer_problem(source, error);
             results.get_mut(&file).unwrap().problems.push(problem);
@@ -292,9 +292,9 @@ fn analyze_batch(
             .copied()
             .filter(|&s| headers.waiting_on(s).is_some()),
     );
-    report_blockages(&headers, &classes, batch.declarations(), store, results);
+    report_blockages(&headers, &classes, sources.declarations(), store, results);
     let mut members = Vec::new();
-    for (_, class) in batch.classes() {
+    for (_, class) in sources.classes() {
         if unavailable.contains(&class.symbol) {
             continue;
         }
@@ -308,9 +308,9 @@ fn analyze_batch(
     complete(
         &mut signatures,
         &members,
-        |s| batch.try_complete_member_signature(s, store, defs, packages),
+        |s| sources.try_complete_member_signature(s, store, defs, packages),
         |s, error| {
-            let source = batch.declarations().get(s).unwrap().source;
+            let source = sources.declarations().get(s).unwrap().source;
             let (file, problem) = call_problem(source, error.into_call_diagnostic(ast_for), |e| {
                 e.diagnostic(ast_for)
             });
@@ -322,9 +322,15 @@ fn analyze_batch(
             results.get_mut(&file).unwrap().problems.push(problem);
         },
     );
-    report_blockages(&signatures, &members, batch.declarations(), store, results);
+    report_blockages(
+        &signatures,
+        &members,
+        sources.declarations(),
+        store,
+        results,
+    );
     let mut checks = HashMap::new();
-    for u in batch.files() {
+    for u in sources.files() {
         let source = u.source();
         for c in u.classes() {
             if unavailable.contains(&c.symbol) {
@@ -374,7 +380,7 @@ fn analyze_batch(
             checks.insert(c.symbol, check);
         }
     }
-    for u in batch.files() {
+    for u in sources.files() {
         let source = u.source();
         let calls = match u.navigation() {
             Ok(calls) => calls,
@@ -397,7 +403,7 @@ fn analyze_batch(
                 &arena,
                 store,
                 |s| checks.get(&s),
-                |id| batch.file(id).and_then(|x| x.navigation().ok()),
+                |id| sources.file(id).and_then(|x| x.navigation().ok()),
             ) {
                 results.get_mut(&source).unwrap().links.push(Link {
                     origin,

@@ -1,5 +1,5 @@
 //! Source ranges observed by a compiler client reporting class body errors.
-use super::{NamedClassBatch, class_planning::named, complete_signatures};
+use super::{NamedClassSources, class_planning::named, complete_signatures};
 use dotty::core::{Definitions, DiagnosticSeverity, SymbolKind, TextRange};
 use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
@@ -36,7 +36,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             &mut packages,
         );
         let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-        let sources = NamedClassBatch::new(&units, &store).unwrap();
+        let sources = NamedClassSources::new(&units, &store).unwrap();
         // Keep the loader's generic class metadata available during conformance checking.
         let jdk =
             PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME for the client tests"));
@@ -269,7 +269,7 @@ fn check_body_error(marked: &str, check: impl FnOnce(TyperError, Definitions, &S
     let Err(dotty::ClassBodyError::Member { error, .. }) = result else {
         panic!("expected a member typing error, got {result:?}");
     };
-    let sources = NamedClassBatch::new(units, &store).unwrap();
+    let sources = NamedClassSources::new(units, &store).unwrap();
     let span = dotty::typer_error_span_with(&error, |id| sources.file(id).map(|u| u.ast()))
         .unwrap_or_else(|| panic!("missing span for {error:?}"));
     assert_eq!(span.source(), unit.source());

@@ -116,6 +116,10 @@ not identify their originating store; mixing IDs from separate sessions can
 violate compiler invariants. See the [core design](docs/dotty-core-design.md)
 and [typer contract](docs/typer-v0.1-compatibility.md).
 
+For multiple files, `NamedClassSources` borrows their `NamedClassSource` views
+and looks up the declaring file for each symbol. See the
+[multi-file signature example](src/guide.md#follow-a-signature-dependency-into-another-source-file).
+
 ### Read a TASTy file
 
 Replace `src/main.rs` with this independent example:

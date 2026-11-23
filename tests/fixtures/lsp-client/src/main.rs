@@ -147,7 +147,7 @@ impl Workspace {
                         Problem::Reported(report) => report,
                         Problem::Call(call) => &call.render(),
                         Problem::Naming(d) => &SourceDiagnostic::from_namer(d),
-                        Problem::Batch(error) => &unlocated_error(error),
+                        Problem::Sources(error) => &unlocated_error(error),
                         Problem::Scan(error) => &unlocated_error(error),
                         Problem::NamerFailure(error) => &unlocated_error(error),
                         Problem::Declaration { error, location } => {

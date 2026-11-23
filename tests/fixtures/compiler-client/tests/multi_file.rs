@@ -26,7 +26,7 @@ use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{DetachedSource, NamedClassBatch, SourceDiagnostic, SyntaxDiagnostic};
+use dotty::{DetachedSource, NamedClassSources, SourceDiagnostic, SyntaxDiagnostic};
 use dotty::{NameSourceError, NamedClassSource as NamedUnit};
 
 trait FixtureMethods {
@@ -391,7 +391,7 @@ fn follow_signature(
 }
 
 fn complete_headers(
-    sources: &NamedClassBatch,
+    sources: &NamedClassSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
@@ -465,7 +465,7 @@ fn complete_methods_in_order(
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    let sources = NamedClassBatch::new(units, store).unwrap();
+    let sources = NamedClassSources::new(units, store).unwrap();
     let headers = complete_headers(&sources, store, definitions, packages, &mut observe)?;
 
     for (unit, class) in sources.classes() {
@@ -512,7 +512,7 @@ fn complete_methods_in_order(
 fn complete_member_path(
     root: SymbolId,
     first_dependency: Option<SymbolId>,
-    sources: &NamedClassBatch,
+    sources: &NamedClassSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
@@ -657,7 +657,7 @@ const OVERLOADS: &str = "class A {
 }";
 
 fn assert_overload_target(
-    sources: &NamedClassBatch<'_>,
+    sources: &NamedClassSources<'_>,
     method: SymbolId,
     provider: &NamedUnit,
     expected: Declaration,
@@ -710,7 +710,7 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
                 &mut packages,
             );
             let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let sources = NamedClassBatch::new(&units, &store).unwrap();
+            let sources = NamedClassSources::new(&units, &store).unwrap();
             let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
             let caller = sources.file(b).unwrap();
             let provider = sources.file(a).unwrap();
@@ -784,7 +784,7 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                 &mut packages,
             );
             let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let sources = NamedClassBatch::new(&units, &store).unwrap();
+            let sources = NamedClassSources::new(&units, &store).unwrap();
             let caller = sources.file(b).unwrap();
             let class = &caller.classes()[0];
             let check = dotty::check_class_body(
@@ -880,7 +880,7 @@ class Second { def read(a: A): Int = a.take(false) }";
             &mut packages,
         );
         let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-        let sources = NamedClassBatch::new(&units, &store).unwrap();
+        let sources = NamedClassSources::new(&units, &store).unwrap();
         let caller = sources.file(b).unwrap();
         let provider = sources.file(a).unwrap();
         let calls = caller.navigation().unwrap();
@@ -1243,7 +1243,7 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             &mut store,
             &mut packages,
         );
-        let sources = NamedClassBatch::new(&units, &store).unwrap();
+        let sources = NamedClassSources::new(&units, &store).unwrap();
         let lookup = |source| sources.file(source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();

@@ -1,4 +1,4 @@
-//! Ordered access to the named class sources in a caller-selected batch.
+//! Ordered access to the named class sources selected by the caller.
 use std::{collections::HashMap, fmt};
 
 use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
@@ -11,16 +11,16 @@ use crate::{
     SourceDeclarationIndexError,
 };
 
-/// Failure to assemble a batch from named files.
+/// Failure to index the files supplied to [`NamedClassSources::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NamedClassBatchError {
+pub enum NamedClassSourcesError {
     /// Two inputs have the same source ID, including files without declarations.
     DuplicateSource(SourceId),
     /// The session store and the supplied declarations have inconsistent bindings.
     Declaration(SourceDeclarationIndexError),
 }
 
-impl fmt::Display for NamedClassBatchError {
+impl fmt::Display for NamedClassSourcesError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateSource(source) => write!(f, "duplicate named source {source:?}"),
@@ -29,7 +29,7 @@ impl fmt::Display for NamedClassBatchError {
     }
 }
 
-impl std::error::Error for NamedClassBatchError {
+impl std::error::Error for NamedClassSourcesError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Declaration(error) => Some(error),
@@ -38,36 +38,37 @@ impl std::error::Error for NamedClassBatchError {
     }
 }
 
-/// Borrows ordinary-class projections from a single naming session.
+/// An ordered collection of borrowed [`NamedClassSource`] files from one naming session.
 /// Files retain their input order, independent of the numeric source IDs.
 #[derive(Debug)]
-pub struct NamedClassBatch<'a> {
+pub struct NamedClassSources<'a> {
     declarations: SourceDeclarationIndex,
     files: Vec<&'a NamedClassSource>,
     by_source: HashMap<SourceId, &'a NamedClassSource>,
 }
 
-impl<'a> NamedClassBatch<'a> {
-    /// Collects the supplied files in order. A repeated source ID rejects the
-    /// whole batch. Validates declarations against their naming store and owns
-    /// the resulting index, so the store remains available for mutable typing.
+impl<'a> NamedClassSources<'a> {
+    /// Collects the supplied files in order. A repeated source ID yields
+    /// [`NamedClassSourcesError::DuplicateSource`]. Construction validates
+    /// declarations against the naming store. The collection owns the index,
+    /// so clients can continue to mutate the store during typing.
     /// The supplied files and store must belong to the same session: numeric
     /// symbol IDs alone cannot distinguish arenas. Navigation is left lazy.
     pub fn new(
         files: impl IntoIterator<Item = &'a NamedClassSource>,
         store: &SemanticStore,
-    ) -> Result<Self, NamedClassBatchError> {
+    ) -> Result<Self, NamedClassSourcesError> {
         let mut by_source = HashMap::new();
         let mut ordered = Vec::new();
         for file in files {
             if by_source.insert(file.source(), file).is_some() {
-                return Err(NamedClassBatchError::DuplicateSource(file.source()));
+                return Err(NamedClassSourcesError::DuplicateSource(file.source()));
             }
             ordered.push(file);
         }
         let declarations =
             SourceDeclarationIndex::from_classes(store, ordered.iter().flat_map(|f| f.classes()))
-                .map_err(NamedClassBatchError::Declaration)?;
+                .map_err(NamedClassSourcesError::Declaration)?;
         Ok(Self {
             declarations,
             files: ordered,
@@ -88,13 +89,13 @@ impl<'a> NamedClassBatch<'a> {
             .flat_map(|file| file.classes().iter().map(move |class| (file, class)))
     }
 
-    /// Returns the batch's validated index, including constructors and their fields.
+    /// Returns the validated declaration index, including constructors and their fields.
     pub fn declarations(&self) -> &SourceDeclarationIndex {
         &self.declarations
     }
 
     /// Resolves a same-session symbol to its declaring file and canonical owner.
-    /// A symbol outside this batch has no entry.
+    /// A symbol outside these files has no entry.
     pub fn declaration(
         &self,
         symbol: SymbolId,
@@ -103,12 +104,12 @@ impl<'a> NamedClassBatch<'a> {
         Some((self.file(declaration.source)?, declaration))
     }
 
-    /// Attempts one header using the declaring file and the classes in this batch
+    /// Attempts one header using the declaring file and the indexed classes
     /// as eligible dependencies. Prepare constructor signatures first. Reuse the
     /// same session store, typed arena and bindings on every attempt, including
     /// retries after a returned dependency completes.
     ///
-    /// An unknown symbol yields `UnknownSymbol`; a known symbol outside the batch
+    /// An unknown symbol yields `UnknownSymbol`; a known symbol outside these files
     /// yields `SourceProvenanceMissing`. Typing failures retain their original
     /// source and leave prior bindings intact. See [`crate::try_complete_class_header`].
     pub fn try_complete_class_header(
@@ -145,9 +146,9 @@ impl<'a> NamedClassBatch<'a> {
     }
 
     /// Attempts one field or method signature after header completion. The
-    /// batch supplies its declaring AST and naming index. A dependency in the
-    /// batch may return `BlockedOn`; missing external member types retain the
-    /// typer error. The caller chooses when to retry. An unknown or ineligible
+    /// collection supplies the declaring AST and naming index. An unresolved
+    /// dependency in these files can yield `BlockedOn`. An unavailable external
+    /// member type retains the original typer error. The caller chooses when to retry. An unknown or ineligible
     /// root yields [`MemberSignatureError::InvalidMember`] before typing.
     pub fn try_complete_member_signature(
         &self,
@@ -203,21 +204,21 @@ mod tests {
         let a = named(42, "class A", &mut store, &mut packages);
         let empty = named(7, "", &mut store, &mut packages);
         for files in [[&a, &empty], [&empty, &a]] {
-            let batch = NamedClassBatch::new(files, &store).unwrap();
+            let sources = NamedClassSources::new(files, &store).unwrap();
             assert_eq!(
-                batch
+                sources
                     .files()
                     .map(NamedClassSource::source)
                     .collect::<Vec<_>>(),
                 files.map(NamedClassSource::source)
             );
-            assert!(std::ptr::eq(batch.file(a.source()).unwrap(), &a));
-            assert!(std::ptr::eq(batch.file(empty.source()).unwrap(), &empty));
-            assert!(batch.file(SourceId::from_index(0)).is_none());
+            assert!(std::ptr::eq(sources.file(a.source()).unwrap(), &a));
+            assert!(std::ptr::eq(sources.file(empty.source()).unwrap(), &empty));
+            assert!(sources.file(SourceId::from_index(0)).is_none());
         }
         assert_eq!(
-            NamedClassBatch::new([&empty, &a, &empty], &store).unwrap_err(),
-            NamedClassBatchError::DuplicateSource(empty.source())
+            NamedClassSources::new([&empty, &a, &empty], &store).unwrap_err(),
+            NamedClassSourcesError::DuplicateSource(empty.source())
         );
     }
     #[test]
@@ -232,9 +233,9 @@ mod tests {
         );
         let c = named(7, "class C { val seed = 7 }", &mut store, &mut packages);
         let omitted = named(3, "class D", &mut store, &mut packages);
-        let batch = NamedClassBatch::new([&c, &ab], &store).unwrap();
+        let sources = NamedClassSources::new([&c, &ab], &store).unwrap();
         assert_eq!(
-            batch
+            sources
                 .classes()
                 .map(|(f, c)| (f.source(), c.symbol))
                 .collect::<Vec<_>>(),
@@ -247,22 +248,22 @@ mod tests {
         for file in [&ab, &c] {
             let class = &file.classes()[0];
             let seed = class.fields().next().unwrap().symbol;
-            let (owner_file, d) = batch.declaration(seed).unwrap();
+            let (owner_file, d) = sources.declaration(seed).unwrap();
             assert!(std::ptr::eq(owner_file, file));
             assert_eq!(
                 (d.class, d.source, d.kind),
                 (class.symbol, file.source(), crate::core::SymbolKind::Field)
             );
         }
-        assert!(batch.declaration(omitted.classes()[0].symbol).is_none());
+        assert!(sources.declaration(omitted.classes()[0].symbol).is_none());
     }
     fn prepare_constructors(
-        batch: &NamedClassBatch<'_>,
+        sources: &NamedClassSources<'_>,
         store: &mut SemanticStore,
         defs: Definitions,
         packages: &Packages,
     ) {
-        for (file, class) in batch.classes() {
+        for (file, class) in sources.classes() {
             crate::typer::SourceTyper::new(
                 file.ast(),
                 file.source(),
@@ -290,13 +291,13 @@ mod tests {
         );
         let text = "class Leaf(start: Boolean) extends Mid(start)";
         let leaf = named(21, text, &mut store, &mut packages);
-        let batch = NamedClassBatch::new([&leaf, &mid, &base], &store).unwrap();
-        prepare_constructors(&batch, &mut store, defs, &packages);
+        let sources = NamedClassSources::new([&leaf, &mid, &base], &store).unwrap();
+        prepare_constructors(&sources, &mut store, defs, &packages);
         let [a, b, c] = [&leaf, &mid, &base].map(|f| f.classes()[0].symbol);
         let mut arena = AstArena::new();
         let mut bindings = ClassHeaderBindings::default();
         let mut attempt = |id| {
-            batch.try_complete_class_header(
+            sources.try_complete_class_header(
                 id,
                 &mut store,
                 defs,
@@ -315,7 +316,7 @@ mod tests {
             matches!(error, TyperError::ApplicationArgumentTypeMismatch { argument_index: 0, actual, expected, .. } if actual == defs.boolean && expected == defs.int)
         );
         let span =
-            crate::typer_error_span_with(&error, |id| batch.file(id).map(NamedClassSource::ast))
+            crate::typer_error_span_with(&error, |id| sources.file(id).map(NamedClassSource::ast))
                 .unwrap();
         assert_eq!(span.source(), leaf.source());
         let range = span.span().range();
@@ -351,13 +352,13 @@ mod tests {
             if reverse {
                 files.reverse();
             }
-            let batch = NamedClassBatch::new(files, &store).unwrap();
-            prepare_constructors(&batch, &mut store, defs, &packages);
+            let sources = NamedClassSources::new(files, &store).unwrap();
+            prepare_constructors(&sources, &mut store, defs, &packages);
             let mut arena = AstArena::new();
             let mut bindings = ClassHeaderBindings::default();
-            for (_, class) in batch.classes() {
+            for (_, class) in sources.classes() {
                 assert!(matches!(
-                    batch.try_complete_class_header(
+                    sources.try_complete_class_header(
                         class.symbol,
                         &mut store,
                         defs,
@@ -373,7 +374,7 @@ mod tests {
             let bad = fields.next().unwrap().symbol;
             let value = provider.classes()[0].methods().next().unwrap().symbol;
             let seed = seeds.classes()[0].fields().next().unwrap().symbol;
-            let partial = NamedClassBatch::new([&provider], &store).unwrap();
+            let partial = NamedClassSources::new([&provider], &store).unwrap();
             let checkpoint = store.checkpoint();
             assert!(
                 matches!(partial.try_complete_member_signature(value,&mut store,defs,&packages),
@@ -385,7 +386,7 @@ mod tests {
             );
             assert_eq!(store.checkpoint(), checkpoint);
             let mut attempt =
-                |s| batch.try_complete_member_signature(s, &mut store, defs, &packages);
+                |s| sources.try_complete_member_signature(s, &mut store, defs, &packages);
             assert_eq!(
                 attempt(answer).unwrap(),
                 SignatureCompletion::BlockedOn(value)
