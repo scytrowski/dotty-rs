@@ -11,7 +11,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | --- | --- |
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
-| Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
+| Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource::into_classes`], [`NamedSource::project_classes`] |
 | Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
@@ -95,6 +95,54 @@ binds and eagerly renders them as `ParsedSource<SourceDiagnostic>`.
 message, and optional location. Codes can be absent for typer/adapter failures;
 message wording is for presentation. Keep the original source text when
 converting byte ranges to line/column coordinates for an editor.
+
+## Select ordinary classes from a mixed source file
+
+After naming, choose [`NamedSource::into_classes`] when every top-level declaration
+must be supported. Choose [`NamedSource::project_classes`] to inspect the supported
+classes alongside typed reasons for omitting their siblings. For example, a
+source client can keep navigating to methods in classes on either side of a trait.
+
+```rust
+use dotty::{NamedClassSources, parse_source};
+use dotty::core::{Packages, SemanticStore, SourceId};
+use dotty::source_declarations::DeclarationError;
+
+let text = "class A; trait T; class B { def value(): Int = 7 }";
+let mut store = SemanticStore::new();
+let source = SourceId::from_index(7);
+let named = parse_source(source, text, Default::default())?.bind(&mut store.names)
+    .name("Model.scala", &mut store, &mut Packages::new())?;
+// A caller that initially requires full coverage still owns the named file on failure.
+let strict = named.into_classes(&store).expect_err("trait outside the ordinary-class subset");
+let projection = strict.named.project_classes(&store)?;
+let [report] = projection.rejections.as_slice() else { return Err("expected one omission".into()) };
+assert_eq!(report.error, strict.error);
+assert!(matches!(report.error, DeclarationError::Unsupported { .. }));
+let location = report.location.ok_or("expected a declaration position")?;
+assert_eq!(location.source(), source);
+let range = location.span().range();
+assert_eq!(&text[range.start() as usize..range.end() as usize], "trait T");
+
+let files = NamedClassSources::new([&projection.file], &store)?;
+let [_, b] = projection.file.classes() else { return Err("expected A and B".into()) };
+let value = b.methods().next().ok_or("expected B.value")?;
+let (_, declaration) = files.declaration(value.symbol).ok_or("missing projected method")?;
+assert_eq!(declaration.class, b.symbol);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Call `project_classes` directly when partial coverage is intended. It records
+the first unsupported tree in each omitted top-level statement. An unsupported
+class member excludes its enclosing class. An encountered inconsistent binding
+rejects the projection and returns the original named file. A file containing
+only unsupported declarations produces an empty class view with rejections.
+
+The original naming index and semantic store still contain symbols for omitted
+declarations. [`NamedClassSources::declaration`] indexes only the selected classes
+and their declarations. Clients decide how to report omissions and whether
+independent classes should proceed to typing or emission. Reports retain byte
+ranges for the original document version. Use their tree IDs with that parse.
 
 ## Follow a signature dependency into another source file
 
@@ -333,7 +381,7 @@ insertions and packages. The earlier `bind` operation has already interned names
 
 A successful [`NamedSource`] owns its syntax and index for this analysis.
 [`NamedSource::into_classes`] reads the existing semantic store. If a file contains
-a `trait`, the ordinary-class projection returns [`ClassProjectionError`] with the
+a `trait`, that strict projection returns [`ClassProjectionError`] with the
 original named file and the rejected tree. To locate the declaration, call
 [`source_declarations::DeclarationError::location`] with that file's AST. For files
 in the supported subset, [`NamedClassSource::navigation`] builds the call index

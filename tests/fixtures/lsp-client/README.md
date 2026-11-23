@@ -54,7 +54,11 @@ clears the resulting separator diagnostic.
 Both clients bind the result of `dotty::parse_source` with `DetachedSource::bind`
 to obtain owned `SyntaxDiagnostic::Lexer` and `SyntaxDiagnostic::Parser` values.
 The LSP fixture names clean files through `ParsedSource::name` and collects their
-ordinary-class views in `NamedClassSources`. It uses this collection to resolve signatures by
+ordinary-class views from `NamedSource::project_classes` in `NamedClassSources`.
+A stdio test inserts a trait between two classes, checks its diagnostic after
+an emoji in both position encodings, and follows a call from a second document
+to the overload in the later class. Editing the trait into a class clears the
+marker and preserves the link. It uses this collection to resolve signatures by
 symbol and find the caller and target files for direct-call navigation.
 The stdio test continues navigating between two clean files while a third
 moves through parser rejection, namer rejection and repair.
