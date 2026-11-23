@@ -3911,6 +3911,9 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
                             "scala"
                                 | "scala/annotation"
                                 | "scala/collection"
+                                | "dotty/tools"
+                                | "dotty/tools/dotc"
+                                | "dotty/tools/dotc/interfaces"
                                 | "java/io"
                                 | "java/lang"
                         )
@@ -6000,15 +6003,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 3);
+        assert_eq!(current_unresolved_roots.len(), 1);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            38
+            40
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 4);
-        assert_eq!(recovered_roots.len(), 38);
-        assert_eq!(recovered_weight, 375);
+        assert_eq!(current_weight, 1);
+        assert_eq!(recovered_roots.len(), 40);
+        assert_eq!(recovered_weight, 378);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -6877,6 +6880,25 @@ mod tests {
             TastyDecodeError::UnresolvedSupertype(parent)
                 if parent.parent_index == 1 && parent.shape == "selected-qualified"
         ));
+    }
+
+    #[test]
+    fn abstract_file_keeps_its_distinct_java_interface_in_the_compiler_package() {
+        let bytes = fixture_bytes("scala3-compiler/dotty/tools/io/AbstractFile.tasty");
+        let decoded = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("dotty/tools/io/AbstractFile"),
+            |owner, alias| {
+                (owner.as_internal() == "scala/package" && alias == "Iterable")
+                    .then(|| BinaryName::from_internal("scala/collection/Iterable"))
+            },
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.interfaces[1].as_internal(),
+            "dotty/tools/dotc/interfaces/AbstractFile"
+        );
     }
 
     #[test]
