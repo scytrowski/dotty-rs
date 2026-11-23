@@ -54,6 +54,14 @@ the method-owned type and evidence parameters, and rollback on rejected calls.
 The eight positive client sites and six negative sites are project controls
 outside the eleven-site upstream sample.
 
+Three additional project fixtures exercise chained exports. `ChainedExports.scala`
+has nine successful sites, including the one-hop control, direct selection,
+search inside the exporting object and a polymorphic provider with its own
+evidence. `ChainedErrors.scala` checks seven rejections. `ChainedCycle.scala`
+checks the missing witness on a cycle of two empty exports. The Rust tests also
+check declaration order, precompleted modules, rollback and retry. The existing
+contextual CI job runs both the Rust tests and pinned Scala controls.
+
 The audit also runs three project controls for an ordinary `class Box[A: TC]`.
 The positive control checks the private witness used by `summon[TC[A]]` in
 the class and the caller's witness passed to `new Box[Int]`. Two negative
