@@ -386,7 +386,10 @@ anonymous one — reconstructed from its own class file's `InnerClasses`
 self-entry (JVMS §4.7.6 requires one) when it names an `outer_class`, or
 its `EnclosingMethod` attribute's `class` otherwise (see the known gap
 in §3 for why this stops at the enclosing class, not the enclosing
-method). `Visibility::Package` is computed once, from the real package,
+method). For a member class, identity lookup and completion read visibility
+from its own `InnerClasses` entry. For a package-private field, method, or
+constructor, the access boundary is the package of the class file.
+`Visibility::Package` is computed from the real package,
 and is never repointed at the enclosing class — a package-private
 nested class is visible package-wide, not only from within its
 enclosing class. For ordinary TASTy classes, identity lookup and completion

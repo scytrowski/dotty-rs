@@ -11,7 +11,8 @@ use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::{
-    ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
+    ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ClassAccessFlags, FieldAccessFlags,
+    MethodAccessFlags,
 };
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
@@ -40,6 +41,19 @@ use std::rc::Rc;
 use std::time::Instant;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
+
+// Classes, fields and methods share the same three JVM visibility bits.
+fn jvm_visibility(access: u16, package: SymbolId) -> Visibility {
+    if access & ACC_PRIVATE != 0 {
+        Visibility::Private
+    } else if access & ACC_PROTECTED != 0 {
+        Visibility::Protected
+    } else if access & ACC_PUBLIC != 0 {
+        Visibility::Public
+    } else {
+        Visibility::Package(package)
+    }
+}
 
 pub(crate) struct CachedDecodedModule {
     pub(crate) resource: ClassResource,
@@ -5736,11 +5750,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
 
         let origin = self.store.symbols.get(identity.module_class).origin;
+        let package = self
+            .session
+            .packages
+            .resolve(self.store, &identity.module_class_name);
         for field in &decoded.fields {
             let resolved_type = self
                 .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
             let symbol = self.enter_field(
-                identity.module_class,
+                package,
                 declarations,
                 &field.name,
                 field.flags,
@@ -5752,7 +5770,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         self.enter_tasty_methods(
             &identity.module_class_name,
-            identity.module_class,
+            package,
             declarations,
             &decoded.methods,
             &[],
@@ -6375,12 +6393,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         let visibility = match tasty_visibility {
             Some(visibility) => self.tasty_visibility(name, &visibility),
-            None => match classfile_visibility.unwrap_or(flags) {
-                visibility if visibility.contains(ACC_PRIVATE) => Visibility::Private,
-                visibility if visibility.contains(ACC_PROTECTED) => Visibility::Protected,
-                visibility if visibility.is_public() => Visibility::Public,
-                _ => Visibility::Package(package),
-            },
+            None => jvm_visibility(classfile_visibility.unwrap_or(flags).0, package),
         };
         let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
         if flags.is_abstract() {
@@ -6760,35 +6773,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn enter_class(
         &mut self,
         name: &BinaryName,
+        package: SymbolId,
         flags: ClassAccessFlags,
+        visibility: Visibility,
         origin: SymbolOrigin,
     ) -> Result<(SymbolId, ScopeId, SymbolOrigin), ClassLoadError> {
-        let owner = self.session.packages.resolve(self.store, name);
-
         let text = self.store.names.intern(name.simple_name());
         let symbol_name = Name::new(text, Namespace::Type);
-
-        // A JVM class file's own access_flags carry no ACC_PRIVATE/
-        // ACC_PROTECTED bit (JVMS §4.1 Table 4.1-A) -- those only appear on
-        // a *member* class's InnerClasses entry, not here -- so a top-level
-        // class is only ever public or package-private. `flags` is shaped
-        // exactly like a real `.class` file's access_flags for both
-        // callers (`load_uncached_class` and, via
-        // `tasty_symbol::decode_flags`, `load_uncached_tasty`), so this is
-        // correct and complete for `.class` but not the final word for
-        // `.tasty` -- see `load_uncached_tasty`'s own visibility patch,
-        // right after it calls this, for where a `.tasty` class's real
-        // (potentially more restrictive) `private`/`protected` visibility
-        // is corrected in.
         let kind = if flags.is_interface() {
             SymbolKind::Trait
         } else {
             SymbolKind::Class
-        };
-        let visibility = if flags.is_public() {
-            Visibility::Public
-        } else {
-            Visibility::Package(owner)
         };
 
         let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
@@ -6847,12 +6842,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             } else {
                 existing_symbol.origin
             };
-            let semantic_owner = existing_symbol.owner.unwrap_or(owner);
-            let visibility = if builtin_object {
-                visibility
-            } else {
-                existing_symbol.visibility
-            };
+            let semantic_owner = existing_symbol.owner.unwrap_or(package);
             let links = existing_symbol.links;
             self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
@@ -6871,7 +6861,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         } else {
             let symbol = self.store.symbols.alloc(Symbol {
                 name: symbol_name,
-                owner: Some(owner),
+                owner: Some(package),
                 kind,
                 flags: symbol_flags,
                 visibility,
@@ -6885,7 +6875,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.session
             .packages
-            .enter_class(self.store, owner, symbol_name, class_symbol);
+            .enter_class(self.store, package, symbol_name, class_symbol);
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
         Ok((class_symbol, declarations, class_origin))
@@ -6944,32 +6934,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// resolved, so it is allocated already `SymbolInfo::Complete`.
     fn enter_field(
         &mut self,
-        class_symbol: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         field_name: &str,
         flags: FieldAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
     ) -> SymbolId {
-        // Unlike a top-level class's access_flags, a field's *can* carry
-        // ACC_PRIVATE/ACC_PROTECTED (JVMS §4.5 Table 4.5-A), so all four
-        // Java visibilities are distinguishable here.
-        let visibility = if flags.is_private() {
-            Visibility::Private
-        } else if flags.is_protected() {
-            Visibility::Protected
-        } else if flags.is_public() {
-            Visibility::Public
-        } else {
-            let owner = self
-                .store
-                .symbols
-                .get(class_symbol)
-                .owner
-                .expect("a loaded class always has a package owner");
-            Visibility::Package(owner)
-        };
-
+        let visibility = jvm_visibility(flags.0, package);
+        let owner = self.store.scopes.get(declarations).owner;
         let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
         if flags.is_static() {
             symbol_flags = symbol_flags | SymbolFlags::STATIC;
@@ -6988,7 +6961,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let field_symbol = self.store.symbols.alloc(Symbol {
             name: symbol_name,
-            owner: Some(class_symbol),
+            owner,
             kind: SymbolKind::Field,
             flags: symbol_flags,
             visibility,
@@ -7527,23 +7500,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let decoded =
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
-        let (class_symbol, declarations, origin) = self.enter_class(name, decoded.flags, origin)?;
+        let package = self.session.packages.resolve(self.store, name);
+        let visibility = match &decoded.visibility {
+            Some(declared) => self.tasty_visibility(name, declared),
+            None => jvm_visibility(decoded.flags.0, package),
+        };
+        let (class_symbol, declarations, origin) =
+            self.enter_class(name, package, decoded.flags, visibility, origin)?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
-
-        // `enter_class` derives visibility from `ClassAccessFlags` alone,
-        // which (correctly, for `.class` — see its own doc comment) can
-        // only ever produce `Public`/`Package` here. `.tasty` actually
-        // knows the real, more restrictive `private`/`protected`
-        // distinction (see `tasty_symbol::DeclaredVisibility`'s doc
-        // comment for why `flags` itself can't carry it), so patch it in
-        // now — the same "allocate first, correct once known" pattern
-        // `resolve_semantic_owner`'s owner patch (`.class`'s nested-class
-        // path) already uses.
-        if let Some(declared) = &decoded.visibility {
-            let visibility = self.tasty_visibility(name, declared);
-            self.store.symbols.get_mut(class_symbol).visibility = visibility;
-        }
 
         let class_type_parameters = self.enter_tasty_class_type_parameters(
             name,
@@ -7599,7 +7564,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 &class_type_parameters,
             );
             let symbol = self.enter_field(
-                class_symbol,
+                package,
                 declarations,
                 &field.name,
                 field.flags,
@@ -7611,7 +7576,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         self.enter_tasty_methods(
             name,
-            class_symbol,
+            package,
             declarations,
             &decoded.methods,
             &class_type_parameters,
@@ -7625,7 +7590,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn enter_tasty_methods(
         &mut self,
         class_name: &BinaryName,
-        owner: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         methods: &[tasty_symbol::DecodedTastyMethod],
         class_parameters: &[TypeId],
@@ -7646,7 +7611,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let info =
                 self.lower_tasty_method_with_class_parameters(class_name, method, class_parameters);
             let symbol = self.enter_method(
-                owner,
+                package,
                 declarations,
                 &method.name,
                 method.flags,
@@ -8158,8 +8123,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // ancestry threaded through `resolve_dependency`; a dependency cycle
         // that reaches this shell outside that ancestry may reuse it.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
-        let (class_symbol, declarations, origin) =
-            self.enter_class(name, class_file.access_flags, origin)?;
+        let access = self
+            .semantic_class_visibility_flags(name, &class_file)?
+            .unwrap_or(class_file.access_flags);
+        let package = self.session.packages.resolve(self.store, name);
+        let (class_symbol, declarations, origin) = self.enter_class(
+            name,
+            package,
+            class_file.access_flags,
+            jvm_visibility(access.0, package),
+            origin,
+        )?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
@@ -8264,7 +8238,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.resolve_annotations(name, &field.attributes, &class_file.constant_pool)?;
 
             let field_symbol = self.enter_field(
-                class_symbol,
+                package,
                 declarations,
                 &field_name,
                 field.access_flags,
@@ -8316,7 +8290,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     method.access_flags.is_varargs(),
                 )?;
                 let method_symbol = self.enter_method(
-                    class_symbol,
+                    package,
                     declarations,
                     &method_name,
                     method.access_flags,
@@ -9129,29 +9103,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// becomes `SymbolKind::Method`.
     fn enter_method(
         &mut self,
-        class_symbol: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         method_name: &str,
         flags: MethodAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
     ) -> SymbolId {
-        let visibility = if flags.is_private() {
-            Visibility::Private
-        } else if flags.is_protected() {
-            Visibility::Protected
-        } else if flags.is_public() {
-            Visibility::Public
-        } else {
-            let owner = self
-                .store
-                .symbols
-                .get(class_symbol)
-                .owner
-                .expect("a loaded class always has a package owner");
-            Visibility::Package(owner)
-        };
-
+        let visibility = jvm_visibility(flags.0, package);
+        let owner = self.store.scopes.get(declarations).owner;
         let mut symbol_flags = if matches!(origin, SymbolOrigin::Classfile(_)) {
             SymbolFlags::JAVA_DEFINED
         } else {
@@ -9181,7 +9141,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let method_symbol = self.store.symbols.alloc(Symbol {
             name: symbol_name,
-            owner: Some(class_symbol),
+            owner,
             kind,
             flags: symbol_flags,
             visibility,
@@ -16882,8 +16842,15 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
         let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let package = loader.session.packages.resolve(loader.store, &class_name);
         let (class_symbol, declarations, origin) = loader
-            .enter_class(&class_name, decoded.flags, origin)
+            .enter_class(
+                &class_name,
+                package,
+                decoded.flags,
+                Visibility::Public,
+                origin,
+            )
             .expect("Option class identity should be enterable without loading its parents");
         let class_type_parameters = loader.enter_tasty_class_type_parameters(
             &class_name,
@@ -16897,7 +16864,7 @@ mod tests {
             &class_type_parameters,
         );
         let method_symbol = loader.enter_method(
-            class_symbol,
+            package,
             declarations,
             &method.name,
             method.flags,
@@ -16994,8 +16961,15 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
         let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let package = loader.session.packages.resolve(loader.store, &class_name);
         let (class_symbol, declarations, origin) = loader
-            .enter_class(&class_name, decoded.flags, origin)
+            .enter_class(
+                &class_name,
+                package,
+                decoded.flags,
+                Visibility::Public,
+                origin,
+            )
             .expect("Some class identity should be entered");
         let class_type_parameters = loader.enter_tasty_class_type_parameters(
             &class_name,
