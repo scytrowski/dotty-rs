@@ -1419,14 +1419,15 @@ where
             header.major_version, header.minor_version, header.experimental_version
         ));
     }
-    let file = parsed;
+    let mut file = parsed;
     let index_result = {
         let timer = ProfileTimer::new(profile.as_deref_mut().map(|profile| &mut profile.index_ns));
-        let index = file.ast_address_index();
+        let index = file.prepare_ast_address_index();
         drop(timer);
         index
     };
-    let index = index_result?;
+    index_result?;
+    let index = file.ast_address_index_view()?;
     let package = requested.package_path();
 
     let definition_selection_timer = ProfileTimer::new(
@@ -1464,6 +1465,18 @@ where
         .ok_or(TastyDecodeError::NoTemplateBody)?;
     drop(definition_selection_timer);
 
+    // Parameter payloads borrow the AST section. Map their exact slices to
+    // absolute AST addresses once for class and method binders.
+    let parameter_addresses: HashMap<_, _> = index
+        .iter()
+        .filter(|n| n.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+        .filter_map(|n| {
+            Some((
+                (n.payload.as_ptr(), n.payload.len()),
+                u32::try_from(n.offset).ok()?,
+            ))
+        })
+        .collect();
     let class_type_parameter_nodes = template
         .type_params
         .iter()
@@ -1477,14 +1490,9 @@ where
                 index: parameter_index,
             };
             let payload = parameter.payload();
-            let address = index
-                .iter()
-                .find(|indexed| {
-                    indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
-                        && indexed.payload.len() == payload.len()
-                        && indexed.payload.as_ptr() == payload.as_ptr()
-                })
-                .and_then(|indexed| u32::try_from(indexed.offset).ok())
+            let address = parameter_addresses
+                .get(&(payload.as_ptr(), payload.len()))
+                .copied()
                 .ok_or_else(unresolved)?;
             let parameter_index = u32::try_from(parameter_index).map_err(|_| unresolved())?;
             Ok((address, parameter_index))
@@ -1639,6 +1647,7 @@ where
             &template.stats,
             package,
             &class_type_parameters,
+            &parameter_addresses,
             &mut profiled_bare,
         );
         drop(timer);
@@ -2993,12 +3002,13 @@ fn decode_members(
     stats: &[RawTree<'_>],
     package: &str,
     class_type_parameters: &HashMap<u32, u32>,
+    parameter_addresses: &HashMap<(*const u8, usize), u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
     let mut methods = Vec::new();
-    let address_index = file.ast_address_index()?;
 
+    let address_index = file.ast_address_index_view()?;
     let source_flags = if file
         .attributes()?
         .is_some_and(|attrs| attrs.contains(&dotty_tasty::tasty::Attribute::Java))
@@ -3097,14 +3107,9 @@ fn decode_members(
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         let payload = parameter.payload();
-                        address_index
-                            .iter()
-                            .find(|indexed| {
-                                indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
-                                    && indexed.payload.len() == payload.len()
-                                    && indexed.payload.as_ptr() == payload.as_ptr()
-                            })
-                            .and_then(|indexed| u32::try_from(indexed.offset).ok())
+                        parameter_addresses
+                            .get(&(payload.as_ptr(), payload.len()))
+                            .copied()
                     })
                     .collect::<Vec<_>>();
                 let type_parameters_by_address = type_parameter_addresses
@@ -3904,7 +3909,7 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
 fn resolve_symbol_address(file: &TastyFile<'_>, address: u32) -> Option<String> {
     const MAX_OWNER_DEPTH: usize = 256;
 
-    let index = file.ast_address_index().ok()?;
+    let index = file.ast_address_index_view().ok()?;
     let definition = index.get(address)?;
     if definition.tag != TYPEDEF_TAG {
         return None;

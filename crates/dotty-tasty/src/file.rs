@@ -25,6 +25,7 @@ pub struct TastyFile<'a> {
     header: Header,
     names: NameTable,
     sections: SectionTable<'a>,
+    ast_index: Option<Box<AstAddressIndex<'a>>>,
     // The decoded model omits padding in wire integers.
     original_bytes: Option<&'a [u8]>,
 }
@@ -427,6 +428,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            ast_index: Default::default(),
             original_bytes: None,
         })
     }
@@ -442,6 +444,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            ast_index: Default::default(),
             original_bytes: Some(bytes),
         })
     }
@@ -850,6 +853,27 @@ impl<'a> TastyFile<'a> {
     /// nested inside expression, type, package, and template payloads.
     pub fn ast_address_index(&self) -> Result<AstAddressIndex<'a>, TastyFileError> {
         self.ast_address_index_with_max_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Builds the default-depth AST index for reuse by subsequent
+    /// [`Self::ast_address_index_view`] queries. Malformed ASTs return the
+    /// same error as [`Self::ast_address_index`] and leave the file unindexed.
+    pub fn prepare_ast_address_index(&mut self) -> Result<(), TastyFileError> {
+        if self.ast_index.is_none() {
+            self.ast_index = Some(Box::new(self.ast_address_index()?));
+        }
+        Ok(())
+    }
+
+    /// Borrows the prepared index, or builds an owned index for a one-off
+    /// query if none was prepared. Uses the default nesting limit.
+    pub fn ast_address_index_view(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, AstAddressIndex<'a>>, TastyFileError> {
+        match self.ast_index.as_deref() {
+            Some(index) => Ok(std::borrow::Cow::Borrowed(index)),
+            None => self.ast_address_index().map(std::borrow::Cow::Owned),
+        }
     }
 
     /// Index every visible AST node using an explicit nesting limit.
@@ -1757,6 +1781,25 @@ mod tests {
     }
 
     #[test]
+    fn repeated_default_index_queries_share_the_same_index() {
+        let mut file = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        assert!(matches!(
+            file.ast_address_index_view().unwrap(),
+            std::borrow::Cow::Owned(_)
+        ));
+        file.prepare_ast_address_index().unwrap();
+        let first = file.ast_address_index_view().unwrap();
+        assert!(matches!(first, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(
+            &*first,
+            &*file.ast_address_index_view().unwrap()
+        ));
+    }
+
+    #[test]
     fn applies_a_configured_depth_limit_to_ast_edge_queries() {
         let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
@@ -2204,6 +2247,7 @@ mod tests {
     #[test]
     fn reports_a_missing_asts_section() {
         let file = TastyFile {
+            ast_index: Default::default(),
             original_bytes: None,
             header: crate::header::Header {
                 major_version: 28,
