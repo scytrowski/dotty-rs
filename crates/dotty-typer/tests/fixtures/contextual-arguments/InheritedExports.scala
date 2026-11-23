@@ -13,6 +13,17 @@ object Only:
   export Ints.given TC[Int]
 object Rival:
   given other: TC[Int] = new TC[Int]
+trait OldBase:
+  implicit val old: TC[Int] = new TC[Int]
+trait LeftSide extends OldBase
+trait RightSide extends OldBase
+object Diamond extends LeftSide with RightSide
+object Both:
+  export Diamond.*
+object HiddenByOverride extends OldBase:
+  override val old: TC[Int] = new TC[Int]
+object OldApi:
+  export HiddenByOverride.*
 trait Low:
   given low: TC[Int] = new TC[Int]
 object High extends Low:
@@ -29,4 +40,5 @@ class Good:
   def all: TC[Int] = { import Api.given; need[Int] }
   def typed: TC[Int] = { import Only.given; need[Int] }
   def bool: TC[Boolean] = { import BoolOnly.given; need[Boolean] }
+  def diamond: TC[Int] = { import Both.*; need[Int] }
   def rankedControl: TC[Int] = { import High.given; need[Int] }

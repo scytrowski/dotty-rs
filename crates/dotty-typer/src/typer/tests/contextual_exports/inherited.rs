@@ -125,3 +125,27 @@ fn a_bound_that_only_matches_another_instantiation_publishes_no_witness() {
         TyperError::MissingContextualArgument { .. }
     ));
 }
+
+#[test]
+fn legacy_wildcard_collapses_the_diamond_and_respects_a_plain_override() {
+    let (parsed, mut store, packages, defs, index, source) = with_client(BAD);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "diamond").unwrap();
+    let id = reference(&typer, evidence(&typer, call));
+    assert_eq!(qualified_name(&typer, id), ("Both", "old"));
+    let entry = typer.store.symbols.get(id);
+    assert!(
+        entry
+            .flags
+            .contains(SymbolFlags::IMPLICIT | SymbolFlags::EXPORTED)
+    );
+    let scope = index.scope_of(entry.owner.unwrap()).unwrap();
+    assert_eq!(typer.store.scopes.get(scope).lookup_all(&entry.name), &[id]);
+    let (receiver, member) = stable_path(&mut typer, id);
+    assert_eq!(qualified_name(&typer, receiver).1, "Diamond");
+    assert_eq!(qualified_name(&typer, member), ("OldBase", "old"));
+    assert!(matches!(
+        rejected_call(&mut typer, &parsed, "masked"),
+        TyperError::MissingContextualArgument { .. }
+    ));
+}
