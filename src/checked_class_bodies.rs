@@ -1,5 +1,9 @@
 //! Retained complete and partial class checks from one frontend session.
-use crate::{CheckedClassBody, core::SymbolId};
+use crate::{
+    CheckedClassBody,
+    core::{SourceTypedIndex, SymbolId},
+    jvm_class_plan::TypedClassBody,
+};
 use std::{
     collections::{HashMap, hash_map::Entry},
     fmt,
@@ -10,11 +14,20 @@ use std::{
 pub enum CheckedBodyError {
     /// A result for this class is already present and remains unchanged.
     Duplicate(SymbolId),
+    /// No outcome has been recorded for the requested class.
+    Missing(SymbolId),
+    /// The class has committed mappings but was not fully checked.
+    Partial(SymbolId),
+    /// The original check rejected this symbol before checking any members.
+    Invalid(SymbolId),
 }
 
 impl fmt::Display for CheckedBodyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Missing(class) => write!(f, "no body recorded for {class:?}"),
+            Self::Partial(class) => write!(f, "partial body for {class:?}"),
+            Self::Invalid(class) => write!(f, "invalid class for body check: {class:?}"),
             Self::Duplicate(class) => write!(f, "body already recorded for {class:?}"),
         }
     }
@@ -47,5 +60,23 @@ impl CheckedClassBodies {
     /// symbol yields `None` independently of checks performed on its siblings.
     pub fn get(&self, class: SymbolId) -> Option<&CheckedClassBody> {
         self.bodies.get(&class)
+    }
+
+    /// Borrows the committed mappings of a partial or complete body. Missing and
+    /// invalid checks yield `None`. Use the original session's arenas for lookup.
+    pub fn bindings(&self, class: SymbolId) -> Option<&SourceTypedIndex> {
+        self.get(class)?.bindings()
+    }
+
+    /// Borrows a fully checked body for [`crate::jvm_class_plan::JvmClassPlanner::plan_typed_class`].
+    /// Missing, partial and invalid outcomes retain distinct typed errors. The
+    /// body stays available for navigation and subsequent planning in this session.
+    pub fn complete(&self, class: SymbolId) -> Result<&TypedClassBody, CheckedBodyError> {
+        match self.get(class) {
+            Some(CheckedClassBody::Complete(body)) => Ok(body),
+            Some(CheckedClassBody::Partial(_)) => Err(CheckedBodyError::Partial(class)),
+            Some(CheckedClassBody::Invalid(_)) => Err(CheckedBodyError::Invalid(class)),
+            None => Err(CheckedBodyError::Missing(class)),
+        }
     }
 }

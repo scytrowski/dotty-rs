@@ -831,6 +831,12 @@ mod tests {
             (file.source(), &TyperWarning::ImplicitClauseWithoutUsing)
         );
         drop(report.diagnostics);
+        let mut bodies = crate::CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        assert_eq!(
+            bodies.complete(class.symbol).unwrap_err(),
+            crate::CheckedBodyError::Partial(class.symbol)
+        );
         let calls = file.navigation().unwrap();
         let definition = |needle| {
             calls.definition_at_with_bindings(
@@ -840,7 +846,7 @@ mod tests {
                 &store,
                 |owner| {
                     assert_eq!(owner, class.symbol);
-                    body.bindings()
+                    bodies.bindings(owner)
                 },
                 |id| sources.file(id)?.navigation().ok(),
             )
@@ -860,7 +866,16 @@ mod tests {
             )
             .into_parts();
         assert!(matches!(invalid, CheckedClassBody::Invalid(_)));
-        assert!(invalid.bindings().is_none());
+        assert_eq!(
+            bodies.complete(class.constructor).unwrap_err(),
+            crate::CheckedBodyError::Missing(class.constructor)
+        );
+        bodies.record(invalid).unwrap();
+        assert_eq!(
+            bodies.complete(class.constructor).unwrap_err(),
+            crate::CheckedBodyError::Invalid(class.constructor)
+        );
+        assert!(bodies.bindings(class.constructor).is_none());
         assert!(
             matches!(report.errors.as_slice(),[ClassBodyError::InvalidClass(id)] if *id == class.constructor)
         );

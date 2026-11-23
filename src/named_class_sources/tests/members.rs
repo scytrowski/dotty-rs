@@ -601,6 +601,14 @@ fn checked_bodies_keep_their_original_same_file_owners_after_reporting() {
         );
         bodies.record(body).unwrap();
     }
+    assert_eq!(bodies.complete(a.symbol).unwrap().class(), a.symbol);
+    assert!(
+        bodies
+            .bindings(a.symbol)
+            .unwrap()
+            .get(file.source(), a.methods().next().unwrap().tree)
+            .is_some()
+    );
     assert!(matches!(
         bodies.get(a.symbol),
         Some(crate::CheckedClassBody::Complete(_))
