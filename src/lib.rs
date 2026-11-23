@@ -60,7 +60,7 @@ pub use named_source::{
 };
 
 mod class_preparation;
-pub use class_preparation::PreparationDiagnostic;
+pub use class_preparation::{ClassPreparation, PreparationDiagnostic};
 
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
