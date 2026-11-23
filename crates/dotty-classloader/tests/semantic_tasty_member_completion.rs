@@ -901,7 +901,7 @@ fn legacy_method(id: &str) -> (String, String) {
         "option-getOrElse" => "scala/Option",
         "info-wrapped-m" => "me/cytrowski/tastyfixtures/semantic/InfoWrapped",
         "animal-sound" => "me/cytrowski/tastyfixtures/Animal",
-        "dog-sound" => "Dog",
+        "dog-sound" => "me/cytrowski/tastyfixtures/Dog",
         _ => unreachable!(),
     };
     let method_name = match id {

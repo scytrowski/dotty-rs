@@ -135,7 +135,7 @@ fn units() -> Vec<Unit> {
         );
         let lookup = match id.as_str() {
             "animal" => "me/cytrowski/tastyfixtures/Animal",
-            "dog" => "Dog",
+            "dog" => "me/cytrowski/tastyfixtures/Dog",
             "fields-body" => "me/cytrowski/tastyfixtures/fields/Body",
             "fields-p" => "me/cytrowski/tastyfixtures/fields/P",
             "fields-q" => "me/cytrowski/tastyfixtures/fields/Q",
@@ -859,8 +859,8 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .collect::<Vec<_>>();
     assert_eq!(
         changed.len(),
-        20,
-        "the selected Option member, canonical Boolean identity, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
+        22,
+        "the qualified Dog identity and error context, selected Option member, canonical Boolean identity, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
     );
 
     let mut some_fields = HashSet::new();
@@ -868,6 +868,19 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     let mut boolean_identity_delta = false;
     for (current, frozen) in changed {
         match (current[0].as_str(), current[1].as_str()) {
+            ("dog", "identity" | "member_signatures") => {
+                let mut expected = frozen.clone();
+                if current[1] == "identity" {
+                    expected[3] = "me.cytrowski.tastyfixtures.Dog|Class|Dog".to_owned();
+                    expected[10] = "equal".to_owned();
+                } else {
+                    expected[3] = frozen[3].replace(
+                        "class Dog failed",
+                        "class me/cytrowski/tastyfixtures/Dog failed",
+                    );
+                }
+                assert_eq!(*current, expected);
+            }
             ("tuple2", field) => {
                 assert_eq!(current[4], "", "Tuple2 {field} loads from its fixture");
                 assert_eq!(current[5], frozen[5], "Tuple2 {field} fixture provenance");
@@ -2359,7 +2372,8 @@ fn malformed_and_missing_dependency_failures_preserve_store_and_allow_retry() {
             definitions,
             session,
         );
-        let result = loader.load_class(&BinaryName::from_internal("Dog"));
+        let result =
+            loader.load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"));
         session = loader.into_session();
         result
     };

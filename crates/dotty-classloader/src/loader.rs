@@ -20576,7 +20576,7 @@ mod tests {
 
     #[test]
     fn ensure_tasty_class_identity_does_not_resolve_tasty_parents() {
-        let name = BinaryName::from_internal("Dog");
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog");
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(
             InMemoryTastyClassPath(HashMap::from([(
@@ -21020,6 +21020,54 @@ mod tests {
     }
 
     #[test]
+    fn tasty_class_selection_checks_the_package_and_immediate_owner() {
+        let bytes = include_bytes!("../tests/fixtures/tasty_identity/Shadow.tasty").to_vec();
+        for (path, valid) in [("identity/Shadow", true), ("different/Shadow", false)] {
+            let name = BinaryName::from_internal(path);
+            for shell_first in [false, true] {
+                let mut store = SemanticStore::new();
+                let mut loader = ClassLoader::new(
+                    CompositeClassPath::new(vec![
+                        Box::new(InMemoryTastyClassPath(HashMap::from([(
+                            name.clone(),
+                            bytes.clone(),
+                        )]))),
+                        Box::new(InMemoryClassPath(HashMap::from([(
+                            BinaryName::from_internal("java/lang/Object"),
+                            synthetic_class("java/lang/Object", None),
+                        )]))),
+                    ]),
+                    &mut store,
+                );
+                if valid {
+                    let shell = shell_first.then(|| loader.ensure_class_identity(&name).unwrap());
+                    let class = loader.load_class(&name).unwrap();
+                    assert_eq!(shell.unwrap_or(class), class);
+                    member_type_id(loader.store, class, "topLevel");
+                } else {
+                    if shell_first {
+                        assert!(matches!(
+                            loader.ensure_class_identity(&name),
+                            Err(ClassLoadError::InvalidTastyFile(
+                                _,
+                                tasty_symbol::TastyDecodeError::MissingTypeDef
+                            ))
+                        ));
+                    }
+                    assert!(matches!(
+                        loader.load_class(&name),
+                        Err(ClassLoadError::InvalidTastyFile(
+                            _,
+                            tasty_symbol::TastyDecodeError::MissingTypeDef
+                        ))
+                    ));
+                    assert!(!loader.session.identified.contains_key(&name));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn invalid_tasty_file_when_the_bytes_do_not_decode() {
         let mut classes = HashMap::new();
         classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
@@ -21065,7 +21113,7 @@ mod tests {
     fn dependency_failure_when_a_tasty_classes_super_class_cannot_be_found() {
         let mut classes = HashMap::new();
         classes.insert(
-            BinaryName::from_internal("Dog"),
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"),
             own_fixture_bytes("tasty_sample/Dog.tasty"),
         );
         // Deliberately omit java/lang/Object (and Animal) so resolving
@@ -21075,12 +21123,12 @@ mod tests {
 
         let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
         let error = loader
-            .load_class(&BinaryName::from_internal("Dog"))
+            .load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"))
             .unwrap_err();
         assert!(matches!(
             error,
             ClassLoadError::DependencyFailure { owner, dependency, source }
-                if owner.as_internal() == "Dog"
+                if owner.as_internal() == "me/cytrowski/tastyfixtures/Dog"
                     && dependency.as_internal() == "java/lang/Object"
                     && matches!(*source, ClassLoadError::NotFound(_))
         ));
@@ -21099,7 +21147,7 @@ mod tests {
     fn enters_a_real_tasty_case_classs_fields_and_methods_into_the_class_declarations_scope() {
         let mut point = HashMap::new();
         point.insert(
-            BinaryName::from_internal("Point"),
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/Point"),
             dotty_tasty_fixture_bytes("case_class/Point.tasty"),
         );
 
@@ -21134,7 +21182,9 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
         let point = loader
-            .load_class(&BinaryName::from_internal("Point"))
+            .load_class(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/Point",
+            ))
             .expect("Point should load from its real .tasty fixture");
         drop(loader);
 
@@ -21229,69 +21279,19 @@ mod tests {
         assert!(message.contains("could not reduce the declared type tree to a supported shape"));
     }
 
-    /// `tasty_symbol::decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class`
-    /// already proves, at the decode level, that `tasty_symbol::decode`
-    /// preserves `scala3-library/scala/math/Ordering.tasty`'s real
-    /// private nested `Reverse`'s `PRIVATE_TAG` — this used to prove the
-    /// *loader* actually uses that too, by loading `Reverse` for real
-    /// (which also loads `Ordering` itself, `Reverse`'s declared
-    /// interface). `Ordering` itself mixes in a synthetic `Serializable`
-    /// — the same unresolvable implicit-import reference as `BigInt`'s
-    /// own `Serializable`
-    /// (`tasty_symbol::decoding_fails_when_one_of_several_mixins_is_an_unresolvable_implicit_import_reference`)
-    /// — so loading `Ordering` (and therefore `Reverse`) through a real
-    /// `ClassLoader` now fails with `UnresolvedSupertype` instead of
-    /// silently widening or narrowing any visibility, per the same
-    /// explicit-unresolved-over-misleading-guess reasoning. Asserts that
-    /// failure explicitly; this crate has no other real `.tasty` fixture
-    /// with a non-public top-level class and no unresolvable implicit-
-    /// import mixin anywhere in its dependency chain, so the loader-level
-    /// (as opposed to `tasty_symbol::decode`-level, still covered by the
-    /// `tasty_symbol` test named above) proof that
-    /// `load_uncached_tasty`'s visibility patch is actually wired up is
-    /// lost along with this fixture's usability, until either a suitable
-    /// fixture is found or real scope/import resolution (issue #7)
-    /// closes the underlying gap.
     #[test]
-    fn loading_a_private_tasty_class_fails_when_its_own_interface_has_an_unresolved_mixin() {
-        let mut tasty = HashMap::new();
-        tasty.insert(
-            BinaryName::from_internal("Reverse"),
-            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
-        );
-        tasty.insert(
-            BinaryName::from_internal("Ordering"),
-            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
-        );
-
-        let mut classes = HashMap::new();
-        for stub in [
-            "java/lang/Object",
-            "Comparator",
-            "java/util/Comparator",
-            "PartialOrdering",
-            "scala/PartialOrdering",
-            "scala/math/PartialOrdering",
-            "Serializable",
-            "scala/Serializable",
-            "java/io/Serializable",
-        ] {
-            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
-        }
-
-        let class_path = CompositeClassPath::new(vec![
-            Box::new(InMemoryTastyClassPath(tasty)),
-            Box::new(InMemoryClassPath(classes)),
-        ]);
-
+    fn a_nested_tasty_definition_is_rejected_before_its_dependencies_are_loaded() {
+        let name = BinaryName::from_internal("scala/math/Reverse");
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(class_path, &mut store);
-        let error = loader
-            .load_class(&BinaryName::from_internal("Reverse"))
-            .expect_err("Reverse should fail to load, via Ordering's own unresolved mixin");
-        drop(loader);
-
-        assert!(matches!(error, ClassLoadError::DependencyFailure { .. }));
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
+            )])),
+            &mut store,
+        );
+        assert!(matches!(loader.load_class(&name),
+            Err(ClassLoadError::InvalidTastyFile(requested, tasty_symbol::TastyDecodeError::MissingTypeDef)) if requested == name));
     }
 
     /// The generic `Iterator` mixin in `Source.tasty` is an alias owned by
@@ -21301,7 +21301,7 @@ mod tests {
     fn loading_source_tasty_resolves_iterator_through_package_alias() {
         let mut tasty = HashMap::new();
         tasty.insert(
-            BinaryName::from_internal("Source"),
+            BinaryName::from_internal("scala/io/Source"),
             dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
         );
         tasty.insert(
@@ -21326,7 +21326,7 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
         let source = loader
-            .load_class(&BinaryName::from_internal("Source"))
+            .load_class(&BinaryName::from_internal("scala/io/Source"))
             .expect("Source should load through its package-object Iterator alias");
         assert!(matches!(
             loader
@@ -21414,7 +21414,7 @@ mod tests {
     fn loading_source_reports_a_malformed_package_alias_tasty_file() {
         let resources = HashMap::from([
             (
-                BinaryName::from_internal("Source"),
+                BinaryName::from_internal("scala/io/Source"),
                 (
                     dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
                     ClassFormat::Tasty,
@@ -21435,7 +21435,7 @@ mod tests {
         let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
         loader.set_load_profile_collection(true);
         let failure = loader
-            .load_class_detailed(&BinaryName::from_internal("Source"))
+            .load_class_detailed(&BinaryName::from_internal("scala/io/Source"))
             .expect_err("malformed package alias TASTy should be reported");
         assert!(matches!(
             failure.error,
@@ -21452,7 +21452,7 @@ mod tests {
         let profile = loader
             .take_load_profiles()
             .into_iter()
-            .find(|profile| profile.root == "Source")
+            .find(|profile| profile.root == "scala/io/Source")
             .expect("failed profiled TASTy load should publish counters");
         assert_eq!(profile.tasty_decode_counters["callback_errors"], 1);
         assert_eq!(
@@ -21476,13 +21476,13 @@ mod tests {
             (
                 BinaryName::from_internal("Owner"),
                 (
-                    synthetic_class("Owner", Some("Source")),
+                    synthetic_class("Owner", Some("scala/io/Source")),
                     ClassFormat::Class,
                     ClassOrigin::Directory(PathBuf::from("/owner")),
                 ),
             ),
             (
-                BinaryName::from_internal("Source"),
+                BinaryName::from_internal("scala/io/Source"),
                 (
                     dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
                     ClassFormat::Tasty,
@@ -21524,7 +21524,7 @@ mod tests {
         assert_eq!(failure.format, Some(ClassFormat::Tasty));
 
         let calls_after_initial_failure = calls.load(Ordering::Relaxed);
-        for name in ["Owner", "Source"] {
+        for name in ["Owner", "scala/io/Source"] {
             let cached = loader
                 .load_class_detailed(&BinaryName::from_internal(name))
                 .expect_err("cached failures must retain the alias provenance");

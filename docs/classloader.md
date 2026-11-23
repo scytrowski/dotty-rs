@@ -389,8 +389,9 @@ in §3 for why this stops at the enclosing class, not the enclosing
 method). `Visibility::Package` is computed once, from the real package,
 and is never repointed at the enclosing class — a package-private
 nested class is visible package-wide, not only from within its
-enclosing class. `.tasty` files carry neither attribute, so a
-`.tasty`-backed nested class's owner is still just its package (§4.4).
+enclosing class. For ordinary TASTy classes, identity lookup and completion
+select the same unique direct definition in the requested package. A nested
+definition cannot supply a top-level class of the same name.
 
 For a classfile-backed nested class inside a top-level Scala object, the
 `InnerClasses` entry can name the object's static forwarder class as the

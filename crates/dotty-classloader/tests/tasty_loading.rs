@@ -1355,15 +1355,7 @@ fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
     symbol
 }
 
-/// `Dog.tasty`'s `Animal` mixin is a real, post-typecheck reference
-/// carrying its own compiled `TERMREFpkg` prefix
-/// (`me.cytrowski.tastyfixtures`, this fixture's real source package —
-/// see `tasty_symbol::resolve_reference_name`), so `Animal` is looked up
-/// at that real qualified path, not bare — `tasty_sample/me/cytrowski/
-/// tastyfixtures/Animal.tasty` is a second copy of the same
-/// `Animal.tasty` bytes, alongside the pre-existing root-level
-/// `Animal.tasty`/`Animal.class` the tests below still load directly by
-/// their own bare request.
+/// Dog's interface is resolved from the package encoded in the compiled TASTy.
 #[test]
 fn loads_dog_with_animal_resolved_through_tasty_as_a_real_interface() {
     let mut store = SemanticStore::new();
@@ -1371,7 +1363,7 @@ fn loads_dog_with_animal_resolved_through_tasty_as_a_real_interface() {
         class_loader_over_tasty_sample("tasty-loading-dog-synthetic-jdk", &mut store);
 
     let dog = loader
-        .load_class(&BinaryName::from_internal("Dog"))
+        .load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"))
         .expect("Dog should load from its real .tasty fixture");
     drop(loader);
 
@@ -1412,7 +1404,9 @@ fn loads_animal_directly_as_an_interface_with_no_declared_interfaces() {
         class_loader_over_tasty_sample("tasty-loading-animal-synthetic-jdk", &mut store);
 
     let animal = loader
-        .load_class(&BinaryName::from_internal("Animal"))
+        .load_class(&BinaryName::from_internal(
+            "me/cytrowski/tastyfixtures/Animal",
+        ))
         .expect("Animal should load from its real .tasty fixture, not the co-located dummy .class");
     drop(loader);
 
@@ -2640,7 +2634,7 @@ fn classloader_and_tasty_unpickler_class_infos_share_one_core_contract() {
     let (mut loader, _synthetic_jdk) =
         class_loader_over_tasty_sample("tasty-loading-convergence-synthetic-jdk", &mut store);
     let dog = loader
-        .load_class(&BinaryName::from_internal("Dog"))
+        .load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"))
         .expect("Dog should load");
     let definitions = loader.definitions();
     drop(loader);
