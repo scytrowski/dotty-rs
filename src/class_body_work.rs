@@ -71,6 +71,9 @@ impl<'file> ClassBodyWork<'file> {
     /// typed arena and resolver. Skipped members retain their signature reasons in
     /// [`Self::members`] and produce no new body error or binding. A body error
     /// rolls back that member; independent ready members are still checked.
+    /// A skipped constructor field or body declaration yields [`crate::CheckedClassBody::Partial`]
+    /// even if the body report has no errors. Only [`crate::CheckedClassBody::Complete`]
+    /// carries a body for planning. Warnings belong to committed visits in source order.
     /// An unselected class yields [`crate::ClassBodyError::InvalidClass`] before typing.
     pub fn check(
         &self,

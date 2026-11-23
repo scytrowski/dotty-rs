@@ -426,3 +426,133 @@ fn body_work_preserves_owner_order_and_all_four_signature_states() {
     assert_eq!(work.members(empty.symbol).unwrap().count(), 0);
     assert!(work.members(omitted.symbol).is_none());
 }
+
+#[test]
+fn skipped_only_body_is_partial_and_preserves_committed_warning_order() {
+    use crate::core::SymbolInfo;
+    use crate::{BodySkipReason, CheckedClassBody, MemberSignaturePhase};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let text = "class A { def f(implicit i: Int): Int = i; def first(): Int = f(1); private val later = f(2); def last(): Int = f(3) }; class Empty";
+    let file = named(4, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let [class, empty] = file.classes() else {
+        panic!()
+    };
+    let later = class.fields().next().unwrap();
+    let selection = sources
+        .member_signatures([class.symbol, empty.symbol], &store)
+        .unwrap();
+    let mut phase = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    for method in class.methods() {
+        let _ = phase.attempt(method.symbol).unwrap();
+    }
+    let (signatures, work) = phase.finish_with_body_work();
+    assert_eq!(signatures.remaining, [later.symbol]);
+    let mut arena = AstArena::new();
+    let (body, report) = work.check(
+        class.symbol,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        crate::core::NoResolver,
+    );
+    let CheckedClassBody::Partial(bindings) = body else {
+        panic!("skipped field forbids planning")
+    };
+    assert!(report.errors.is_empty());
+    assert_eq!(store.symbols.info(later.symbol), &SymbolInfo::Missing);
+    assert!(bindings.get(file.source(), later.tree).is_none());
+    for method in class.methods() {
+        assert!(bindings.get(file.source(), method.tree).is_some());
+    }
+    let warnings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|(source, d)| {
+            assert_eq!(*source, file.source());
+            assert_eq!(
+                d.issue(),
+                &crate::typer::TyperWarning::ImplicitClauseWithoutUsing
+            );
+            let r = d.span();
+            &text[r.start() as usize..r.end() as usize]
+        })
+        .collect();
+    assert_eq!(warnings, ["1", "3"]);
+    assert_eq!(
+        work.members(class.symbol)
+            .unwrap()
+            .find(|(id, _)| *id == later.symbol)
+            .unwrap()
+            .1,
+        Some(&BodySkipReason::Remaining)
+    );
+    let (body, report) = work.check(
+        empty.symbol,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        crate::core::NoResolver,
+    );
+    assert!(matches!(body, CheckedClassBody::Complete(_)));
+    assert!(report.errors.is_empty() && report.diagnostics.is_empty());
+}
+
+#[test]
+fn blocked_body_creates_no_trees_and_unselected_class_is_invalid() {
+    use crate::{CheckedClassBody, MemberSignaturePhase};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(
+        7,
+        "class C { def read(p: P) = p.seed }; class Other",
+        &mut store,
+        &mut packages,
+    );
+    let provider = named(6, "class P { val seed = 40 }", &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file, &provider], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let [c, other] = file.classes() else { panic!() };
+    let p = &provider.classes()[0];
+    let selection = sources
+        .member_signatures([c.symbol, p.symbol], &store)
+        .unwrap();
+    let mut phase = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    let method = c.methods().next().unwrap();
+    assert_eq!(
+        phase.attempt(method.symbol).unwrap().completion,
+        SignatureCompletion::BlockedOn(p.fields().next().unwrap().symbol)
+    );
+    let (_, work) = phase.finish_with_body_work();
+    let mut arena = AstArena::new();
+    let before = (arena.checkpoint(), store.checkpoint());
+    let (body, report) = work.check(
+        c.symbol,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        crate::core::NoResolver,
+    );
+    assert!(matches!(body,CheckedClassBody::Partial(index) if index.is_empty()));
+    assert!(report.errors.is_empty() && report.diagnostics.is_empty());
+    let (invalid, report) = work.check(
+        other.symbol,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        crate::core::NoResolver,
+    );
+    assert!(matches!(invalid, CheckedClassBody::Invalid));
+    assert!(
+        matches!(report.errors.as_slice(),[crate::ClassBodyError::InvalidClass(id)] if *id==other.symbol)
+    );
+    assert_eq!((arena.checkpoint(), store.checkpoint()), before);
+}

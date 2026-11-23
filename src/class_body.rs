@@ -199,7 +199,8 @@ pub struct ClassBodyReport {
 pub enum CheckedClassBody {
     /// All members succeeded. Move this body into planning or borrow its navigation bindings.
     Complete(TypedClassBody),
-    /// A valid class had member errors. Only committed source-to-typed mappings survive.
+    /// A valid class had rejected or skipped members. Only committed source-to-typed
+    /// mappings survive, including when all attempted members succeeded.
     Partial(SourceTypedIndex),
     /// Class validation failed before typing began.
     Invalid,
