@@ -53,6 +53,9 @@ pub use signature_dependencies::{
     SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
 };
 
+mod member_signature_selection;
+pub use member_signature_selection::{MemberSelectionError, MemberSignatureSelection};
+
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
