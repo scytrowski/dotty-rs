@@ -255,7 +255,7 @@ impl SourceTyper<'_> {
             _ => signature,
         };
         if !matches!(self.store.types.get(body), Type::Method(m) if m.kind == MethodKind::Contextual
-            && matches!(m.params.as_slice(), [p] if !p.erased && !p.varargs)
+            && !m.params.is_empty() && m.params.iter().all(|p| !p.erased && !p.varargs)
             && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_)))
         {
             return Err(TyperError::UnsupportedExpression {
@@ -263,6 +263,17 @@ impl SourceTyper<'_> {
                 tree_index,
                 expression_kind: "unsupported contextual export parameter clauses",
             });
+        }
+        if let Type::Method(clause) = self.store.types.get(body) {
+            for formal in &clause.params {
+                if self.type_contains_param_ref(formal.ty, body)? {
+                    return Err(TyperError::UnsupportedExpression {
+                        source: self.source,
+                        tree_index,
+                        expression_kind: "contextual export with a dependency within a parameter clause",
+                    });
+                }
+            }
         }
         freshen_type_binders(self.store, signature).map_err(|error| TyperError::TypeRebinding {
             source: self.source,
@@ -444,44 +455,52 @@ impl SourceTyper<'_> {
         let Type::Method(clause) = self.store.types.get(callable) else {
             return Err(invalid());
         };
-        let &[formal] = clause.params.as_slice() else {
-            return Err(invalid());
-        };
-        let witness = self.export_parameter(
-            method,
-            *formal.name.as_name(),
-            SymbolKind::Parameter,
-            SymbolFlags::GIVEN,
-            SymbolInfo::Complete(formal.ty),
-        );
-        let path = self
-            .store
-            .types
-            .alloc(Type::term_ref(self.definitions.no_prefix, witness));
-        let result = instantiate_method_result(self.store, callable, &[Some(path)])
-            .map_err(|_| invalid())?;
-        let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-        let tpt = builder.type_tree(formal.ty, position);
-        let ref_tree = builder.ident(*formal.name.as_name(), path, position);
-        let rhs = builder.apply(function, vec![ref_tree], result, position);
-        let param = self.typed_index.alloc_synthetic_definition(
-            &mut self.typed_arena,
-            witness,
-            Tree {
-                ty: formal.ty,
-                position,
-                kind: TreeKind::ValDef(ValDef {
-                    name: formal.name,
-                    tpt,
-                    rhs: None,
-                    metadata: (),
-                }),
-            },
-        );
+        let formals = clause.params.clone();
+        let mut params = Vec::new();
+        let mut paths = Vec::new();
+        let mut arguments = Vec::new();
+        for formal in formals {
+            let witness = self.export_parameter(
+                method,
+                *formal.name.as_name(),
+                SymbolKind::Parameter,
+                SymbolFlags::GIVEN,
+                SymbolInfo::Complete(formal.ty),
+            );
+            let path = self
+                .store
+                .types
+                .alloc(Type::term_ref(self.definitions.no_prefix, witness));
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let tpt = builder.type_tree(formal.ty, position);
+            let ref_tree = builder.ident(*formal.name.as_name(), path, position);
+
+            let param = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                witness,
+                Tree {
+                    ty: formal.ty,
+                    position,
+                    kind: TreeKind::ValDef(ValDef {
+                        name: formal.name,
+                        tpt,
+                        rhs: None,
+                        metadata: (),
+                    }),
+                },
+            );
+            params.push(param);
+            paths.push(Some(path));
+            arguments.push(ref_tree);
+        }
+        let result =
+            instantiate_method_result(self.store, callable, &paths).map_err(|_| invalid())?;
+        let rhs = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .apply(function, arguments, result, position);
         Ok(ExportBody {
             rhs,
             type_params,
-            value_param_clauses: vec![vec![param]],
+            value_param_clauses: vec![params],
         })
     }
 }
