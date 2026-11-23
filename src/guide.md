@@ -14,6 +14,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
+| Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
 | Plan source methods and classes for the JVM | [`jvm_method_plan`], [`jvm_class_plan`], [`jvm`] |
 | Read or write structural TASTy | [`tasty::TastyFile`], [`tasty::TastyFileBuilder`] |
@@ -238,6 +239,75 @@ source-to-typed bindings required by [`jvm_class_plan::JvmClassPlanner`].
 Neither helper is a general Scala compiler. An external [`core::SymbolResolver`]
 can provide symbols not already in the source session; classpath/JDK discovery
 belongs in [`classloader`], not in the source frontend.
+
+## Use class bodies for planning and navigation
+
+After signature completion, look up classes by symbol in [`NamedClassSources`].
+Choose [`NamedClassSources::type_class_body`] to stop at the first bad member,
+or [`NamedClassSources::check_class_body`] to check every member. Both accept
+a borrowed session resolver or [`core::NoResolver`]. Each failed member
+rolls back its own typing attempt. Keep the typed arena and store because
+successful members have committed their trees and bindings there.
+
+This client plans a valid class and reports a rejected call in another class
+from the same source file. Moving the typed error into a report leaves the
+successful sibling's definition link available.
+
+```rust
+use dotty::{CheckedClassBody, ClassBodyError, NamedClassSources, parse_source};
+use dotty::core::{AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId};
+use dotty::jvm_class_plan::{ClassHeaderBindings, JvmClassPlanner};
+use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
+
+# let mut store = SemanticStore::new();
+# let defs = Definitions::bootstrap(&mut store);
+# let mut packages = Packages::new();
+let text = "class A { def only(x: Int): Int = x }; class B { def bad(a: A): Int = a.only(false); def good(a: A): Int = a.only(7) }";
+let id = SourceId::from_index(42);
+let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
+    .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
+let sources = NamedClassSources::new([&file], &store)?;
+let mut arena = AstArena::new();
+# let mut headers = ClassHeaderBindings::default();
+# for (_, class) in sources.classes() {
+#     SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages)
+#         .complete_symbol(class.constructor)?;
+# }
+# for (_, class) in sources.classes() {
+#     assert!(matches!(sources.try_complete_class_header(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
+#     for method in class.methods() {
+#         assert!(matches!(sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages)?, SignatureCompletion::Complete(_)));
+#     }
+# }
+let a = file.classes()[0].symbol;
+let b = file.classes()[1].symbol;
+let complete = sources.type_class_body(a, &mut store, defs, &packages, &mut arena, NoResolver)?;
+let (owner, class) = sources.class(a).ok_or("missing class")?;
+JvmClassPlanner::new(&store, owner.ast(), owner.index())
+    .with_header_bindings(&arena, &headers).plan_typed_class(class, &arena, &complete)?;
+
+let (body, report) = sources.check_class_body(b, &mut store, defs, &packages, &mut arena, NoResolver)
+    .into_parts();
+assert!(matches!(body, CheckedClassBody::Partial(_)));
+let mut errors = report.errors.into_iter();
+assert!(matches!(errors.next(), Some(ClassBodyError::Member {
+    error: TyperError::ApplicationArgumentTypeMismatch { .. }, ..
+})));
+assert!(errors.next().is_none());
+let offset = text.find("only(7)").ok_or("missing caller")? as u32;
+let target = file.navigation()?.definition_at_with_bindings(offset, file.ast(), &arena, &store,
+    |symbol| (symbol == b).then(|| body.bindings()).flatten(),
+    |source| sources.file(source)?.navigation().ok(),
+).ok_or("missing definition")?;
+assert_eq!(target.name.start() as usize, text.find("only(x").unwrap());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A complete check contains [`CheckedClassBody::Complete`] with its planning
+body. [`CheckedClassBody::Partial`] holds only committed source-to-typed
+mappings, and [`CheckedClassBody::Invalid`] represents a class rejected
+before typing. [`ClassBodyReport`] owns member errors and committed warnings.
+Rebuild the semantic data when a new edit starts a new session.
 
 ## Follow signature dependencies between source files
 
