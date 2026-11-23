@@ -20,9 +20,10 @@ authenticate the constructor owner. The classloader
 authenticates that exact shape and declaration before exposing the nominal
 encoded identity `scala/$times$colon`. Parent 1 remains the independent
 applied parent `scala/Product2[T1, T2]`; parents 2 and 3 remain `scala/Product`
-and `scala/Serializable`. The mapping is limited to parent 0 of the authentic
-`scala/Tuple2` and `scala/Tuple3` requests and does not define general operator-name
-encoding or applied/higher-kinded type support.
+and `scala/Serializable`. The mapping applies to parent 0 of the standard `scala/Tuple1` through
+`scala/Tuple22` declarations. Each pinned fixture resolves the same tuple-cons
+superclass and retains its own `ProductN` as the next parent. Other package
+names, arities and constructor owners remain outside this mapping.
 
 The pinned declaration is selected from the direct `scala` package type
 declaration with wire spelling `*:`. The same-spelled companion and unrelated

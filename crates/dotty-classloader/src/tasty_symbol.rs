@@ -855,8 +855,7 @@ pub(crate) fn profile_parent_references(
                 &file,
                 parent,
                 package,
-                matches!(requested.as_internal(), "scala/Tuple2" | "scala/Tuple3")
-                    && parent_index == 0,
+                is_standard_tuple_class(requested) && parent_index == 0,
                 &mut |owner, alias| {
                     alias_attempted = true;
                     let result = resolve_alias(owner, alias);
@@ -1551,8 +1550,7 @@ where
                             &file,
                             parent,
                             package,
-                            matches!(requested.as_internal(), "scala/Tuple2" | "scala/Tuple3")
-                                && parent_index == 0,
+                            is_standard_tuple_class(requested) && parent_index == 0,
                             &mut profiled_alias,
                             &mut profiled_bare,
                         );
@@ -4598,8 +4596,19 @@ fn resolve_parent_name_with_alias(
     Some(name)
 }
 
+fn is_standard_tuple_class(name: &BinaryName) -> bool {
+    name.as_internal()
+        .strip_prefix("scala/Tuple")
+        .is_some_and(|arity| {
+            matches!(
+                arity.as_bytes(),
+                [b'1'..=b'9'] | [b'1', b'0'..=b'9'] | [b'2', b'0'..=b'2']
+            )
+        })
+}
+
 /// Resolves the pinned first applied constructor parent in Scala 3.9's
-/// `Tuple2` and `Tuple3` declarations. The source spelling is accepted only when the exact
+/// `Tuple1` through `Tuple22` declarations. The source spelling is accepted only when the exact
 /// Apply/TypeApply/SelectIn wrapper, package-qualified applied type
 /// constructor, and underlying shared type reference all agree.
 fn resolve_tuple_times_colon_constructor_parent(
@@ -6466,6 +6475,35 @@ mod tests {
                 vec![BinaryName::from_internal(expected_trait)],
                 "{requested}"
             );
+        }
+    }
+
+    #[test]
+    fn tuple_family_resolves_the_constructor_parent_and_matching_product() {
+        for arity in 1..=22 {
+            let requested = BinaryName::from_internal(format!("scala/Tuple{arity}"));
+            let bytes = fixture_bytes(&format!("scala3-library/{requested}.tasty"));
+            let decoded = decode_with_resolvers(&bytes, &requested, |_, _| None, |_, _| None)
+                .unwrap_or_else(|e| panic!("{requested}: {e}"));
+            assert_eq!(
+                decoded.super_class.as_internal(),
+                TUPLE_TIMES_COLON_INTERNAL
+            );
+            assert_eq!(
+                decoded.interfaces[0].as_internal(),
+                format!("scala/Product{arity}")
+            );
+        }
+        for excluded in [
+            "scala/Tuple0",
+            "scala/Tuple01",
+            "scala/Tuple23",
+            "scala/Tuple2$",
+            "other/Tuple4",
+        ] {
+            assert!(!is_standard_tuple_class(&BinaryName::from_internal(
+                excluded
+            )));
         }
     }
 
