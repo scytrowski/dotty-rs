@@ -3075,6 +3075,23 @@ mod tests {
     }
 
     #[test]
+    fn freshening_an_incomplete_signature_rolls_back_the_new_binder() {
+        let mut store = SemanticStore::new();
+        let unfilled = store.types.reserve().id();
+        let method = store.types.alloc(Type::Method(MethodType {
+            params: vec![],
+            kind: MethodKind::Contextual,
+            result: unfilled,
+        }));
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            freshen_type_binders(&mut store, method),
+            Err(TypeRebindError::UnfilledType { id: unfilled })
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+    }
+
+    #[test]
     fn a_failure_deep_in_the_graph_rolls_back_the_binder_and_every_copy() {
         let mut f = Fixture::new();
         let x = SymbolId::new(80);

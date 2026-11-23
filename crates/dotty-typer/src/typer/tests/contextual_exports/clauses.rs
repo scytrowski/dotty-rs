@@ -331,3 +331,81 @@ fn legacy_wildcard_preserves_the_implicit_method_and_its_parameter_flags() {
         );
     }
 }
+
+#[test]
+fn failed_argument_search_reports_the_call_and_restores_all_export_scopes() {
+    let bad =
+        include_str!("../../../../tests/fixtures/contextual-arguments/ProviderExportErrors.scala");
+    let input = format!("{LIB}\n{}", bad.strip_prefix("package multi\n").unwrap());
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&input);
+    let scopes: Vec<_> = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| index.export_site_at(source, tree))
+        .map(|site| index.scope_of(site.owner).unwrap())
+        .collect();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for warm in [false, true] {
+        if warm {
+            let call = client_result(&mut typer, &parsed, "viaAlias").unwrap();
+            let alias = invocation(&typer, evidence(&typer, call)).method;
+            assert_eq!(qualified_name(&typer, alias), ("Again", "derived"));
+            delegate(&mut typer, alias, 2, &[&["k"], &["t"]]);
+        }
+        let checkpoint = typer.store.checkpoint();
+        let tree_count = typer.typed_ast().iter().count();
+        let scope_entries = |typer: &SourceTyper<'_>| {
+            scopes
+                .iter()
+                .map(|&scope| {
+                    typer
+                        .store
+                        .scopes
+                        .get(scope)
+                        .entered_symbols()
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = scope_entries(&typer);
+        for site in [
+            "missingFirst",
+            "missingSecond",
+            "clashSecond",
+            "directMissingFirst",
+            "directMissingSecond",
+            "directClashSecond",
+        ] {
+            for _ in 0..2 {
+                let error = rejected_call(&mut typer, &parsed, site);
+                if matches!(site, "clashSecond" | "directClashSecond") {
+                    let TyperError::AmbiguousContextualArgument {
+                        candidate_names, ..
+                    } = error
+                    else {
+                        panic!("{site}: {error:?}")
+                    };
+                    let mut names: Vec<_> = candidate_names
+                        .iter()
+                        .map(|(owner, name)| {
+                            (
+                                typer.store.names.resolve(owner.unwrap().text()),
+                                typer.store.names.resolve(name.text()),
+                            )
+                        })
+                        .collect();
+                    names.sort();
+                    assert_eq!(names, [(site, "left"), (site, "right")]);
+                } else {
+                    assert!(
+                        matches!(error, TyperError::MissingContextualArgument { .. }),
+                        "{site}: {error:?}"
+                    );
+                }
+                assert_eq!(typer.store.checkpoint(), checkpoint);
+                assert_eq!(typer.typed_ast().iter().count(), tree_count);
+                assert_eq!(scope_entries(&typer), before);
+            }
+        }
+    }
+}
