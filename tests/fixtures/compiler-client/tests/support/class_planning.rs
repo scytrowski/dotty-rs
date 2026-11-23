@@ -146,7 +146,13 @@ fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
     let (mut store, defs, packages, mut units) = body_units(VALID_B);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     units.reverse();
-    let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+    let (output, bodies) = type_bodies(
+        &dotty::NamedClassSources::new(&units, &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     units.reverse();
     let classes = class_plans(&units, &bodies, &output, &store).unwrap();
     let plan = dotty::jvm::JvmCompilationUnit {
@@ -301,21 +307,28 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
     let text = "package demo\nclass B { private val seed: Int = 7; def value(): Int = true }";
     let (mut store, defs, packages, units) = body_units(text);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
-    let unit = &units[1];
-    let b = &unit.classes()[0];
-    let method = b.methods().next().unwrap();
-    let error = dotty::type_class_body(
-        b,
-        unit.ast(),
-        unit.index(),
+    let (mut output, mut bodies) = type_bodies(
+        &dotty::NamedClassSources::new(&units[..1], &store).unwrap(),
         &mut store,
         defs,
         &packages,
-        &mut output.arena,
-    )
-    .map(|body| bodies.record(body).unwrap())
-    .unwrap_err();
+        headers,
+    );
+    let unit = &units[1];
+    let b = &unit.classes()[0];
+    let method = b.methods().next().unwrap();
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    let error = sources
+        .type_class_body(
+            b.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut output.arena,
+            dotty::core::NoResolver,
+        )
+        .map(|body| bodies.record(body).unwrap())
+        .unwrap_err();
     let dotty::ClassBodyError::Member {
         class,
         member,
@@ -491,7 +504,13 @@ fn type_class_body_rejects_substituted_member_before_typing() {
 fn planning_requires_b_and_recording_a_twice_preserves_the_first_body() {
     let (mut store, defs, packages, units) = body_units(VALID_B);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
+    let (mut output, mut bodies) = type_bodies(
+        &dotty::NamedClassSources::new(&units[..1], &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     let unit = &units[0];
     let a = &unit.classes()[0];
     let b = &units[1].classes()[0];
@@ -883,8 +902,15 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
                 SymbolInfo::Complete(_)
             ));
             // The field itself must make the client schedule value and retry answer.
-            super::complete_methods_in_order(&units, [], &mut store, defs, &packages, |_, _| {})
-                .unwrap();
+            super::complete_methods_in_order(
+                &NamedClassSources::new(&units, &store).unwrap(),
+                [],
+                &mut store,
+                defs,
+                &packages,
+                |_, _| {},
+            )
+            .unwrap();
             assert_eq!(store.symbols.info(answer), &SymbolInfo::Complete(defs.int));
         } else {
             provider
@@ -965,7 +991,13 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
             panic!("missing value signature")
         };
         assert!(matches!(store.types.get(ty), Type::Method(method) if method.result == defs.int));
-        let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+        let (output, bodies) = type_bodies(
+            &dotty::NamedClassSources::new(&units, &store).unwrap(),
+            &mut store,
+            defs,
+            &packages,
+            headers,
+        );
         let classes = class_plans(&units, &bodies, &output, &store).unwrap();
         let plan = dotty::jvm::JvmCompilationUnit {
             store: &store,
@@ -1359,7 +1391,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
 
         let mut edges = Vec::new();
         let error = super::complete_methods_in_order(
-            &units,
+            &sources,
             [],
             &mut store,
             defs,
@@ -1957,7 +1989,13 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
             assert_eq!(attempts, [(base, None), (leaf.symbol, None)]);
         }
 
-        let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+        let (output, bodies) = type_bodies(
+            &dotty::NamedClassSources::new(&units, &store).unwrap(),
+            &mut store,
+            defs,
+            &packages,
+            headers,
+        );
         // Plan Mid before Leaf using the same retained header and body bindings.
         let classes = super::named_classes(&units)
             .rev()
@@ -2233,7 +2271,13 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         Some(good_root)
     );
 
-    let (output, bodies) = type_bodies(&units[..2], &mut store, defs, &packages, headers);
+    let (output, bodies) = type_bodies(
+        &dotty::NamedClassSources::new(&units[..2], &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     let classes = class_plans(&units[..2], &bodies, &output, &store).unwrap();
     let plan = dotty::jvm::JvmCompilationUnit {
         store: &store,
@@ -2433,7 +2477,13 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
     let units = [unit];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (output, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
+    let (output, bindings) = type_bodies(
+        &dotty::NamedClassSources::new(&units, &store).unwrap(),
+        &mut store,
+        defs,
+        &packages,
+        headers,
+    );
     let unit = &units[0];
     let mut view = editable_classes(unit, &store);
     view[0].members.reverse();
