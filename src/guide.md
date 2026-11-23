@@ -18,6 +18,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Select ready classes and track member signatures, retries and failures | [`NamedClassSources::member_signatures`], [`MemberSignaturePhase`], [`MemberSignatureReport`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
+| Check bodies of signature-ready members | [`MemberSignaturePhase::finish_with_body_work`], [`ClassBodyWork::members`], [`ClassBodyWork::check`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
 | Keep a typed failure and its original byte range for later publication | [`ReportedTyperError`], [`ClassBodyError::into_reported_error`], [`MemberSignatureError::into_reported_error`] |
@@ -288,7 +289,7 @@ let defs = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
 let mut files = Vec::new();
 for (i, name, text) in [
-    (8, "Children.scala", "class Good(x: Int) extends Base(x) { def value() = 7; val broken = value(1) }; class Bad(y: Missing)"),
+    (8, "Children.scala", "class Good(x: Int) extends Base(x) { def value() = 7; val broken = value(1); def f(implicit i: Int): Int = i; def call(): Int = f(1) }; class Bad(y: Missing)"),
     (2, "Base.scala", "class Base(seed: Int)"),
 ] {
     let parsed = parse_source(SourceId::from_index(i), text, Default::default())?
@@ -325,7 +326,7 @@ while let Some(member) = work.pop_front() {
         work.extend(attempt.retry);
     }
 }
-let signatures = signatures.finish();
+let (signatures, bodies) = signatures.finish_with_body_work();
 let value = good.methods().next().unwrap();
 assert!(signatures.ready.contains(&value.symbol));
 let [MemberSignatureFailure::Typing { declaration, report }] = signatures.failures.as_slice()
@@ -334,17 +335,36 @@ assert_eq!(declaration.class, good.symbol);
 assert!(matches!(report.error(), TyperError::ApplicationArityMismatch { expected: 0, actual: 1, .. }));
 assert_eq!(report.location().unwrap().source(), files[0].source());
 
-let (body, body_report) = sources.check_class_body(good.symbol, &mut store, defs, &packages,
-    &mut arena, dotty::core::NoResolver).into_parts();
-assert_eq!(body_report.errors.len(), 1);
-assert!(body.bindings().unwrap().get(files[0].source(), value.tree).is_some());
+let broken = good.fields().next().unwrap();
+assert!(bodies.members(good.symbol).unwrap().any(|(id, reason)|
+    id == broken.symbol && reason == Some(&dotty::BodySkipReason::Rejected)));
+let (body, body_report) = bodies.check(good.symbol, &mut store, defs, &packages,
+    &mut arena, dotty::core::NoResolver);
+let dotty::CheckedClassBody::Partial(index) = body else { panic!("skipped field") };
+assert!(body_report.errors.is_empty());
+assert!(index.get(files[0].source(), value.tree).is_some());
+assert!(index.get(files[0].source(), broken.tree).is_none());
+let [(source, warning)] = body_report.diagnostics.as_slice() else { panic!("one committed warning") };
+assert_eq!(*source, files[0].source());
+assert_eq!(warning.issue(), &dotty::typer::TyperWarning::ImplicitClauseWithoutUsing);
 assert!(bindings.get(files[0].source(), good.parents[0]).is_some());
+
+let base = &files[1].classes()[0];
+let (body, report) = bodies.check(base.symbol, &mut store, defs, &packages,
+    &mut arena, dotty::core::NoResolver);
+assert!(report.errors.is_empty());
+let dotty::CheckedClassBody::Complete(body) = body else { panic!("complete Base") };
+let plan = dotty::jvm_class_plan::JvmClassPlanner::new(&store, files[1].ast(), files[1].index())
+    .with_header_bindings(&arena, &bindings).plan_typed_class(base, &arena, &body)?;
+assert_eq!(plan.class, base.symbol);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The selection includes constructor fields and all declared body fields and methods.
 [`MemberSignatureSelection::field_roots`] gives a compiler its ordered field pass
-before its caller-chosen method roots. Cross-file retries target missing eligible
+before its caller-chosen method roots. Before emitting a class, complete the
+remaining signatures as well, including private fields. An editor may finish
+earlier and use the retained bindings from ready members for navigation. Cross-file retries target missing eligible
 providers within the selection. An unavailable field outside it retains the
 original typer error. An editor can keep independent members of a class available
 when another signature fails. Inspect `blockages` for the provider of a failed
