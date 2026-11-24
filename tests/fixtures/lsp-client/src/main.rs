@@ -1,6 +1,6 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
-use dotty::SourceDiagnostic;
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
+use dotty::{SourceDiagnostic, SourceSymbolInfo, SourceSymbolSignature};
 use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze_with_classpath};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
@@ -14,6 +14,27 @@ fn wire_range(text: &DocumentText, r: TextRange, enc: PositionEncoding) -> Optio
     let (el, ec) = text.position(r.end(), enc)?;
     Some(json!({"start":{"line":sl,"character":sc},"end":{"line":el,"character":ec}}))
 }
+fn hover_label(info: &SourceSymbolInfo) -> String {
+    let name = &info.name;
+    match &info.signature {
+        SourceSymbolSignature::Class => format!("class {name}"),
+        SourceSymbolSignature::Value(ty) => format!("{name}: {}", ty.name),
+        SourceSymbolSignature::Method {
+            parameters, result, ..
+        } => {
+            let clause = parameters.as_ref().map_or_else(String::new, |params| {
+                let formals = params
+                    .iter()
+                    .map(|p| format!("{}: {}", p.name, p.ty.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({formals})")
+            });
+            format!("def {name}{clause}: {}", result.name)
+        }
+    }
+}
+
 fn offset(text: &DocumentText, p: &Value, enc: PositionEncoding) -> Option<u32> {
     text.offset(
         p["line"].as_u64()?.try_into().ok()?,
@@ -125,6 +146,16 @@ impl Workspace {
         let pos = offset(text, &p["position"], enc)?;
         let analysis = self.ready.as_ref()?;
         let source = analysis.source(uri)?;
+        if method == "textDocument/hover" {
+            let (site, info) = analysis.members.symbol_info_at(source, pos)?;
+            let token = site
+                .usage
+                .map_or(site.target.name, |usage| usage.span().range());
+            return Some(
+                json!({"contents":{"kind":"plaintext","value":hover_label(info)},
+                "range":wire_range(text, token, enc)?}),
+            );
+        }
         let site = analysis.members.symbol_at(source, pos)?;
         let target = site.target;
         if method == "textDocument/references" {
@@ -325,7 +356,7 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
         }
         None => None,
     };
-    conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"referencesProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
+    conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"hoverProvider":true,"referencesProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
     let mut ws = Workspace {
         ready: Some(Analysis::default()),
         ..Workspace::default()
@@ -366,7 +397,9 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
                     }
                     if !matches!(
                         req.method.as_str(),
-                        "textDocument/definition" | "textDocument/references"
+                        "textDocument/definition"
+                            | "textDocument/references"
+                            | "textDocument/hover"
                     ) {
                         conn.sender.send(
                             Response::new_err(req.id, -32601, "Unsupported method".into()).into(),

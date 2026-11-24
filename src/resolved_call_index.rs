@@ -99,6 +99,7 @@ fn merge_class_sites(
 pub struct ResolvedMemberIndex {
     files: HashMap<SourceId, IndexedFile>,
     references: HashMap<SymbolId, Vec<SourceSpan>>,
+    signatures: HashMap<SymbolId, crate::SourceSymbolInfo>,
     diagnostics: Vec<DeclarationDiagnostic>,
 }
 
@@ -325,6 +326,25 @@ impl ResolvedMemberIndex {
                 };
                 index.references.entry(symbol).or_default().push(origin);
             }
+            let method_declarations = navigation.method_targets();
+            let symbols = class_declarations
+                .iter()
+                .chain(&method_declarations)
+                .chain(&field_declarations)
+                .chain(&locals)
+                .map(|(symbol, _)| (*symbol, *symbol))
+                .chain(parameters.iter().map(|p| {
+                    let formal = match p {
+                        ParameterDeclaration::Constructor(p) => p.formal,
+                        ParameterDeclaration::Method(p) => p.parameter,
+                    };
+                    (p.symbol(), formal)
+                }));
+            index
+                .signatures
+                .extend(symbols.filter_map(|(symbol, formal)| {
+                    Some((symbol, crate::SourceSymbolInfo::capture(store, formal)?))
+                }));
             index.files.insert(
                 file.source(),
                 IndexedFile {
@@ -340,7 +360,7 @@ impl ResolvedMemberIndex {
                     calls,
                     fields,
                     field_declarations,
-                    method_declarations: navigation.method_targets(),
+                    method_declarations,
                 },
             );
         }
@@ -611,6 +631,19 @@ impl ResolvedMemberIndex {
             target,
             usage,
         })
+    }
+
+    /// Returns the indexed site and its retained declaration information at a half-open
+    /// UTF-8 byte offset. All sites of a symbol borrow the same signature. Missing sites,
+    /// incomplete value types and types outside the supported subset yield `None`.
+    /// Use [`Self::symbol_at`] for navigation independently of signature availability.
+    pub fn symbol_info_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<(SourceSymbolSite, &crate::SourceSymbolInfo)> {
+        let site = self.symbol_at(source, offset)?;
+        Some((site, self.signatures.get(&site.symbol)?))
     }
 
     /// Committed uses of this exact symbol, in input file order then

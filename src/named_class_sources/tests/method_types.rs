@@ -234,3 +234,111 @@ fn a_completed_signature_survives_body_failure_and_a_rejected_signature_publishe
         class
     );
 }
+
+#[test]
+fn selected_overload_retains_its_own_ordered_signature_in_either_file_order() {
+    use crate::SourceSymbolSignature::Method;
+    use crate::core::SymbolInfo;
+    let methods = "class Ops { def pick(n: Int, b: Boolean): Boolean = b; def pick(b: Boolean, n: Int): Int = n; def empty() = 1; def plain = true; def curried(n: Int)(b: Boolean): Int = n }";
+    let calls = "class Use { def a(o: Ops): Boolean = o.pick(1, false); def b(o: Ops): Int = o.pick(true, 2); def bad(o: Ops): Int = o.pick(true, false) }";
+    for reverse in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(8, methods, &mut store, &mut packages);
+        let caller = named(3, calls, &mut store, &mut packages);
+        let files = if reverse {
+            [&caller, &ops]
+        } else {
+            [&ops, &caller]
+        };
+        let sources = NamedClassSources::new(files, &store).unwrap();
+        let before = ResolvedMemberIndex::build(
+            &sources,
+            &CheckedClassBodies::default(),
+            &AstArena::new(),
+            &store,
+        );
+        let decl = methods.find("pick").unwrap() as u32;
+        assert!(before.symbol_at(ops.source(), decl).is_some());
+        assert!(before.symbol_info_at(ops.source(), decl).is_none());
+
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                caller.classes()[0].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        assert_eq!(report.errors.len(), 1);
+        let mut bodies = CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+        for (call, ordinal, expected, result_ty) in [
+            (
+                "pick(1",
+                0,
+                [("n", defs.int), ("b", defs.boolean)],
+                defs.boolean,
+            ),
+            (
+                "pick(true, 2",
+                1,
+                [("b", defs.boolean), ("n", defs.int)],
+                defs.int,
+            ),
+        ] {
+            let pos = calls.find(call).unwrap() as u32;
+            let (site, info) = index.symbol_info_at(caller.source(), pos).unwrap();
+            assert_eq!(
+                site.symbol,
+                ops.classes()[0].methods().nth(ordinal).unwrap().symbol
+            );
+            assert_eq!(&*info.name, "pick");
+            let Method {
+                ty,
+                parameters: Some(params),
+                result,
+            } = &info.signature
+            else {
+                panic!("{info:?}")
+            };
+            assert_eq!(store.symbols.info(site.symbol), &SymbolInfo::Complete(*ty));
+            assert_eq!(
+                params
+                    .iter()
+                    .map(|p| (&*p.name, p.ty.ty))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(result.ty, result_ty);
+            assert!(std::ptr::eq(
+                index
+                    .symbol_info_at(ops.source(), site.target.name.start())
+                    .unwrap()
+                    .1,
+                info
+            ));
+        }
+        let at = |s: &str| index.symbol_info_at(ops.source(), methods.find(s).unwrap() as u32);
+        assert!(
+            matches!(&at("empty").unwrap().1.signature, Method { parameters: Some(p), result, .. } if p.is_empty() && result.ty == defs.int)
+        );
+        assert!(
+            matches!(&at("plain").unwrap().1.signature, Method { parameters: None, result, .. } if result.ty == defs.boolean)
+        );
+        assert!(at("curried").is_none());
+        assert!(
+            index
+                .symbol_info_at(
+                    caller.source(),
+                    calls.find("pick(true, false)").unwrap() as u32
+                )
+                .is_none()
+        );
+    }
+}

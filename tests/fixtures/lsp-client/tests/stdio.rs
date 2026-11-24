@@ -69,6 +69,7 @@ impl Client {
         );
         assert_eq!(init["capabilities"]["positionEncoding"], encoding);
         assert_eq!(init["capabilities"]["definitionProvider"], true);
+        assert_eq!(init["capabilities"]["hoverProvider"], true);
         assert_eq!(init["capabilities"]["referencesProvider"], true);
         assert_eq!(init["capabilities"]["textDocumentSync"]["change"], 2);
         client.notify("initialized", json!({}));
@@ -150,6 +151,15 @@ impl Client {
             n.params["diagnostics"], diagnostics,
             "{uri} version {version}"
         );
+    }
+
+    fn hover(&mut self, uri: &str, line: usize, character: usize) -> Value {
+        self.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri":uri}, "position":{"line":line,"character":character}
+            }),
+        )
     }
 
     fn references(
@@ -234,6 +244,25 @@ fn exercise(encoding: &str, take_column: usize) {
     client.diagnostics(B, 1, json!([]));
     client.definition(take_column, 1, INT_METHOD);
 
+    let signature = |line, start, end, label: &str| {
+        json!({
+            "range":range(line, start, end), "contents":{"kind":"plaintext", "value":label}
+        })
+    };
+    let integer_hover = signature(1, take_column, take_column + 4, "def take(n: Int): Int");
+    let boolean_hover = signature(1, take_column, take_column + 4, "def take(b: Boolean): Int");
+    assert_eq!(client.hover(B, 1, take_column + 1), integer_hover);
+    assert_eq!(client.hover(B, 1, take_column + 4), Value::Null);
+    assert_eq!(
+        client.hover(A, 2, 6),
+        signature(2, 6, 10, "def take(b: Boolean): Int")
+    );
+    assert_eq!(client.hover(A, 2, 11), signature(2, 11, 12, "b: Boolean"));
+    assert_eq!(
+        client.hover(B, 1, take_column - 2),
+        signature(1, take_column - 2, take_column - 1, "a: A")
+    );
+    assert_eq!(client.hover(A, 0, 6), signature(0, 6, 7, "class A"));
     let caller = json!({"uri": B, "range":range(1,take_column,take_column+4)});
     let stable_start = "  def keep(a: A): Int = a.".len();
     let stable = json!({"uri": B, "range":range(4,stable_start,stable_start+4)});
@@ -253,12 +282,15 @@ fn exercise(encoding: &str, take_column: usize) {
     client.edit(B, 2, range(1, take_column + 5, take_column + 7), "false");
     client.diagnostics(B, 2, json!([]));
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(client.hover(B, 1, take_column), boolean_hover);
     assert_eq!(client.references(A, 1, 7, false), json!([stable]));
     assert_eq!(
         client.references(B, 1, take_column + 1, true),
         json!([boolean, caller])
     );
 
+    let only_hover = signature(3, 19, 23, "def only(n: Int): Int");
+    assert_eq!(client.hover(B, 3, 20), only_hover);
     client.edit(B, 3, range(3, 24, 25), "false");
     client.diagnostics(
         B,
@@ -269,6 +301,7 @@ fn exercise(encoding: &str, take_column: usize) {
         }]),
     );
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(client.hover(B, 1, take_column), boolean_hover);
     assert_eq!(client.references(A, 1, 7, false), json!([stable]));
     assert_eq!(
         client.references(B, 1, take_column + 1, true),
@@ -280,9 +313,12 @@ fn exercise(encoding: &str, take_column: usize) {
         client.request("textDocument/definition", only_position.clone()),
         Value::Null
     );
+    assert_eq!(client.hover(B, 3, 20), Value::Null);
     client.edit(B, 4, range(3, 24, 29), "1");
     client.diagnostics(B, 4, json!([]));
+    assert_eq!(client.hover(B, 3, 20), only_hover);
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(client.hover(B, 1, take_column), boolean_hover);
     assert_eq!(
         client.request("textDocument/definition", only_position),
         json!([{ "originSelectionRange":range(3,19,23), "targetUri": B,

@@ -31,7 +31,11 @@ retain their navigation bindings while a dependency is broken. The fixture
 records each outcome in `CheckedClassBodies` and builds one `ResolvedMemberIndex`
 for the current document versions. Both `textDocument/definition` and
 `textDocument/references` read this index after the semantic arenas are released.
-Both requests use `ResolvedMemberIndex::symbol_at`. The references request
+Both requests use `ResolvedMemberIndex::symbol_at`.
+For `textDocument/hover` the fixture calls `symbol_info_at` on the same revision.
+It formats the typed class, value or method locally and returns the written name
+range in the negotiated encoding. Editing a call changes the selected signature;
+a rejected call returns JSON `null` until repaired. The references request
 accepts positions on direct calls, supported field accesses, method parameter
 reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,
 bare uses of the enclosing class’s fields, and its private body fields written

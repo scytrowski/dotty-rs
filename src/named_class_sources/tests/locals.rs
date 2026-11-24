@@ -152,3 +152,45 @@ fn local_assignment_uses_its_committed_lhs_and_rejects_an_immutable_target() {
         assert!(index.symbol_at(id, pos as u32).is_none());
     }
 }
+
+#[test]
+fn symbol_info_retains_class_and_value_types_at_their_uses() {
+    use crate::SourceSymbolSignature::{Class, Value};
+    let text = "class A(start: Int) { val field = start; def read(arg: A): Int = { val local = arg.field; local } }";
+    let index = retained(text, 0);
+    let id = SourceId::from_index(7);
+    let at = |pos| {
+        index.symbol_info_at(id, pos as u32).unwrap_or_else(|| {
+            panic!(
+                "no info at {pos} in {text}: {:?}",
+                index.symbol_at(id, pos as u32)
+            )
+        })
+    };
+    let (class, info) = at(text.find("A(").unwrap());
+    assert_eq!((&*info.name, &info.signature), ("A", &Class));
+    assert_eq!(at(text.find("A)").unwrap()).0.symbol, class.symbol);
+    for (search, name, ty) in [
+        ("= start", "start", "Int"),
+        ("arg.field", "arg", "A"),
+        (".field", "field", "Int"),
+        ("; local", "local", "Int"),
+    ] {
+        let pos = text.find(search).unwrap() + search.find(name).unwrap();
+        let (site, info) = at(pos);
+        assert_eq!(&*info.name, name);
+        let Value(value) = &info.signature else {
+            panic!("{info:?}")
+        };
+        assert_eq!(&*value.name, ty);
+        if ty == "A" {
+            assert_eq!(value.symbol, class.symbol);
+        }
+        assert!(std::ptr::eq(at(site.target.name.start() as usize).1, info));
+        assert!(
+            index
+                .symbol_info_at(id, (pos + name.len()) as u32)
+                .is_none()
+        );
+    }
+}

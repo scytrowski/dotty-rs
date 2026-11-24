@@ -143,6 +143,11 @@ pub use resolved_call_index::{
     ResolvedCallIndex, ResolvedMemberIndex, ResolvedSourceParent, SourceSymbolSite,
 };
 
+mod source_symbol_info;
+pub use source_symbol_info::{
+    SourceNamedType, SourceSignatureParameter, SourceSymbolInfo, SourceSymbolSignature,
+};
+
 mod source_locals;
 mod source_signature_types;
 pub use source_signature_types::{MethodTypeRole, ResolvedConstructorType, ResolvedMethodType};
