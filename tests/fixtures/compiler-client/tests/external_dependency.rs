@@ -2,9 +2,11 @@ use dotty::classloader::{
     ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JmodClassPath, LoadingSession,
 };
 use dotty::core::{
-    Definitions, Packages, SemanticStore, SourceId, SymbolKind, SymbolOrigin, Type, TypeRefTarget,
+    Definitions, Packages, SemanticStore, SourceId, SymbolInfo, SymbolKind, SymbolOrigin, Type,
+    TypeRefTarget,
 };
-use dotty::typer::{SourceTyper, TyperError};
+use dotty::typer::{SignatureCompletion, TyperError};
+use dotty::{ClassHeaderError, ClassHeaderPhase, NamedClassSources, SemanticPhase};
 #[path = "../../external-dependency/fixture.rs"]
 mod fixture;
 
@@ -38,11 +40,29 @@ fn binary_constructor_parameter_and_missing_dependency_use_the_same_source() {
             defs,
             LoadingSession::with_packages(packages.snapshot()),
         );
-        let result = SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages)
-            .with_resolver(Box::new(resolver))
-            .complete_symbol(holder.constructor);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = Default::default();
+        let mut bindings = Default::default();
+        let prepared = ClassHeaderPhase::try_prepare_with_constructor_resolver(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+            resolver,
+        );
         if present {
-            let Type::Method(sig) = store.types.get(result.unwrap()) else {
+            let mut phase = prepared.unwrap();
+            assert!(matches!(
+                phase.attempt(holder.symbol).unwrap().completion,
+                SignatureCompletion::Complete(_)
+            ));
+            assert_eq!(phase.finish().ready, [holder.symbol]);
+            let SymbolInfo::Complete(ty) = store.symbols.info(holder.constructor) else {
+                panic!("completed constructor")
+            };
+            let Type::Method(sig) = store.types.get(*ty) else {
                 panic!("constructor signature")
             };
             let [param] = sig.params.as_slice() else {
@@ -61,9 +81,26 @@ fn binary_constructor_parameter_and_missing_dependency_use_the_same_source() {
             assert_eq!(entry.owner, packages.symbol(&["demo"]));
             assert_eq!(store.names.resolve(entry.name.text()), "External");
         } else {
-            assert!(
-                matches!(result,Err(TyperError::TypeNameNotFound {source,position:Some(pos),..}) if source==id && pos.span().range().start()==TEXT.find("External").unwrap() as u32),
-                "{result:?}"
+            let failure = prepared.unwrap_err();
+            assert_eq!(
+                (failure.phase, failure.source, failure.class),
+                (SemanticPhase::Constructor, Some(id), holder.symbol)
+            );
+            let ClassHeaderError::Typing(report) = failure.error else {
+                panic!("expected typed error")
+            };
+            assert_eq!(report.member(), Some(holder.constructor));
+            let TyperError::TypeNameNotFound { source, name, .. } = report.error() else {
+                panic!("{report:?}")
+            };
+            assert_eq!(*source, id);
+            assert_eq!(store.names.resolve(name.text()), "External");
+            let location = report.location().unwrap();
+            let range = location.span().range();
+            assert_eq!(location.source(), id);
+            assert_eq!(
+                &TEXT[range.start() as usize..range.end() as usize],
+                "External"
             );
         }
     }

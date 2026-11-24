@@ -2,7 +2,7 @@
 use std::{collections::HashMap, fmt};
 
 use crate::core::{AstArena, Definitions, Packages, SymbolKind, TypeId, Typed};
-use crate::core::{SemanticStore, SourceId, SymbolId};
+use crate::core::{NoResolver, SemanticStore, SourceId, SymbolId, SymbolResolver};
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
 use crate::{ClassHeaderBindings, ClassHeaderError, ReportedTyperError};
@@ -136,6 +136,27 @@ impl<'a> NamedClassSources<'a> {
         definitions: Definitions,
         packages: &Packages,
     ) -> Result<TypeId, ClassHeaderError> {
+        self.complete_constructor_signature_with_resolver(
+            class,
+            store,
+            definitions,
+            packages,
+            NoResolver,
+        )
+    }
+
+    /// Completes a primary constructor with a caller-supplied semantic resolver.
+    /// Pass the resolver for the naming session, sharing its package identities
+    /// with the source files. External types are loaded on demand. A rejected
+    /// signature rolls back the typer and resolver together.
+    pub fn complete_constructor_signature_with_resolver(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        resolver: impl SymbolResolver,
+    ) -> Result<TypeId, ClassHeaderError> {
         let (file, view) = self
             .class(class)
             .ok_or(ClassHeaderError::InvalidClass(class))?;
@@ -147,6 +168,7 @@ impl<'a> NamedClassSources<'a> {
             definitions,
             packages,
         )
+        .with_resolver(Box::new(resolver))
         .complete_symbol(view.constructor)
         .map_err(|error| self.header_error(class, Some(view.constructor), error))
     }
@@ -163,15 +185,32 @@ impl<'a> NamedClassSources<'a> {
         definitions: Definitions,
         packages: &Packages,
     ) -> impl Iterator<Item = Result<SymbolId, crate::ClassHeaderFailure>> {
+        self.constructors_with_resolver(classes, store, definitions, packages, NoResolver)
+    }
+
+    pub(crate) fn constructors_with_resolver(
+        &self,
+        classes: impl IntoIterator<Item = SymbolId>,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        mut resolver: impl SymbolResolver,
+    ) -> impl Iterator<Item = Result<SymbolId, crate::ClassHeaderFailure>> {
         classes.into_iter().map(move |class| {
-            self.complete_constructor_signature(class, store, definitions, packages)
-                .map(|_| class)
-                .map_err(|error| crate::ClassHeaderFailure {
-                    phase: crate::SemanticPhase::Constructor,
-                    class,
-                    source: self.class(class).map(|(file, _)| file.source()),
-                    error,
-                })
+            self.complete_constructor_signature_with_resolver(
+                class,
+                store,
+                definitions,
+                packages,
+                &mut resolver,
+            )
+            .map(|_| class)
+            .map_err(|error| crate::ClassHeaderFailure {
+                phase: crate::SemanticPhase::Constructor,
+                class,
+                source: self.class(class).map(|(file, _)| file.source()),
+                error,
+            })
         })
     }
 
