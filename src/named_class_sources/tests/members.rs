@@ -175,12 +175,13 @@ fn shared_field_releases_waiters_once_and_a_rejected_sibling_keeps_its_range() {
     assert!(report.ready.contains(&x) && report.ready.contains(&y));
     assert!(report.remaining.contains(&later));
     assert!(report.blockages.is_empty());
+    let mut report_failures = report.failures;
     let [
         MemberSignatureFailure::Typing {
             declaration,
             report,
         },
-    ] = report.failures.as_slice()
+    ] = report_failures.as_slice()
     else {
         panic!()
     };
@@ -198,6 +199,48 @@ fn shared_field_releases_waiters_once_and_a_rejected_sibling_keeps_its_range() {
     ));
     let r = report.location().unwrap().span().range();
     assert_eq!(&text[r.start() as usize..r.end() as usize], "value(1)");
+    let direct = selection
+        .try_complete(bad, &mut store, defs, &packages)
+        .unwrap_err()
+        .into_semantic_diagnostic(&sources);
+    let captured = report_failures
+        .pop()
+        .unwrap()
+        .into_semantic_diagnostic(&sources);
+    for d in [direct, captured] {
+        assert_eq!(
+            (d.phase, d.owner_source, d.class, d.member()),
+            (
+                crate::SemanticPhase::MemberSignature,
+                Some(c.source()),
+                Some(cls.symbol),
+                Some(bad)
+            )
+        );
+        assert_eq!(d.location().unwrap().span().range(), r);
+        assert!(
+            matches!(d.issue,crate::SemanticIssue::Typing(e) if matches!(e.error(),TyperError::ApplicationArityMismatch{expected:0,actual:1,..}))
+        );
+    }
+    let foreign = named(31, "class Other { def x() = 1 }", &mut store, &mut packages).classes()[0]
+        .methods()
+        .next()
+        .unwrap()
+        .symbol;
+    let rejected = selection
+        .try_complete(foreign, &mut store, defs, &packages)
+        .unwrap_err()
+        .into_semantic_diagnostic(&sources);
+    assert_eq!(
+        (
+            rejected.source(),
+            rejected.location(),
+            rejected.class,
+            rejected.member()
+        ),
+        (None, None, None, Some(foreign))
+    );
+    assert!(matches!(rejected.issue, crate::SemanticIssue::InvalidMember(id) if id == foreign));
 }
 
 #[test]

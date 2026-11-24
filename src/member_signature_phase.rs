@@ -23,6 +23,55 @@ pub enum MemberSignatureFailure {
     },
 }
 
+impl MemberSignatureFailure {
+    pub(crate) fn capture(
+        error: MemberSignatureError,
+        sources: &crate::NamedClassSources<'_>,
+    ) -> Self {
+        match error {
+            MemberSignatureError::InvalidMember(id) => Self::InvalidMember(id),
+            MemberSignatureError::Typing {
+                member,
+                declaration,
+                error,
+            } => Self::Typing {
+                declaration,
+                report: Box::new(ReportedTyperError::from_class(
+                    error,
+                    declaration.class,
+                    Some(member),
+                    |id| sources.file(id).map(|file| file.ast()),
+                )),
+            },
+        }
+    }
+
+    /// Moves a captured signature failure into an owned semantic diagnostic.
+    /// For an invalid member the same-session index supplies its owner if
+    /// known. The requested symbol survives even when outside the index.
+    pub fn into_semantic_diagnostic(
+        self,
+        sources: &crate::NamedClassSources<'_>,
+    ) -> crate::SemanticDiagnostic {
+        let (owner, issue) = match self {
+            Self::Typing {
+                declaration,
+                report,
+            } => (Some(declaration), crate::SemanticIssue::Typing(report)),
+            Self::InvalidMember(id) => (
+                sources.declarations().get(id),
+                crate::SemanticIssue::InvalidMember(id),
+            ),
+        };
+        crate::SemanticDiagnostic {
+            phase: crate::SemanticPhase::MemberSignature,
+            owner_source: owner.map(|d| d.source),
+            class: owner.map(|d| d.class),
+            issue,
+        }
+    }
+}
+
 /// Owned classification of members when the caller ends the signature phase.
 /// Apply IDs and ranges only to the originating semantic session and source versions.
 #[derive(Debug)]
@@ -142,24 +191,7 @@ impl<'s, 'file> MemberSignaturePhase<'s, 'file> {
         let failures = self
             .failures
             .into_iter()
-            .map(|failure| match failure {
-                MemberSignatureError::InvalidMember(id) => {
-                    MemberSignatureFailure::InvalidMember(id)
-                }
-                MemberSignatureError::Typing {
-                    member,
-                    declaration,
-                    error,
-                } => MemberSignatureFailure::Typing {
-                    declaration,
-                    report: Box::new(ReportedTyperError::from_class(
-                        error,
-                        declaration.class,
-                        Some(member),
-                        |id| self.selection.sources.file(id).map(|f| f.ast()),
-                    )),
-                },
-            })
+            .map(|failure| MemberSignatureFailure::capture(failure, self.selection.sources))
             .collect();
         MemberSignatureReport {
             ready,
