@@ -46,6 +46,7 @@ use std::time::Instant;
 /// entry.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyClass {
+    pub semantic_flags: SymbolFlags,
     pub flags: ClassAccessFlags,
     /// The class's real `PRIVATE_TAG`/`PROTECTED_TAG` modifier, kept
     /// separately from `flags` — see [`DeclaredVisibility`]'s doc
@@ -71,6 +72,7 @@ pub(crate) struct DecodedTastyClass {
 /// Facts needed to publish a TASTy-backed identity without resolving its
 /// parents or lowering any member types.
 pub(crate) struct DecodedTastyIdentity {
+    pub semantic_flags: SymbolFlags,
     pub flags: ClassAccessFlags,
     pub visibility: Option<DeclaredVisibility>,
 }
@@ -220,6 +222,8 @@ pub(crate) struct DecodedTastyModuleIdentity {
     /// TASTy template. JVM `InnerClasses` access flags can be less restrictive.
     /// The map includes default-public declarations with a `None` value.
     pub nested_type_visibilities: HashMap<String, Option<DeclaredVisibility>>,
+    /// Unambiguous class and trait declarations directly in the module template.
+    pub nested_classes: HashSet<String>,
 }
 
 /// Stable detail for a TASTy parent whose binary identity could not be
@@ -309,6 +313,7 @@ pub(crate) enum DeclaredQualifier {
 /// One `ValDef` reconstructed from a class's `Template.stats`.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyField {
+    pub visibility: Option<DeclaredVisibility>,
     pub name: String,
     pub flags: FieldAccessFlags,
     pub contextual_flags: SymbolFlags,
@@ -321,16 +326,17 @@ pub(crate) struct DecodedTastyField {
 /// One `DefDef` reconstructed from a class's `Template.stats`.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyMethod {
+    pub visibility: Option<DeclaredVisibility>,
     /// Wire offset within the selected template, shared with default-getter sites.
     pub offset: usize,
     /// Original method offset and flattened term ordinal of a structural getter.
     pub default_for: Option<(usize, usize)>,
     pub name: String,
     pub flags: MethodAccessFlags,
-    pub contextual_flags: SymbolFlags,
+    pub semantic_flags: SymbolFlags,
     /// An annotation such as `@targetName` can change the physical method name.
     pub has_annotations: bool,
-    /// Wire clause boundaries for contextual methods and their linked getters.
+    /// Wire clause boundaries for multi-clause methods, contextual methods, and linked getters.
     pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
     pub singleton_result_parameter: Option<usize>,
@@ -461,7 +467,7 @@ pub enum TastyDecodeError {
     /// More than one top-level definition claims the requested module
     /// identity in the same TASTy package.
     AmbiguousModuleIdentity,
-    /// More than one direct class definition claims a bounded encoded
+    /// More than one direct class definition claims the requested
     /// classpath identity in the same TASTy package.
     AmbiguousTypeDef,
     /// Scala's selected `Option[A]` parent wrapper did not preserve its one
@@ -678,9 +684,7 @@ impl From<AstError> for TastyDecodeError {
 }
 
 /// Decodes `bytes` as a `.tasty` file and reconstructs the class named
-/// `requested` (matched by its simple name — the part after the last
-/// `/` — since a `.tasty` file's own `TypeDef`s carry no package
-/// qualification of their own).
+/// `requested` from its declaring package and simple name.
 ///
 /// `requested`'s own package (everything before that last `/`, `""` for
 /// the root package) doubles as the package every bare, unqualified
@@ -823,41 +827,8 @@ pub(crate) fn profile_parent_references(
 ) -> Result<Vec<ParentReferenceProfile>, TastyDecodeError> {
     let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
-    let requested_internal = requested.as_internal();
-    let simple_name = requested_internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(requested_internal);
-    let package = requested_internal
-        .rsplit_once('/')
-        .map_or("", |(package, _)| package);
-    let mut matching_nodes = index.iter().filter(|node| {
-        if node.tag != TYPEDEF_TAG {
-            return false;
-        }
-        let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
-            name,
-            tail,
-            type_or_template,
-        })) = node.decode_structured()
-        else {
-            return false;
-        };
-        if module_class {
-            module_class_wire_name(&file, name).as_deref() == Some(simple_name)
-                && has_modifier(&tail, OBJECT_TAG)
-                && is_in_requested_top_level_package(&file, &index, node.offset, package)
-                && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
-        } else {
-            wire_name(&file, name).as_deref() == Some(simple_name)
-        }
-    });
-    let node = matching_nodes
-        .next()
-        .ok_or(TastyDecodeError::MissingTypeDef)?;
-    if matching_nodes.next().is_some() {
-        return Err(TastyDecodeError::AmbiguousModuleIdentity);
-    }
+    let package = requested.package_path();
+    let node = select_type_definition(&file, &index, requested, module_class)?;
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
         type_or_template, ..
     }) = node.decode_structured()?
@@ -894,7 +865,7 @@ pub(crate) fn profile_parent_references(
                 &file,
                 parent,
                 package,
-                requested.as_internal() == "scala/Tuple2" && parent_index == 0,
+                is_standard_tuple_class(requested) && parent_index == 0,
                 &mut |owner, alias| {
                     alias_attempted = true;
                     let result = resolve_alias(owner, alias);
@@ -969,35 +940,57 @@ pub(crate) fn parse_classloader_tasty(bytes: &[u8]) -> Result<TastyFile<'_>, Tas
     Ok(file)
 }
 
-const TUPLE2_TIMES_COLON_INTERNAL: &str = "scala/$times$colon";
+const TUPLE_TIMES_COLON_INTERNAL: &str = "scala/$times$colon";
 
-fn is_tuple2_times_colon_identity(requested: &BinaryName) -> bool {
-    requested.as_internal() == TUPLE2_TIMES_COLON_INTERNAL
+fn is_times_colon_identity(requested: &BinaryName) -> bool {
+    requested.as_internal() == TUPLE_TIMES_COLON_INTERNAL
 }
 
-fn matches_requested_type_definition(
-    file: &TastyFile<'_>,
-    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
-    node: &dotty_tasty::tasty::RawNode<'_>,
+/// Selects a unique direct declaration of the requested package, before any
+/// identity is published or any parent or member type is resolved.
+fn select_type_definition<'i, 'a>(
+    file: &TastyFile<'a>,
+    index: &'i dotty_tasty::tasty::AstAddressIndex<'a>,
     requested: &BinaryName,
-    simple_name: &str,
-) -> bool {
-    let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
-        name,
-        tail,
-        type_or_template,
-    })) = node.decode_structured()
-    else {
-        return false;
-    };
-    if is_tuple2_times_colon_identity(requested) {
-        wire_name(file, name).as_deref() == Some("*:")
-            && !has_modifier(&tail, OBJECT_TAG)
-            && is_in_tuple2_scala_package(file, index, node.offset)
-            && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+    module_class: bool,
+) -> Result<&'i dotty_tasty::tasty::RawNode<'a>, TastyDecodeError> {
+    let encoded_times_colon = is_times_colon_identity(requested);
+    let simple_name = requested.simple_name();
+    let expected = if encoded_times_colon {
+        "*:"
     } else {
-        wire_name(file, name).as_deref() == Some(simple_name)
+        simple_name
+    };
+    let mut matches = index.iter().filter(|node| {
+        if node.tag != TYPEDEF_TAG { return false; }
+        let Ok(definition) = node.decode_definition() else {
+            return false;
+        };
+        let name = definition.name();
+        let name_matches = if module_class {
+            module_class_wire_name(file, name).as_deref() == Some(simple_name)
+        } else {
+            file.names().get_utf8(name) == Some(expected)
+        };
+        if !name_matches || !is_in_requested_top_level_package(file, index, node.offset, requested.package_path()) {
+            return false;
+        }
+        let Ok(DefinitionBody::TypeDef { tail, type_or_template, .. }) = node.decode_definition_body() else {
+            return false;
+        };
+        has_modifier(&tail, OBJECT_TAG) == module_class
+            && (!(module_class || encoded_times_colon)
+                || matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG))
+    });
+    let node = matches.next().ok_or(TastyDecodeError::MissingTypeDef)?;
+    if matches.next().is_some() {
+        return Err(if module_class {
+            TastyDecodeError::AmbiguousModuleIdentity
+        } else {
+            TastyDecodeError::AmbiguousTypeDef
+        });
     }
+    Ok(node)
 }
 
 /// Recovers the argument of a unary applied parent of a direct trait in a
@@ -1082,21 +1075,7 @@ pub(crate) fn decode_identity(
 ) -> Result<DecodedTastyIdentity, TastyDecodeError> {
     let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
-    let requested_internal = requested.as_internal();
-    let simple_name = requested_internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(requested_internal);
-    let mut matching_nodes = index.iter().filter(|node| {
-        node.tag == TYPEDEF_TAG
-            && matches_requested_type_definition(&file, &index, node, requested, simple_name)
-    });
-    let node = matching_nodes
-        .next()
-        .ok_or(TastyDecodeError::MissingTypeDef)?;
-    if is_tuple2_times_colon_identity(requested) && matching_nodes.next().is_some() {
-        return Err(TastyDecodeError::AmbiguousTypeDef);
-    }
+    let node = select_type_definition(&file, &index, requested, false)?;
 
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
         tail,
@@ -1120,6 +1099,7 @@ pub(crate) fn decode_identity(
     }
 
     Ok(DecodedTastyIdentity {
+        semantic_flags: symbol_flags(&tail) | language_flags(&file)?,
         flags: decode_flags(&tail),
         visibility: decode_visibility(&file, &tail),
     })
@@ -1236,6 +1216,7 @@ pub(crate) fn decode_module_identity(
                 );
                 if name == module_class_name && has_template && has_modifier(&tail, OBJECT_TAG) {
                     let mut nested_type_visibilities = HashMap::new();
+                    let mut nested_classes = HashSet::new();
                     if let RawTree::LengthNode(template_node) = type_or_template {
                         for stat in template_node.decode_template_structure()?.stats {
                             let RawTree::LengthNode(definition) = stat else {
@@ -1245,12 +1226,23 @@ pub(crate) fn decode_module_identity(
                                 continue;
                             }
                             let StructuredNode::TypeDef(DefinitionBody::TypeDef {
-                                name, tail, ..
+                                name,
+                                type_or_template,
+                                tail,
+                                ..
                             }) = definition.decode_structured()?
                             else {
                                 continue;
                             };
+                            let nominal_class = matches!(file.name(name), Some(RawName::Utf8(_)))
+                                && matches!(type_or_template, RawTree::LengthNode(node) if node.tag == TEMPLATE_TAG)
+                                && !has_modifier(&tail, OBJECT_TAG);
                             if let Some(name) = wire_name(&file, name) {
+                                if nested_type_visibilities.contains_key(&name) {
+                                    nested_classes.remove(&name);
+                                } else if nominal_class {
+                                    nested_classes.insert(name.clone());
+                                }
                                 nested_type_visibilities
                                     .insert(name, decode_visibility(&file, &tail));
                             }
@@ -1260,6 +1252,7 @@ pub(crate) fn decode_module_identity(
                         symbol_flags(&tail),
                         decode_visibility(&file, &tail),
                         nested_type_visibilities,
+                        nested_classes,
                     ));
                 } else if name == object_name && has_template && !has_modifier(&tail, OBJECT_TAG) {
                     companion_classes.push(if has_modifier(&tail, TRAIT_TAG) {
@@ -1298,6 +1291,7 @@ pub(crate) fn decode_module_identity(
         module_class_visibility: module_class.1.clone(),
         companion_class_kind: companion_classes.first().copied(),
         nested_type_visibilities: module_class.2.clone(),
+        nested_classes: module_class.3.clone(),
     }))
 }
 
@@ -1492,39 +1486,33 @@ fn is_in_requested_top_level_package(
     let TermValue::NameRef(reference) = term.value else {
         return false;
     };
-    resolve_qualified_name(file, reference).as_deref() == Some(requested_package)
-}
-
-fn is_in_tuple2_scala_package(
-    file: &TastyFile<'_>,
-    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
-    address: usize,
-) -> bool {
-    let Ok(address) = u32::try_from(address) else {
-        return false;
-    };
-    let Some(parent) = index.parent_of(address) else {
-        return false;
-    };
-    if parent.tag != PACKAGE_TAG {
-        return false;
+    // Consume package components from the right. A Signed name's result
+    // signature is not evidence of package identity.
+    let mut remaining = requested_package;
+    let mut current = reference;
+    loop {
+        match file.name(current) {
+            Some(RawName::Qualified { prefix, selector }) => {
+                let Some(RawName::Utf8(component)) = file.name(*selector) else {
+                    return false;
+                };
+                let (parent, last) = remaining.rsplit_once('/').unwrap_or(("", remaining));
+                if last.is_empty() || component != last {
+                    return false;
+                }
+                remaining = parent;
+                current = *prefix;
+            }
+            Some(RawName::Utf8(component)) => {
+                return if matches!(component.as_str(), "" | "<empty>" | "<root>" | "_root_") {
+                    remaining.is_empty()
+                } else {
+                    !component.contains('/') && component == remaining
+                };
+            }
+            _ => return false,
+        }
     }
-    let Some(package_node) = index.get(parent.offset as u32) else {
-        return false;
-    };
-    let Ok(package) = package_node.decode_package() else {
-        return false;
-    };
-    let RawTree::Leaf(term) = package.path else {
-        return false;
-    };
-    if term.tag != TERMREFPKG_TAG {
-        return false;
-    }
-    let TermValue::NameRef(reference) = term.value else {
-        return false;
-    };
-    matches!(file.name(reference), Some(RawName::Utf8(name)) if name == "scala")
 }
 
 fn has_modifier(tail: &[DefinitionTail<'_>], tag: u8) -> bool {
@@ -1595,64 +1583,23 @@ where
             header.major_version, header.minor_version, header.experimental_version
         ));
     }
-    let file = parsed;
+    let mut file = parsed;
     let index_result = {
         let timer = ProfileTimer::new(profile.as_deref_mut().map(|profile| &mut profile.index_ns));
-        let index = file.ast_address_index();
+        let index = file.prepare_ast_address_index();
         drop(timer);
         index
     };
-    let index = index_result?;
-    let requested_internal = requested.as_internal();
-    let simple_name = requested_internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(requested_internal);
-    let package = match requested_internal.rsplit_once('/') {
-        Some((package, _)) => package,
-        None => "",
-    };
+    index_result?;
+    let index = file.ast_address_index_view()?;
+    let package = requested.package_path();
 
     let definition_selection_timer = ProfileTimer::new(
         profile
             .as_deref_mut()
             .map(|profile| &mut profile.definition_selection_ns),
     );
-    let mut matching_nodes = index.iter().filter(|node| {
-            if node.tag != TYPEDEF_TAG {
-                return false;
-            }
-            let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
-                name,
-                tail,
-                type_or_template,
-            })) = node.decode_structured() else {
-                return false;
-            };
-            if module_class {
-                module_class_wire_name(&file, name).as_deref() == Some(simple_name)
-                    && has_modifier(&tail, OBJECT_TAG)
-                    && is_in_requested_top_level_package(
-                        &file,
-                        &index,
-                        node.offset,
-                        package,
-                    )
-                    && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
-            } else {
-                matches_requested_type_definition(&file, &index, node, requested, simple_name)
-            }
-        });
-    let node = matching_nodes
-        .next()
-        .ok_or(TastyDecodeError::MissingTypeDef)?;
-    if matching_nodes.next().is_some() {
-        return Err(if is_tuple2_times_colon_identity(requested) {
-            TastyDecodeError::AmbiguousTypeDef
-        } else {
-            TastyDecodeError::AmbiguousModuleIdentity
-        });
-    }
+    let node = select_type_definition(&file, &index, requested, module_class)?;
 
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
         tail,
@@ -1682,6 +1629,9 @@ where
         .ok_or(TastyDecodeError::NoTemplateBody)?;
     drop(definition_selection_timer);
 
+    // Parameter payloads borrow the AST section. Map their exact slices to
+    // absolute AST addresses once for class and method binders.
+    let parameter_addresses = type_parameter_addresses(&index);
     let class_type_parameter_nodes = template
         .type_params
         .iter()
@@ -1695,14 +1645,9 @@ where
                 index: parameter_index,
             };
             let payload = parameter.payload();
-            let address = index
-                .iter()
-                .find(|indexed| {
-                    indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
-                        && indexed.payload.len() == payload.len()
-                        && indexed.payload.as_ptr() == payload.as_ptr()
-                })
-                .and_then(|indexed| u32::try_from(indexed.offset).ok())
+            let address = parameter_addresses
+                .get(&(payload.as_ptr(), payload.len()))
+                .copied()
                 .ok_or_else(unresolved)?;
             let parameter_index = u32::try_from(parameter_index).map_err(|_| unresolved())?;
             Ok((address, parameter_index))
@@ -1741,7 +1686,7 @@ where
                             &file,
                             parent,
                             package,
-                            requested.as_internal() == "scala/Tuple2" && parent_index == 0,
+                            is_standard_tuple_class(requested) && parent_index == 0,
                             &mut profiled_alias,
                             &mut profiled_bare,
                         );
@@ -1858,6 +1803,7 @@ where
             false,
             package,
             &class_type_parameters,
+            &parameter_addresses,
             &mut profiled_bare,
         );
         drop(timer);
@@ -1914,6 +1860,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DecodedTastyClass {
+        semantic_flags: symbol_flags(&tail) | language_flags(&file)?,
         flags,
         visibility,
         super_class,
@@ -2606,6 +2553,7 @@ fn decode_constructor_accessor_fields(
         fields.push(DecodedTastyField {
             name: field_name,
             flags: decode_field_flags(&body.tail),
+            visibility: decode_visibility(file, &body.tail),
             contextual_flags: contextual_flags(&body.tail),
             declared_type: decode_tasty_member_type(
                 file,
@@ -2932,6 +2880,16 @@ fn decode_tasty_parent_type(
     if depth >= MAX_PARENT_TYPE_DEPTH {
         return Ok(None);
     }
+    let shared_application = match tree {
+        RawTree::Leaf(term)
+            if resolved_name.as_internal() == "scala/Function1"
+                && matches!(term.tag, SHAREDTYPE_TAG | SHAREDTERM_TAG) =>
+        {
+            unshare_parent_tree(file, tree.clone())
+        }
+        _ => None,
+    };
+    let tree = shared_application.as_ref().unwrap_or(tree);
     if let Ok(StructuredTree::Length(StructuredNode::Apply(application))) = tree.decode_structured()
         && application.arguments.is_empty()
     {
@@ -2955,6 +2913,19 @@ fn decode_tasty_parent_type(
                 depth + 1,
             )
             .map(Some);
+        }
+        if let Some(receiver) =
+            applied_constructor_receiver(file, &application.function, resolved_name, package)
+        {
+            return decode_tasty_parent_type(
+                file,
+                &receiver,
+                resolved_name,
+                package,
+                class_type_parameters,
+                resolve_bare,
+                depth + 1,
+            );
         }
         return Ok(Some(DecodedTastyType::Named(resolved_name.clone())));
     }
@@ -3019,6 +2990,44 @@ fn decode_tasty_parent_type(
         tycon: Box::new(DecodedTastyType::Named(resolved_name.clone())),
         arguments,
     }))
+}
+
+/// Recovers the instantiated receiver of a polymorphic superclass constructor.
+fn applied_constructor_receiver<'a>(
+    file: &TastyFile<'a>,
+    function: &RawTree<'a>,
+    parent: &BinaryName,
+    package: &str,
+) -> Option<RawTree<'a>> {
+    let StructuredTree::Length(StructuredNode::TypeApply(call)) =
+        function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::SelectIn(select)) =
+        call.function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::AstChild(new) = select.qualifier.decode_structured().ok()? else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+        new.child.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let is_parent = |tree| {
+        matches!(resolve_reference_name_in_package(file, tree, Some(package)),
+        ReferenceResolution::Resolved(name) if &name == parent)
+    };
+    (select.tag == SELECTIN_TAG
+        && render_member_name(file, select.name).as_deref() == Some("<init>")
+        && new.tag == NEW_TAG
+        && call.type_arguments.len() == applied.arguments.len()
+        && is_parent(&select.underlying_type)
+        && is_parent(&applied.tycon))
+    .then_some(new.child)
 }
 
 fn decode_option_parent_type_application(
@@ -3191,6 +3200,34 @@ fn term_clauses(
     Ok(clauses)
 }
 
+fn language_flags(file: &TastyFile<'_>) -> Result<SymbolFlags, TastyDecodeError> {
+    Ok(
+        if file
+            .attributes()?
+            .is_some_and(|attrs| attrs.contains(&dotty_tasty::tasty::Attribute::Java))
+        {
+            SymbolFlags::JAVA_DEFINED
+        } else {
+            SymbolFlags::EMPTY
+        },
+    )
+}
+
+fn type_parameter_addresses(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+) -> HashMap<(*const u8, usize), u32> {
+    index
+        .iter()
+        .filter(|n| n.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+        .filter_map(|n| {
+            Some((
+                (n.payload.as_ptr(), n.payload.len()),
+                u32::try_from(n.offset).ok()?,
+            ))
+        })
+        .collect()
+}
+
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
 /// `Template.stats`) into a [`DecodedTastyField`]/[`DecodedTastyMethod`].
 ///
@@ -3212,11 +3249,14 @@ fn decode_members(
     retain_projected_result: bool,
     package: &str,
     class_type_parameters: &HashMap<u32, u32>,
+    parameter_addresses: &HashMap<(*const u8, usize), u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
     let mut methods = Vec::new();
-    let address_index = file.ast_address_index()?;
+
+    let address_index = file.ast_address_index_view()?;
+    let source_flags = language_flags(file)?;
 
     let mut incomplete_methods = HashSet::new();
     let definitions = stats.iter().filter_map(|tree| match tree {
@@ -3275,6 +3315,7 @@ fn decode_members(
                 fields.push(DecodedTastyField {
                     name: field_name,
                     flags: decode_field_flags(&tail),
+                    visibility: decode_visibility(file, &tail),
                     contextual_flags: contextual_flags(&tail),
                     declared_type: decode_tasty_member_type(
                         file,
@@ -3306,14 +3347,9 @@ fn decode_members(
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         let payload = parameter.payload();
-                        address_index
-                            .iter()
-                            .find(|indexed| {
-                                indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
-                                    && indexed.payload.len() == payload.len()
-                                    && indexed.payload.as_ptr() == payload.as_ptr()
-                            })
-                            .and_then(|indexed| u32::try_from(indexed.offset).ok())
+                        parameter_addresses
+                            .get(&(payload.as_ptr(), payload.len()))
+                            .copied()
                     })
                     .collect::<Vec<_>>();
                 let type_parameters_by_address = type_parameter_addresses
@@ -3452,7 +3488,8 @@ fn decode_members(
                 let has_term_clause = !clauses.is_empty();
                 // A getter for a trailing implicit may copy only ordinary clauses.
                 // A getter with no term clauses keeps its parameterless result type.
-                let preserve_clauses = (default_for.is_some() && has_term_clause)
+                let preserve_clauses = clauses.len() > 1
+                    || (default_for.is_some() && has_term_clause)
                     || clauses.iter().any(|(kind, _)| *kind != MethodKind::Plain);
 
                 methods.push(DecodedTastyMethod {
@@ -3460,16 +3497,18 @@ fn decode_members(
                     default_for,
                     name: method_name,
                     flags: decode_method_flags(&body.tail),
-                    contextual_flags: symbol_flags(&body.tail).intersection(
-                        SymbolFlags::GIVEN
-                            | SymbolFlags::IMPLICIT
-                            | SymbolFlags::INLINE
-                            | SymbolFlags::TRANSPARENT,
-                    ),
                     has_annotations: body
                         .tail
                         .iter()
                         .any(|part| matches!(part, DefinitionTail::Annotation(_))),
+                    visibility: decode_visibility(file, &body.tail),
+                    semantic_flags: source_flags
+                        | symbol_flags(&body.tail).intersection(
+                            SymbolFlags::GIVEN
+                                | SymbolFlags::IMPLICIT
+                                | SymbolFlags::INLINE
+                                | SymbolFlags::TRANSPARENT,
+                        ),
                     term_clauses: preserve_clauses.then_some(clauses),
                     singleton_result_parameter,
                     type_parameters,
@@ -3590,14 +3629,33 @@ fn decode_visibility(
 }
 
 fn decode_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>) -> DeclaredQualifier {
-    match tree {
-        RawTree::Leaf(term) if term.tag == TYPEREFPKG_TAG => match term.value {
-            TermValue::NameRef(name) => resolve_qualified_name(file, name)
-                .map_or(DeclaredQualifier::Other, DeclaredQualifier::Package),
-            _ => DeclaredQualifier::Other,
-        },
-        _ => DeclaredQualifier::Other,
+    // The compiler shares a package qualifier across members of one template.
+    let mut tree = tree;
+    let mut shared;
+    for _ in 0..128 {
+        match tree {
+            RawTree::Leaf(term) if term.tag == TYPEREFPKG_TAG => {
+                if let TermValue::NameRef(name) = term.value
+                    && let Some(package) = resolve_qualified_name(file, name)
+                {
+                    return DeclaredQualifier::Package(package);
+                }
+                break;
+            }
+            RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => {
+                let Some(next) = term
+                    .ast_ref()
+                    .and_then(|r| decode_shared_tree(file, r.address))
+                else {
+                    break;
+                };
+                shared = next;
+                tree = &shared;
+            }
+            _ => break,
+        }
     }
+    DeclaredQualifier::Other
 }
 
 /// Resolves a name-table reference into a `/`-joined qualified string,
@@ -4091,7 +4149,14 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
                     && selected_package.as_deref().is_some_and(|package| {
                         matches!(
                             package,
-                            "scala" | "scala/annotation" | "java/io" | "java/lang"
+                            "scala"
+                                | "scala/annotation"
+                                | "scala/collection"
+                                | "dotty/tools"
+                                | "dotty/tools/dotc"
+                                | "dotty/tools/dotc/interfaces"
+                                | "java/io"
+                                | "java/lang"
                         )
                     })
                     && is_package_qualifier(file, &selection.qualifier, depth + 1)
@@ -4118,7 +4183,7 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
 fn resolve_symbol_address(file: &TastyFile<'_>, address: u32) -> Option<String> {
     const MAX_OWNER_DEPTH: usize = 256;
 
-    let index = file.ast_address_index().ok()?;
+    let index = file.ast_address_index_view().ok()?;
     let definition = index.get(address)?;
     if definition.tag != TYPEDEF_TAG {
         return None;
@@ -4540,16 +4605,131 @@ fn unresolved_semantic_reference_name_at_depth(
     }
 }
 
+/// A type owned by a Scala module can carry an explicit THIS/ObjectClass
+/// owner, or select a term whose declaration must be checked on the classpath.
+fn module_owned_parent(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    resolve_member: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    depth: usize,
+) -> Option<ReferenceResolution> {
+    if depth >= 128 {
+        return None;
+    }
+    let tree = unshare_parent_tree(file, tree.clone())?;
+    let (member, qualifier) = match tree.decode_structured().ok()? {
+        StructuredTree::Length(StructuredNode::Apply(apply)) => {
+            return module_owned_parent(file, &apply.function, resolve_member, depth + 1);
+        }
+        StructuredTree::Length(StructuredNode::TypeApply(apply)) => {
+            return module_owned_parent(file, &apply.function, resolve_member, depth + 1);
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection))
+            if render_member_name(file, selection.name)?.as_str() == "<init>"
+                && matches!(selection.qualifier.decode_structured(), Ok(StructuredTree::AstChild(child)) if child.tag == NEW_TAG) =>
+        {
+            return module_owned_parent(
+                file,
+                &selection.underlying_type,
+                resolve_member,
+                depth + 1,
+            );
+        }
+        StructuredTree::Ident(ident) if ident.tag == IDENTTPT_TAG => {
+            return module_owned_parent(file, &ident.type_tree, resolve_member, depth + 1);
+        }
+        StructuredTree::Select(select) if select.tag == dotty_tasty::tasty::SELECTTPT_TAG => {
+            (select.name, select.qualifier)
+        }
+        StructuredTree::Reference(reference) if reference.tag == TYPEREF_TAG => {
+            (reference.reference, reference.qualifier)
+        }
+        _ => return None,
+    };
+    let RawName::Utf8(member) = file.name(member)? else {
+        return None;
+    };
+    let qualifier = unshare_parent_tree(file, qualifier)?;
+    let (owner, explicit) = match qualifier.decode_structured().ok()? {
+        StructuredTree::AstChild(child) if child.tag == dotty_tasty::tasty::THIS_TAG => {
+            let owner = unshare_parent_tree(file, child.child)?;
+            let StructuredTree::Reference(owner) = owner.decode_structured().ok()? else {
+                return None;
+            };
+            if owner.tag != TYPEREF_TAG {
+                return None;
+            }
+            (owner, true)
+        }
+        StructuredTree::Reference(owner) if owner.tag == TERMREF_TAG => (owner, false),
+        _ => return None,
+    };
+    let owner_name = match (explicit, file.name(owner.reference)?) {
+        (true, RawName::ObjectClass { underlying }) => match file.name(*underlying)? {
+            RawName::Utf8(name) => name,
+            _ => return None,
+        },
+        (false, RawName::Utf8(name)) => name,
+        _ => return None,
+    };
+    if [member, owner_name]
+        .iter()
+        .any(|n| n.is_empty() || !n.chars().all(is_binary_name_character))
+    {
+        return None;
+    }
+    let RawTree::Leaf(package) = unshare_parent_tree(file, owner.qualifier)? else {
+        return None;
+    };
+    if package.tag != TERMREFPKG_TAG {
+        return None;
+    }
+    let package = file
+        .render_name(package.name_ref()?)
+        .ok()?
+        .replace('.', "/");
+    let owner = BinaryName::from_internal(format!("{package}/{owner_name}"));
+    if !owner.is_path_safe() || matches!(owner.simple_name(), "package" | "package$") {
+        return None;
+    }
+    let nested = BinaryName::from_internal(format!("{}${member}", owner.as_internal()));
+    Some(
+        if explicit || resolve_member(&owner, member).as_ref() == Some(&nested) {
+            ReferenceResolution::Resolved(nested)
+        } else {
+            ReferenceResolution::Unresolved
+        },
+    )
+}
+
+fn unshare_parent_tree<'a>(file: &TastyFile<'a>, mut tree: RawTree<'a>) -> Option<RawTree<'a>> {
+    for _ in 0..128 {
+        match tree {
+            RawTree::Leaf(ref leaf) if matches!(leaf.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
+                tree = decode_shared_tree(file, leaf.ast_ref()?.address)?;
+            }
+            _ => return Some(tree),
+        }
+    }
+    None
+}
+
 fn resolve_parent_name_with_alias(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
-    allow_tuple2_constructor_parent: bool,
+    allow_tuple_constructor_parent: bool,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
-    if allow_tuple2_constructor_parent
-        && let Some(name) = resolve_tuple2_times_colon_constructor_parent(file, parent, package)
+    if let Some(resolution) = module_owned_parent(file, parent, resolve_alias, 0) {
+        return match resolution {
+            ReferenceResolution::Resolved(name) => Some(name),
+            _ => None,
+        };
+    }
+    if allow_tuple_constructor_parent
+        && let Some(name) = resolve_tuple_times_colon_constructor_parent(file, parent, package)
     {
         return Some(name);
     }
@@ -4580,14 +4760,38 @@ fn resolve_parent_name_with_alias(
             }
         }
     }
-    resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+    let name = resolve_parent_name_with_bare(file, parent, package, resolve_bare)?;
+    if name.as_internal() == "scala/ImpureFunction1"
+        && let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+            unshare_parent_tree(file, parent.clone())?
+                .decode_structured()
+                .ok()?
+        && resolve_scala_package_type_reference(file, &applied.tycon, 0).as_ref() == Some(&name)
+    {
+        // Scala synthesizes this capture-annotated alias. Its nominal JVM
+        // parent is Function1; the applied parent view retains both arguments.
+        return (applied.arguments.len() == 2)
+            .then(|| BinaryName::from_internal("scala/Function1"));
+    }
+    Some(name)
 }
 
-/// Resolves only the pinned first applied constructor parent in Scala 3.9's
-/// `scala/Tuple2.tasty`. The source spelling is accepted only when the exact
+fn is_standard_tuple_class(name: &BinaryName) -> bool {
+    name.as_internal()
+        .strip_prefix("scala/Tuple")
+        .is_some_and(|arity| {
+            matches!(
+                arity.as_bytes(),
+                [b'1'..=b'9'] | [b'1', b'0'..=b'9'] | [b'2', b'0'..=b'2']
+            )
+        })
+}
+
+/// Resolves the pinned first applied constructor parent in Scala 3.9's
+/// `Tuple1` through `Tuple22` declarations. The source spelling is accepted only when the exact
 /// Apply/TypeApply/SelectIn wrapper, package-qualified applied type
 /// constructor, and underlying shared type reference all agree.
-fn resolve_tuple2_times_colon_constructor_parent(
+fn resolve_tuple_times_colon_constructor_parent(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
@@ -4614,10 +4818,10 @@ fn resolve_tuple2_times_colon_constructor_parent(
     {
         return None;
     }
-    resolve_tuple2_constructor_owner(file, &selection.qualifier, &selection.underlying_type)
+    resolve_tuple_constructor_owner(file, &selection.qualifier, &selection.underlying_type)
 }
 
-fn resolve_tuple2_constructor_owner(
+fn resolve_tuple_constructor_owner(
     file: &TastyFile<'_>,
     qualifier: &RawTree<'_>,
     underlying_type: &RawTree<'_>,
@@ -4637,25 +4841,25 @@ fn resolve_tuple2_constructor_owner(
         return None;
     }
 
-    let underlying_name = resolve_tuple2_package_type_reference(file, underlying_type, 0)?;
-    let constructor_name = resolve_tuple2_package_type_reference(file, &applied.tycon, 0)?;
+    let underlying_name = resolve_scala_package_type_reference(file, underlying_type, 0)?;
+    let constructor_name = resolve_scala_package_type_reference(file, &applied.tycon, 0)?;
     if underlying_name.as_internal() == "scala/*:"
         && constructor_name == underlying_name
         && underlying_name.package_path() == "scala"
     {
-        Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
+        Some(BinaryName::from_internal(TUPLE_TIMES_COLON_INTERNAL))
     } else {
         None
     }
 }
 
-fn resolve_tuple2_package_type_reference(
+fn resolve_scala_package_type_reference(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
     depth: usize,
 ) -> Option<BinaryName> {
-    const MAX_TUPLE2_TYPE_REFERENCE_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE2_TYPE_REFERENCE_DEPTH {
+    const MAX_TYPE_REFERENCE_DEPTH: usize = 128;
+    if depth >= MAX_TYPE_REFERENCE_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = tree
@@ -4663,7 +4867,7 @@ fn resolve_tuple2_package_type_reference(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple2_package_type_reference(file, &target, depth + 1);
+        return resolve_scala_package_type_reference(file, &target, depth + 1);
     }
 
     let StructuredTree::Reference(ReferenceNode {
@@ -4674,23 +4878,23 @@ fn resolve_tuple2_package_type_reference(
     else {
         return None;
     };
-    // The Tuple2 parent is authenticated from the nominal class-name entry
+    // Authenticate the type reference from its nominal class-name entry
     // itself. Resolving a Signed name through its result signature would let
     // a method signature impersonate the class name.
     let dotty_tasty::tasty::RawName::Utf8(name) = file.name(reference)? else {
         return None;
     };
-    let package = resolve_tuple2_package_prefix(file, &qualifier, depth + 1)?;
+    let package = resolve_scala_package_prefix(file, &qualifier, depth + 1)?;
     Some(BinaryName::from_internal(format!("{package}/{name}")))
 }
 
-fn resolve_tuple2_package_prefix(
+fn resolve_scala_package_prefix(
     file: &TastyFile<'_>,
     prefix: &RawTree<'_>,
     depth: usize,
 ) -> Option<String> {
-    const MAX_TUPLE2_PACKAGE_PREFIX_DEPTH: usize = 128;
-    if depth >= MAX_TUPLE2_PACKAGE_PREFIX_DEPTH {
+    const MAX_PACKAGE_PREFIX_DEPTH: usize = 128;
+    if depth >= MAX_PACKAGE_PREFIX_DEPTH {
         return None;
     }
     if let RawTree::Leaf(term) = prefix
@@ -4698,7 +4902,7 @@ fn resolve_tuple2_package_prefix(
     {
         let reference = term.ast_ref()?;
         let target = decode_shared_tree(file, reference.address)?;
-        return resolve_tuple2_package_prefix(file, &target, depth + 1);
+        return resolve_scala_package_prefix(file, &target, depth + 1);
     }
 
     let RawTree::Leaf(term) = prefix else {
@@ -6064,15 +6268,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 7);
+        assert!(current_unresolved_roots.is_empty());
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            34
+            41
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 17);
-        assert_eq!(recovered_roots.len(), 34);
-        assert_eq!(recovered_weight, 362);
+        assert_eq!(current_weight, 0);
+        assert_eq!(recovered_roots.len(), 41);
+        assert_eq!(recovered_weight, 379);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -6080,8 +6284,11 @@ mod tests {
             current_weight + recovered_weight
         );
         assert_eq!(
-            load_cause_counts.get("tasty.unresolved_supertype"),
-            Some(&current_unresolved_roots.len())
+            load_cause_counts
+                .get("tasty.unresolved_supertype")
+                .copied()
+                .unwrap_or(0),
+            current_unresolved_roots.len()
         );
         std::fs::write(&output_path, rows).expect("write parent profile TSV");
         eprintln!(
@@ -6218,6 +6425,32 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn java_attribute_preserves_java_method_adaptation_for_tasty_input() {
+        use dotty_tasty::tasty::{Attribute, EncodedSection, TastyFileBuilder};
+
+        let bytes = unpickler_fixture_bytes("Methods.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let attributes = file.section(StandardSection::Attributes).unwrap();
+        let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+        for section in file.sections().iter() {
+            let section = if section.name == attributes.name {
+                EncodedSection::attributes(section.name, &[Attribute::Java]).unwrap()
+            } else {
+                EncodedSection::raw(section.name, section.payload)
+            };
+            builder.push_section(section);
+        }
+        let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");
+        let decoded = decode(&builder.encode().unwrap(), &owner).unwrap();
+        let empty = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "empty")
+            .unwrap();
+        assert!(empty.semantic_flags.contains(SymbolFlags::JAVA_DEFINED));
     }
 
     fn with_header_version(mut bytes: Vec<u8>, major: u8, minor: u8, experimental: u8) -> Vec<u8> {
@@ -6529,6 +6762,35 @@ mod tests {
     }
 
     #[test]
+    fn tuple_family_resolves_the_constructor_parent_and_matching_product() {
+        for arity in 1..=22 {
+            let requested = BinaryName::from_internal(format!("scala/Tuple{arity}"));
+            let bytes = fixture_bytes(&format!("scala3-library/{requested}.tasty"));
+            let decoded = decode_with_resolvers(&bytes, &requested, |_, _| None, |_, _| None)
+                .unwrap_or_else(|e| panic!("{requested}: {e}"));
+            assert_eq!(
+                decoded.super_class.as_internal(),
+                TUPLE_TIMES_COLON_INTERNAL
+            );
+            assert_eq!(
+                decoded.interfaces[0].as_internal(),
+                format!("scala/Product{arity}")
+            );
+        }
+        for excluded in [
+            "scala/Tuple0",
+            "scala/Tuple01",
+            "scala/Tuple23",
+            "scala/Tuple2$",
+            "other/Tuple4",
+        ] {
+            assert!(!is_standard_tuple_class(&BinaryName::from_internal(
+                excluded
+            )));
+        }
+    }
+
+    #[test]
     fn does_not_flatten_nested_select_in_owner_or_accept_unmapped_operator_name() {
         let unicode_child = fixture_bytes("scala3-parent-unicode/review/Child.tasty");
         let decoded = decode_with_resolvers(
@@ -6557,12 +6819,10 @@ mod tests {
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("the nested Phase owner must not be flattened into a package path");
-        assert!(matches!(
-            error,
-            TastyDecodeError::UnresolvedSupertype(parent)
-                if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("Phase")
-        ));
+        .unwrap_err();
+        assert!(
+            matches!(error, TastyDecodeError::UnresolvedSupertype(parent) if parent.parent_index == 1)
+        );
 
         let tuple2 = fixture_bytes("scala3-library/scala/Tuple2.tasty");
         let decoded = decode_with_resolvers(
@@ -6575,21 +6835,15 @@ mod tests {
         assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
 
         let tuple3 = fixture_bytes("scala3-library/scala/Tuple3.tasty");
-        let error = decode_with_resolvers(
+        let decoded = decode_with_resolvers(
             &tuple3,
             &BinaryName::from_internal("scala/Tuple3"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("the neighboring Tuple3 source operator name remains unsupported");
-        assert!(
-            matches!(
-                error,
-                TastyDecodeError::UnresolvedSupertype(ref parent)
-                    if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("*:")
-            ),
-            "Tuple3: {error:?}"
-        );
+        .unwrap();
+        assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
+        assert_eq!(decoded.interfaces[0].as_internal(), "scala/Product3");
     }
 
     #[test]
@@ -6889,14 +7143,48 @@ mod tests {
     }
 
     #[test]
+    fn pinned_compiler_parents_use_the_nested_class_declared_by_the_module() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let path = crate::class_path::DirectoryClassPath::new(&fixtures);
+        for (name, expected_super, expected_trait) in [
+            (
+                "dotty/tools/dotc/transform/Recheck",
+                "dotty/tools/dotc/core/Phases$Phase",
+                "dotty/tools/dotc/core/DenotTransformers$SymTransformer",
+            ),
+            (
+                "dotty/tools/io/File",
+                "dotty/tools/io/Path",
+                "dotty/tools/io/Streamable$Chars",
+            ),
+        ] {
+            let bytes = std::fs::read(fixtures.join(format!("{name}.tasty"))).unwrap();
+            let decoded = decode_with_resolvers(
+                &bytes,
+                &BinaryName::from_internal(name),
+                |owner, member| crate::loader::resolve_tasty_alias(&path, owner, member).unwrap(),
+                |_, _| None,
+            )
+            .unwrap();
+            assert_eq!(decoded.super_class.as_internal(), expected_super);
+            assert_eq!(
+                decoded.interfaces,
+                [BinaryName::from_internal(expected_trait)]
+            );
+        }
+    }
+
+    #[test]
     fn keeps_object_owned_selected_parent_unresolved() {
         let bytes = fixture_bytes("scala3-parent-selected/review/OwnerBaseChild.tasty");
-        let mut attempted_package_alias = false;
+        let mut checked_module = false;
         let error = decode_with_resolvers(
             &bytes,
             &BinaryName::from_internal("review/Child"),
-            |_, _| {
-                attempted_package_alias = true;
+            |owner, member| {
+                assert_eq!((owner.as_internal(), member), ("review/Owner", "Base"));
+                checked_module = true;
                 None
             },
             |_, _| None,
@@ -6904,8 +7192,8 @@ mod tests {
         .expect_err("an object-owned type path is not a package-qualified JVM name");
 
         assert!(
-            !attempted_package_alias,
-            "object-owned type selections must not be reinterpreted as package aliases"
+            checked_module,
+            "the selected owner must be proved to declare the nested class"
         );
 
         assert!(matches!(
@@ -6986,6 +7274,25 @@ mod tests {
             TastyDecodeError::UnresolvedSupertype(parent)
                 if parent.parent_index == 1 && parent.shape == "selected-qualified"
         ));
+    }
+
+    #[test]
+    fn abstract_file_keeps_its_distinct_java_interface_in_the_compiler_package() {
+        let bytes = fixture_bytes("scala3-compiler/dotty/tools/io/AbstractFile.tasty");
+        let decoded = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("dotty/tools/io/AbstractFile"),
+            |owner, alias| {
+                (owner.as_internal() == "scala/package" && alias == "Iterable")
+                    .then(|| BinaryName::from_internal("scala/collection/Iterable"))
+            },
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.interfaces[1].as_internal(),
+            "dotty/tools/dotc/interfaces/AbstractFile"
+        );
     }
 
     #[test]
@@ -7251,13 +7558,145 @@ mod tests {
     fn decodes_a_trait_as_an_interface_with_no_declared_interfaces() {
         let decoded = decode(
             &fixture_bytes("inheritance/Animal.tasty"),
-            &BinaryName::from_internal("Animal"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Animal"),
         )
         .unwrap();
 
         assert!(decoded.flags.is_interface());
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
         assert!(decoded.interfaces.is_empty());
+    }
+
+    #[test]
+    fn mutable_indexed_seq_resolves_its_qualified_collection_parent() {
+        let name = BinaryName::from_internal("scala/collection/mutable/IndexedSeq");
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/collection/mutable/IndexedSeq.tasty"),
+            &name,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.interfaces[1].as_internal(),
+            "scala/collection/IndexedSeq"
+        );
+        assert!(!decoded.interfaces.contains(&name));
+    }
+
+    #[test]
+    fn shared_impure_function_parent_preserves_the_applied_type() {
+        let bytes = fixture_bytes("scala3-library/scala/collection/SetOps.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let node = index
+            .iter()
+            .find(|node| {
+                matches!(node.decode_structured(), Ok(StructuredNode::AppliedType(applied))
+                if resolve_scala_package_type_reference(&file, &applied.tycon, 0)
+                    .is_some_and(|name| name.as_internal() == "scala/ImpureFunction1"))
+            })
+            .unwrap();
+        let direct = RawTree::LengthNode(node.clone());
+        let shared = RawTree::Leaf(
+            SimpleTerm::new(SHAREDTYPE_TAG, TermValue::AstRef(node.offset as u32)).unwrap(),
+        );
+        let function = resolve_parent_name_with_alias(
+            &file,
+            &shared,
+            "scala/collection",
+            false,
+            &mut |_, _| None,
+            &mut |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(function.as_internal(), "scala/Function1");
+        let parent_type = |tree| {
+            decode_tasty_parent_type(
+                &file,
+                tree,
+                &function,
+                "scala/collection",
+                &HashMap::new(),
+                &mut |_, _| None,
+                0,
+            )
+            .unwrap()
+        };
+        let applied = parent_type(&direct);
+        assert!(
+            matches!(&applied, Some(DecodedTastyType::Applied { arguments, .. }) if arguments.len() == 2)
+        );
+        assert_eq!(parent_type(&shared), applied);
+    }
+
+    #[test]
+    fn impure_function_parent_requires_the_scala_package_and_two_arguments() {
+        let bytes = fixture_bytes("scala3-library/scala/collection/SetOps.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let name_ref = |name: &str| {
+            file.names()
+                .entries()
+                .iter()
+                .position(|entry| matches!(entry, RawName::Utf8(s) if s == name))
+                .unwrap() as u32
+        };
+        for (package, arity, expected) in [
+            ("scala", 2, Some("scala/Function1")),
+            ("scala", 1, None),
+            ("scala", 3, None),
+            ("java", 2, Some("java/ImpureFunction1")),
+        ] {
+            let mut payload = Writer::new();
+            for ty in
+                std::iter::once("ImpureFunction1").chain(std::iter::repeat_n("Boolean", arity))
+            {
+                payload.write_u8(TYPEREF_TAG);
+                payload.write_nat(name_ref(ty)).unwrap();
+                payload.write_u8(TERMREFPKG_TAG);
+                payload.write_nat(name_ref(package)).unwrap();
+            }
+            let parent = RawTree::LengthNode(dotty_tasty::tasty::RawNode {
+                tag: APPLIEDTYPE_TAG,
+                offset: 0,
+                payload: payload.as_slice(),
+            });
+            let resolved = resolve_parent_name_with_alias(
+                &file,
+                &parent,
+                "test",
+                false,
+                &mut |_, _| None,
+                &mut |_, _| None,
+            );
+            assert_eq!(
+                resolved.as_ref().map(BinaryName::as_internal),
+                expected,
+                "{package}, arity {arity}"
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_parent_preserves_concrete_and_class_parameter_arguments() {
+        let child = decode_with_resolvers(
+            include_bytes!("../tests/fixtures/scala_module_parents/AppliedChild.tasty"),
+            &BinaryName::from_internal("parents/AppliedChild"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(child.type_parameters[0].name, "T");
+        assert_eq!(
+            child.parent_types,
+            vec![Some(DecodedTastyType::Applied {
+                tycon: Box::new(DecodedTastyType::Named(BinaryName::from_internal(
+                    "parents/Base"
+                ))),
+                arguments: vec![
+                    DecodedTastyType::Named(BinaryName::from_internal("parents/Element")),
+                    DecodedTastyType::ClassParamRef(0),
+                ],
+            })]
+        );
     }
 
     #[test]
@@ -7314,13 +7753,13 @@ mod tests {
     /// `Dog.tasty`'s `Animal` mixin is a real, post-typecheck reference
     /// carrying its own compiled `TERMREFpkg` prefix (`me.cytrowski.
     /// tastyfixtures`, this fixture's real source package) —
-    /// [`resolve_reference_name`] resolves it directly, so it no longer
-    /// matters that `Dog` itself was requested with no package at all.
+    /// [`resolve_reference_name`] resolves it directly, so it never
+    /// requires a parent lookup by bare name.
     #[test]
     fn decodes_a_class_with_a_trait_mixin_as_an_interface() {
         let decoded = decode(
             &fixture_bytes("inheritance/Dog.tasty"),
-            &BinaryName::from_internal("Dog"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"),
         )
         .unwrap();
 
@@ -7334,35 +7773,43 @@ mod tests {
         );
     }
 
-    /// The same fixture requested under a completely different,
-    /// fictitious package: `Animal`'s reference still resolves to its
-    /// own real compiled package, not `com/example` — a real
-    /// `TERMREFpkg`-qualified reference is authoritative and never
-    /// deferred to the requested class's own package the way a
-    /// genuinely bare (unresolvable) reference is (see
-    /// [`resolve_parent_name_with_bare`]'s flatten-based fallback, still covered
-    /// by `does_not_requalify_an_already_cross_package_mixin` below).
     #[test]
-    fn a_real_qualified_mixin_resolves_to_its_own_package_not_the_requested_ones() {
-        let decoded = decode(
-            &fixture_bytes("inheritance/Dog.tasty"),
-            &BinaryName::from_internal("com/example/Dog"),
-        )
-        .unwrap();
+    fn the_unnamed_package_has_one_unambiguous_top_level_definition() {
+        use dotty_tasty::tasty::{EncodedSection, TastyFileBuilder};
+        let bytes = fixture_bytes("reordered_locals/Locals.tasty");
+        let requested = BinaryName::from_internal("Locals");
+        assert!(decode_identity(&bytes, &requested).is_ok());
+        assert!(decode(&bytes, &requested).is_ok());
 
-        assert_eq!(
-            decoded.interfaces,
-            vec![BinaryName::from_internal(
-                "me/cytrowski/tastyfixtures/Animal"
-            )]
-        );
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let asts = file.section(StandardSection::Asts).unwrap();
+        let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+        builder.push_section(EncodedSection::raw(asts.name, asts.payload.repeat(2)));
+        let duplicate = builder.encode().unwrap();
+        assert!(matches!(
+            decode_identity(&duplicate, &requested),
+            Err(TastyDecodeError::AmbiguousTypeDef)
+        ));
+        assert!(matches!(
+            decode(&duplicate, &requested),
+            Err(TastyDecodeError::AmbiguousTypeDef)
+        ));
+    }
+
+    #[test]
+    fn a_class_from_a_different_package_cannot_supply_a_definition() {
+        let bytes = fixture_bytes("inheritance/Dog.tasty");
+        assert!(matches!(
+            decode(&bytes, &BinaryName::from_internal("com/example/Dog")),
+            Err(TastyDecodeError::MissingTypeDef)
+        ));
     }
 
     #[test]
     fn decodes_a_case_class_with_cross_package_mixins() {
         let decoded = decode(
             &fixture_bytes("case_class/Point.tasty"),
-            &BinaryName::from_internal("Point"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Point"),
         )
         .unwrap();
 
@@ -7445,10 +7892,13 @@ mod tests {
             |_, _| None,
         )
         .unwrap();
-        assert!(
-            tuple3_profiles
-                .iter()
-                .all(|parent| parent.resolved_binary_name.as_deref() != Some("scala/$times$colon"))
+        assert_eq!(
+            tuple3_profiles[0].resolved_binary_name.as_deref(),
+            Some("scala/$times$colon")
+        );
+        assert_eq!(
+            tuple3_profiles[1].resolved_binary_name.as_deref(),
+            Some("scala/Product3")
         );
         let decoded = decode_with_resolvers(
             &bytes,
@@ -7528,12 +7978,12 @@ mod tests {
         };
         let parent = &template.parents[0];
         assert_eq!(
-            resolve_tuple2_times_colon_constructor_parent(&file, parent, "scala")
+            resolve_tuple_times_colon_constructor_parent(&file, parent, "scala")
                 .as_ref()
                 .map(BinaryName::as_internal),
             Some("scala/$times$colon")
         );
-        assert!(resolve_tuple2_times_colon_constructor_parent(&file, parent, "foreign").is_none());
+        assert!(resolve_tuple_times_colon_constructor_parent(&file, parent, "foreign").is_none());
 
         let StructuredTree::Length(StructuredNode::Apply(apply)) =
             parent.decode_structured().unwrap()
@@ -7584,7 +8034,7 @@ mod tests {
             child: Box::new(contradictory_applied),
         };
         assert!(
-            resolve_tuple2_constructor_owner(
+            resolve_tuple_constructor_owner(
                 &file,
                 &contradictory_qualifier,
                 &selection.underlying_type
@@ -7612,17 +8062,17 @@ mod tests {
         };
         assert_eq!(root_type_tag, TYPEREF_TAG);
         assert_eq!(
-            resolve_tuple2_package_prefix(&file, &package_prefix, 0).as_deref(),
+            resolve_scala_package_prefix(&file, &package_prefix, 0).as_deref(),
             Some("scala")
         );
-        assert!(resolve_tuple2_package_prefix(&file, &applied.tycon, 0).is_none());
+        assert!(resolve_scala_package_prefix(&file, &applied.tycon, 0).is_none());
         let term_tycon = RawTree::NatAst {
             tag: dotty_tasty::tasty::TERMREF_TAG,
             offset,
             value,
             child,
         };
-        assert!(resolve_tuple2_package_prefix(&file, &term_tycon, 0).is_none());
+        assert!(resolve_scala_package_prefix(&file, &term_tycon, 0).is_none());
         let term_applied = AppliedTypeNode {
             tag: applied.tag,
             tycon: term_tycon,
@@ -7639,31 +8089,9 @@ mod tests {
             child: Box::new(term_applied),
         };
         assert!(
-            resolve_tuple2_constructor_owner(&file, &term_qualifier, &selection.underlying_type)
+            resolve_tuple_constructor_owner(&file, &term_qualifier, &selection.underlying_type)
                 .is_none(),
             "a TERMREF root tycon must not be accepted as the nominal class constructor"
-        );
-    }
-
-    /// The same fixture as `decodes_a_case_class_with_cross_package_mixins`,
-    /// but requested under a (fictitious) non-root package — proving the
-    /// requested package only fills in a *bare* reference and is never
-    /// applied on top of `Product`/`Serializable`'s already fully
-    /// `_root_`-qualified chain.
-    #[test]
-    fn does_not_requalify_an_already_cross_package_mixin() {
-        let decoded = decode(
-            &fixture_bytes("case_class/Point.tasty"),
-            &BinaryName::from_internal("geometry/Point"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            decoded.interfaces,
-            vec![
-                BinaryName::from_internal("scala/Product"),
-                BinaryName::from_internal("scala/Serializable"),
-            ]
         );
     }
 
@@ -7732,7 +8160,7 @@ mod tests {
     fn decoding_fails_when_one_of_several_mixins_is_an_unresolvable_implicit_import_reference() {
         let error = decode(
             &fixture_bytes("scala3-library/scala/math/BigInt.tasty"),
-            &BinaryName::from_internal("BigInt"),
+            &BinaryName::from_internal("scala/math/BigInt"),
         )
         .unwrap_err();
 
@@ -7743,32 +8171,25 @@ mod tests {
         ));
     }
 
-    /// `scala3-library/scala/math/Ordering.tasty`'s private nested
-    /// `Reverse` mixes in `Ordering[T]` — its own enclosing class,
-    /// applied to a type parameter, still just an `AppliedType` mixin
-    /// resolving to the bare name `Ordering`.
     #[test]
-    fn decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class() {
-        let decoded = decode(
-            &fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
-            &BinaryName::from_internal("Reverse"),
-        )
-        .unwrap();
-
-        assert!(!decoded.flags.is_public());
-        assert_eq!(decoded.visibility, Some(DeclaredVisibility::Private));
-        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
-        assert_eq!(
-            decoded.interfaces,
-            vec![BinaryName::from_internal("Ordering")]
-        );
+    fn a_nested_type_cannot_supply_a_package_member_even_in_its_own_package() {
+        let bytes = fixture_bytes("scala3-library/scala/math/Ordering.tasty");
+        let requested = BinaryName::from_internal("scala/math/Reverse");
+        assert!(matches!(
+            decode_identity(&bytes, &requested),
+            Err(TastyDecodeError::MissingTypeDef)
+        ));
+        assert!(matches!(
+            decode(&bytes, &requested),
+            Err(TastyDecodeError::MissingTypeDef)
+        ));
     }
 
     #[test]
     fn decodes_a_public_classs_visibility_as_none() {
         let decoded = decode(
             &fixture_bytes("inheritance/Dog.tasty"),
-            &BinaryName::from_internal("Dog"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"),
         )
         .unwrap();
 
@@ -7794,12 +8215,6 @@ mod tests {
         assert!(matches!(error, TastyDecodeError::Parse(_)));
     }
 
-    /// `opaque/UserId.tasty` declares a real `opaque type UserId`, not
-    /// a class/trait/object — a `TYPEDEF_TAG` whose `type_or_template`
-    /// is a type tree, not a `Template`. `decode` searches every
-    /// `TYPEDEF_TAG` regardless of what kind of definition it is (a
-    /// type alias included), so requesting one by name reaches this
-    /// path instead of `MissingTypeDef`.
     /// `decode`'s own `?` on `node.decode_structured()`/
     /// `template_node.decode_structured()` is the only place a
     /// [`TastyDecodeError::Ast`] can arise (`file.ast_address_index()`'s
@@ -7821,20 +8236,24 @@ mod tests {
         let mut bytes = fixture_bytes("inheritance/Animal.tasty");
         bytes[343] = bytes[343].wrapping_add(1);
 
-        let error = decode(&bytes, &BinaryName::from_internal("Animal")).unwrap_err();
+        let error = decode(
+            &bytes,
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Animal"),
+        )
+        .unwrap_err();
 
         assert!(matches!(error, TastyDecodeError::Ast(_)));
     }
 
     #[test]
-    fn no_template_body_when_the_matching_type_def_is_a_type_alias() {
+    fn a_type_alias_in_a_module_cannot_supply_a_class_identity() {
         let error = decode(
             &fixture_bytes("opaque/UserId.tasty"),
-            &BinaryName::from_internal("UserId"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/UserId"),
         )
         .unwrap_err();
 
-        assert!(matches!(error, TastyDecodeError::NoTemplateBody));
+        assert!(matches!(error, TastyDecodeError::MissingTypeDef));
     }
 
     /// `scala3-library/scala/concurrent/impl/CompletionLatch.tasty`'s
@@ -7853,7 +8272,7 @@ mod tests {
     fn resolves_a_generic_mixins_bare_typeref_tycon() {
         let decoded = decode(
             &fixture_bytes("scala3-library/scala/concurrent/impl/CompletionLatch.tasty"),
-            &BinaryName::from_internal("CompletionLatch"),
+            &BinaryName::from_internal("scala/concurrent/impl/CompletionLatch"),
         )
         .unwrap();
 
@@ -7931,7 +8350,7 @@ mod tests {
     fn declared_visibility(class: &str) -> Option<DeclaredVisibility> {
         decode(
             &visibility_fixture(class),
-            &BinaryName::from_internal(class),
+            &BinaryName::from_internal(format!("me/cytrowski/tastyfixtures/visibility/{class}")),
         )
         .unwrap()
         .visibility
@@ -7973,23 +8392,20 @@ mod tests {
         })]
     }
 
-    /// A real `protected[visibility]` (Scala only allows it on a member, so
-    /// the fixture nests the class in an object). `decode` finds nested
-    /// classes by simple name, which is how `Ordering.tasty`'s `Reverse` is
-    /// read too.
     #[test]
     fn decodes_a_real_protected_within_a_package_qualifier() {
-        let decoded = decode(
-            &visibility_fixture("Holder"),
-            &BinaryName::from_internal("InProtected"),
+        let bytes = visibility_fixture("Holder");
+        let module = decode_module_identity(
+            &bytes,
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder"),
         )
+        .unwrap()
         .unwrap();
-
         assert_eq!(
-            decoded.visibility,
-            Some(DeclaredVisibility::ProtectedWithin(
+            module.nested_type_visibilities.get("InProtected"),
+            Some(&Some(DeclaredVisibility::ProtectedWithin(
                 DeclaredQualifier::Package("me/cytrowski/tastyfixtures/visibility".to_owned())
-            ))
+            )))
         );
     }
 
@@ -8039,9 +8455,12 @@ mod tests {
     }
 
     fn decoded_fields(class: &str) -> Vec<DecodedTastyField> {
-        decode(&fields_fixture(class), &BinaryName::from_internal(class))
-            .unwrap()
-            .fields
+        decode(
+            &fields_fixture(class),
+            &BinaryName::from_internal(format!("me/cytrowski/tastyfixtures/fields/{class}")),
+        )
+        .unwrap()
+        .fields
     }
 
     fn field_names(fields: &[DecodedTastyField]) -> Vec<&str> {
@@ -8084,7 +8503,7 @@ mod tests {
     fn decodes_a_case_classs_constructor_accessor_fields() {
         let decoded = decode(
             &fixture_bytes("case_class/Point.tasty"),
-            &BinaryName::from_internal("Point"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Point"),
         )
         .unwrap();
 
@@ -8109,7 +8528,7 @@ mod tests {
     fn decodes_a_case_classs_synthesized_methods_including_the_constructor() {
         let decoded = decode(
             &fixture_bytes("case_class/Point.tasty"),
-            &BinaryName::from_internal("Point"),
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/Point"),
         )
         .unwrap();
 

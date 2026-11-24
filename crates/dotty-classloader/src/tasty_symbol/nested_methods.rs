@@ -41,8 +41,10 @@ pub(crate) fn nested_methods(
     inner: &str,
     is_static: bool,
 ) -> Result<Option<NestedMethods>, TastyDecodeError> {
-    let file = parse_classloader_tasty(bytes)?;
-    let index = file.ast_address_index()?;
+    let mut file = parse_classloader_tasty(bytes)?;
+    file.prepare_ast_address_index()?;
+    let index = file.ast_address_index_view()?;
+    let addresses = type_parameter_addresses(&index);
     let outer_name = if is_static {
         format!("{}$", owner.simple_name())
     } else {
@@ -70,13 +72,9 @@ pub(crate) fn nested_methods(
         let outer = template.decode_template_structure()?;
         // Only an instance member of a unary generic outer can use this form.
         let parameter = match outer.type_params.as_slice() {
-            [ParameterNode::TypeParam { name, payload, .. }] if !is_static => index
-                .iter()
-                .find(|node| {
-                    node.tag == dotty_tasty::tasty::TYPEPARAM_TAG
-                        && std::ptr::eq(node.payload, *payload)
-                })
-                .and_then(|node| u32::try_from(node.offset).ok())
+            [ParameterNode::TypeParam { name, payload, .. }] if !is_static => addresses
+                .get(&(payload.as_ptr(), payload.len()))
+                .copied()
                 .zip(wire_name(&file, *name)),
             _ => None,
         };
@@ -119,6 +117,7 @@ pub(crate) fn nested_methods(
                 true,
                 owner.package_path(),
                 &class_parameters,
+                &addresses,
                 &mut |_, _| None,
             )?;
             let division_parameter = match parameter {
@@ -242,7 +241,7 @@ pub(crate) fn matches_contextual_projection(
         && context == evidence.as_internal()
         && *erased_result == format!("{}${member}", evidence.as_internal())
         && !method.has_annotations
-        && method.contextual_flags.contains(SymbolFlags::IMPLICIT)
+        && method.semantic_flags.contains(SymbolFlags::IMPLICIT)
         && method.term_clauses.as_deref()
             == Some(&[(MethodKind::Plain, 1), (MethodKind::Implicit, 1)])
         && !x.erased

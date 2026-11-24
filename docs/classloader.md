@@ -128,7 +128,8 @@ resolution.
   on the shared file handle. ZIP-relative offsets are translated from the
   supplied archive start, including a 4-byte JMOD prefix. `JmodClassPath`
   validates the JMOD magic and uses this backing, so `JdkClassPath::new`
-  indexes each JMOD's metadata without retaining its complete payload; JARs
+  indexes each JMOD's metadata. It maps direct packages to their contributing
+  JMODs in lexical filename order, including split and unnamed packages. JARs
   remain memory-backed. If an opened JMOD is truncated or modified in place,
   later reads use the current file contents and report typed ZIP errors if
   those bytes no longer match the indexed archive. On systems that permit
@@ -161,11 +162,14 @@ resolution.
   Package-prefix evidence is based on logical `.class`/`.tasty` resource
   names; it does not decode resource bytes, create package symbols, or prove
   that the package has a direct class, module, or package-object term.
-  Directory entries must be files within the classpath root; archive package
-  prefixes are indexed from resource names, not ZIP directory records.
-  Multi-release JAR entries contribute to this query only when the manifest
-  declares `Multi-Release: true`, and only for versions from 9 through the
-  configured effective release. JMOD resources are considered only under
+  Directory entries must be files within the classpath root. JAR and JMOD
+  entries index direct resource directories and logical package prefixes when
+  opened, so repeated queries use the central-directory snapshot.
+  Versioned entries contribute their logical package paths only when the main
+  section of the JAR manifest declares `Multi-Release: true`, and only for versions from 9 through the
+  configured effective release. Each versioned resource is indexed at its highest
+  eligible release, so a cold class lookup checks at most one entry per format.
+  JMOD resources are considered only under
   their `classes/` root. The empty path represents the unnamed/default
   package boundary, while `_root_` is a Scala source lookup marker; these
   classpath checks do not implement Scala default imports or source lookup.
@@ -192,6 +196,9 @@ resolution.
   (`SymbolKind::Field`/`Method`/`Constructor`) with real `Type::Method`/
   `Type::Poly` types, lowered from JVM descriptors and — when present
   and consistent with the descriptor — generic `Signature` attributes.
+  Each method type parameter carries `Type::Bounds` with lower bound
+  `Nothing`. Its upper bound is the JVM class bound (defaulting to
+  `java.lang.Object`) intersected with any declared interface bounds.
 - JVM signature type variables use this class's type parameters, followed
   by enclosing member-class parameters from nearest to farthest. A method's
   own parameters shadow all class parameters. Enclosing parameters are
@@ -396,11 +403,15 @@ anonymous one — reconstructed from its own class file's `InnerClasses`
 self-entry (JVMS §4.7.6 requires one) when it names an `outer_class`, or
 its `EnclosingMethod` attribute's `class` otherwise (see the known gap
 in §3 for why this stops at the enclosing class, not the enclosing
-method). `Visibility::Package` is computed once, from the real package,
+method). For a member class, identity lookup and completion read visibility
+from its own `InnerClasses` entry. For a package-private field, method, or
+constructor, the access boundary is the package of the class file.
+`Visibility::Package` is computed from the real package,
 and is never repointed at the enclosing class — a package-private
 nested class is visible package-wide, not only from within its
-enclosing class. `.tasty` files carry neither attribute, so a
-`.tasty`-backed nested class's owner is still just its package (§4.4).
+enclosing class. For ordinary TASTy classes, identity lookup and completion
+select the same unique direct definition in the requested package. A nested
+definition cannot supply a top-level class of the same name.
 
 For a classfile-backed nested class inside a top-level Scala object, the
 `InnerClasses` entry can name the object's static forwarder class as the
@@ -408,6 +419,14 @@ enclosing class. If that facade's TASTy has no matching class `TypeDef`, both
 identity-only loading and full class loading use the module-class identity
 only when the same TASTy proves the top-level object. A `$` in the binary
 name is not sufficient evidence.
+
+A direct JVM lookup of a Scala module class uses the canonical TASTy object
+and module class when both resources come from the same classpath origin.
+The classfile must have the Scala marker, its own static `MODULE$` field of
+the exact class type, and the matching object and module declarations in
+TASTy. Identity lookup and full completion then reuse the same symbol as
+object lookup, in either order. A standalone JVM class retains its
+classfile hierarchy and members.
 
 ### 4.5 Shared-store symbol resolver
 
@@ -520,6 +539,9 @@ shape — reusing the very same format-agnostic `enter_field`/
 `enter_method` (built for `.class`, unmodified for `.tasty`) once
 `.tasty`'s own modifiers are translated into the same JVM-shaped
 `FieldAccessFlags`/`MethodAccessFlags` `.class` decoding produces.
+Qualified fields and methods retain their TASTy access boundary, including
+shared package qualifiers. Source member selection checks the caller’s
+owner chain against that canonical boundary.
 Case-class constructor `val`/`var` parameters are extracted from the
 primary constructor's own `term_params` (tagged `CASEACCESSOR_TAG`/
 `FIELDACCESSOR_TAG`) rather than `Template.stats`, since Scala's pickler
@@ -535,7 +557,18 @@ name or scope iteration order. A parent whose generic arguments include a
 shape outside the supported TASTy subset keeps its applied constructor and
 arity; each unsupported argument lowers to an explicit `Type::Error` rather
 than erasing the whole parent view. This preserves supported sibling
-arguments while keeping the unsupported slot observable.
+arguments while keeping the unsupported slot observable. For a superclass
+constructed without value arguments, the loader reads the instantiated
+receiver type when the constructor selection and receiver name the same
+resolved superclass.
+
+In a TASTy parent list, the compiler-generated alias
+`scala.ImpureFunction1[A, B]` projects to the JVM trait `scala.Function1[A, B]`.
+The loader checks the package-qualified type constructor and its two arguments.
+For example, the `Function1` parent of `scala.collection.SetOps[A, CC, C]`
+retains that trait's own parameter `A` and the builtin `Boolean` result.
+This projection covers nominal inheritance. The alias's capture annotation
+remains outside the supported parent type model.
 
 The crate-private semantic TASTy path also completes the measured parameter-
 free linear hierarchy from one requested class by following its indexed
@@ -547,13 +580,17 @@ Existing ancestor identities and origins are preserved. A richer neighboring
 unit remains on the existing bounded loader path. Ordinary `load_class`
 behavior is unchanged.
 
-For `DefDef` methods, TASTy clause presence is retained independently of the
-flattened JVM parameter list. A definition with no clauses of either kind
-lowers as `Type::ByName` (TASTy's `ExprType`); a type-parameter-only
-definition keeps its direct result under `Type::Poly`, matching the semantic
-unpickler; an explicit empty `()` clause remains `Type::Method` with no
-parameters. A `.class` descriptor cannot distinguish those source forms and
-continues to lower a zero-argument method as an empty `Type::Method`.
+For `DefDef` methods, each successive TASTy term clause lowers to a nested
+`Type::Method`, preserving its arity and whether it is plain, implicit, or
+contextual. A definition with no clauses of either kind lowers to
+`Type::ByName` (TASTy's `ExprType`). A type-parameter-only definition keeps
+its direct result under `Type::Poly`, matching the semantic unpickler. An
+explicit empty `()` clause remains a `Type::Method` with no parameters.
+Ordinary TASTy class identities and fields preserve Scala provenance, and
+classes retain declaration flags such as `SEALED` through completion.
+Classfile declarations and Java-marked TASTy receive `JAVA_DEFINED`;
+methods use this flag for Java empty-clause call adaptation. A JVM descriptor represents all term
+parameters in one list and a zero-argument method as an empty `Type::Method`.
 
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the
@@ -971,7 +1008,9 @@ reuse the same `SymbolId`s.
 place. It selects the `OBJECT`-marked `ObjectClass` `TypeDef` from the same
 TASTy package, publishes its real hierarchy and declared fields/methods in a
 `ClassInfo` whose `class` is the canonical module-class symbol, and gives the
-object term a `TypeRef` to that same symbol. Member type references establish
+object term a `TypeRef` to that same symbol. Applied trait parents retain
+their type arguments on both object lookup and direct JVM module lookup.
+Member type references establish
 only identity shells; only parents and interfaces are eagerly loaded. A
 successful completion is cached in the shared session, so repeating it in
 this or a later loader keeps the same declaration scope. A failed completion
@@ -1064,3 +1103,17 @@ companion can therefore supply both a polymorphic conditional given and the
 evidence needed to apply it. The typer regression uses `Evidence.scala` and
 its two Scala 3.9 TASTy files in
 `crates/dotty-typer/tests/fixtures/contextual-arguments`.
+
+
+### Effects on the pinned ordinary-method cohorts
+
+Two fresh runs of the 25 main and 25 analysis roots type 22 and 19 methods,
+respectively. Loading the IndexedSeq hierarchy lets `ArrayBufferView.apply`
+return its owning class's type parameter. Widening the parameterless
+`underlying.size` selection lets `VectorMap.knownSize` return `Int`.
+Resolving the Function1 parent of SetOps takes `Enumeration.ValueSet.knownSize`
+past the BitSet load to a stable-prefix diagnostic on `nnIds.size`.
+`SortedMap.unsorted` still reports the same unavailable class at the same tree
+with different arena slots for the operands. The focused gate checks both
+passes against the [four observed transitions](classloader-ordinary-cohort-3.9.0.tsv)
+and retains the historical 25 + 25 receipt.

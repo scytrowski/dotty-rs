@@ -992,9 +992,17 @@ impl SourceTyper<'_> {
                 ) {
                     return Err(TyperError::TermReferenceCannotBeWidened { symbol, kind });
                 }
+                // TASTy represents a parameterless method with ExprType. Retain
+                // the selected TermRef in the tree and widen it to the result
+                // after substituting the receiver's type arguments.
+                let parameterless_method = kind == SymbolKind::Method
+                    && matches!(
+                        self.store.symbols.get(symbol).origin,
+                        dotty_core::SymbolOrigin::Tasty(_)
+                    );
                 if prefix == self.definitions.no_prefix {
                     let info = self.completed_expression_symbol_info(symbol, info_journal)?;
-                    if kind == SymbolKind::Parameter
+                    if (kind == SymbolKind::Parameter || parameterless_method)
                         && let Some(Type::ByName { result }) = self.store.types.try_get(info)
                     {
                         return Ok(*result);
@@ -1080,14 +1088,10 @@ impl SourceTyper<'_> {
                         } else {
                             member_type
                         };
-                    if self.definitions.any_hash_code_symbol(self.store) == Some(symbol)
+                    if (parameterless_method
+                        || self.definitions.any_hash_code_symbol(self.store) == Some(symbol))
                         && let Some(Type::ByName { result }) = self.store.types.try_get(member_type)
                     {
-                        // Scala 3.9 encodes Any.## as an ExprType: selecting
-                        // this canonical parameterless member yields its Int
-                        // result at a value boundary. Keep the TermRef's
-                        // symbol identity intact and limit this adaptation to
-                        // the authenticated builtin selected on canonical Int.
                         return Ok(*result);
                     }
                     // A stable exported value has the singleton result of its delegate.

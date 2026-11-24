@@ -662,26 +662,12 @@ impl SourceTyper<'_> {
         if canonical_function == Some(class) && candidate.declaring_class != class {
             return Ok((function, callable));
         }
-        let declaration = self.store.symbols.get(candidate.symbol);
-        let accessible = match declaration.visibility {
-            Visibility::Public => true,
-            Visibility::Private => {
-                let same_owner = match self.enclosing_this_owner(
-                    None,
-                    request.context.owner,
-                    request.tree_index,
-                ) {
-                    Ok(current_class) => candidate.declaring_class == current_class,
-                    Err(TyperError::ThisOwnerNotEnclosing { .. }) => false,
-                    Err(error) => return Err(error),
-                };
-                same_owner && self.is_plain_private_source_member(candidate.symbol)
-            }
-            Visibility::Protected
-            | Visibility::Package(_)
-            | Visibility::PrivateWithin(_)
-            | Visibility::ProtectedWithin(_) => false,
-        };
+        let accessible = self.is_selected_member_accessible(
+            candidate.symbol,
+            candidate.declaring_class,
+            request.context,
+            request.tree_index,
+        )?;
         if !accessible {
             return Ok((function, callable));
         }

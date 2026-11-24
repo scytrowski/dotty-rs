@@ -1702,13 +1702,21 @@ impl SourceTyper<'_> {
                     && declaration.owner == Some(declaring_class)
                     && self.is_plain_private_source_member(symbol))
             }
-            // Protected, package-private and qualified visibility need
-            // subclass/package-boundary proofs the source typer does not yet
-            // model at ordinary selection sites. Keep them fail-closed.
-            Visibility::Protected
-            | Visibility::Package(_)
-            | Visibility::PrivateWithin(_)
-            | Visibility::ProtectedWithin(_) => Ok(false),
+            Visibility::PrivateWithin(boundary) | Visibility::ProtectedWithin(boundary) => {
+                let mut current = Some(context.owner);
+                let mut seen = std::collections::HashSet::new();
+                while let Some(owner) = current {
+                    if !self.store.symbols.contains(owner) || !seen.insert(owner) {
+                        break;
+                    }
+                    if owner == boundary {
+                        return Ok(true);
+                    }
+                    current = self.store.symbols.get(owner).owner;
+                }
+                Ok(false)
+            }
+            Visibility::Protected | Visibility::Package(_) => Ok(false),
         }
     }
 
