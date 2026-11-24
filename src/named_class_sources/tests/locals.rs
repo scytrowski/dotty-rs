@@ -108,3 +108,47 @@ fn shadowed_local_reads_keep_their_exact_declarations_after_arena_release() {
         assert!(index.symbol_at(id, i as u32).is_none());
     }
 }
+
+#[test]
+fn local_assignment_uses_its_committed_lhs_and_rejects_an_immutable_target() {
+    use crate::ValueAccessKind::{Read, Write};
+    let text = "class A { def add(step: Int): Int = { var n = 0; n = n + step; n }; def bad(): Unit = { val frozen = 1; frozen = 2 } }";
+    let index = with_checked(text, |sources, body, report, arena, store| {
+        assert!(matches!(
+            report.errors.as_slice(),
+            [crate::ClassBodyError::Member {
+                error: crate::typer::TyperError::AssignmentTargetImmutable { .. },
+                ..
+            }]
+        ));
+        let mut bodies = crate::CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        crate::ResolvedMemberIndex::build(sources, &bodies, arena, store)
+    });
+    let id = SourceId::from_index(7);
+    let lhs = text.find("n = n").unwrap() as u32;
+    let step = text.rfind("step").unwrap() as u32;
+    let n = index.symbol_at(id, lhs).unwrap().symbol;
+    for (pos, kind) in [
+        (lhs, Write),
+        (lhs + 4, Read),
+        (text.find("; n }").unwrap() as u32 + 2, Read),
+    ] {
+        assert_eq!(index.value_access_at(id, pos), Some(kind));
+        assert_eq!(index.symbol_at(id, pos).unwrap().symbol, n);
+    }
+    assert_eq!(index.value_access_at(id, step), Some(Read));
+    assert_eq!(
+        index.symbol_at(id, step).unwrap().kind,
+        crate::core::SymbolKind::Parameter
+    );
+    assert!(
+        index
+            .value_access_at(id, text.find("var n").unwrap() as u32 + 4)
+            .is_none()
+    );
+    for (pos, _) in text.match_indices("frozen") {
+        assert!(index.value_access_at(id, pos as u32).is_none());
+        assert!(index.symbol_at(id, pos as u32).is_none());
+    }
+}

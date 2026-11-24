@@ -143,7 +143,9 @@ mod source_parameters;
 pub use source_parameters::SourceMethodParameter;
 
 mod source_field_access;
-pub use source_field_access::{FieldAccessKind, ResolvedFieldAccess, selected_field_access};
+pub use source_field_access::{
+    FieldAccessKind, ResolvedFieldAccess, ValueAccessKind, selected_field_access,
+};
 
 mod source_file_calls;
 pub use source_file_calls::{

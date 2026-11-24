@@ -14,7 +14,7 @@ use crate::{
 #[derive(Debug)]
 struct IndexedFile {
     locals: Vec<(SymbolId, SourceMemberTarget)>,
-    local_uses: Vec<(SourceSpan, usize)>,
+    local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
     parameters: Vec<SourceMethodParameter>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
@@ -158,11 +158,11 @@ impl ResolvedMemberIndex {
                         parameter_uses.push((origin, slot));
                         id
                     }
-                    TermAccess::Local(id) => {
+                    TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
-                        local_uses.push((origin, slot));
+                        local_uses.push((origin, (slot, kind)));
                         id
                     }
                     TermAccess::Field(field, kind) => {
@@ -271,6 +271,19 @@ impl ResolvedMemberIndex {
             .filter(|f| f.origin.span().range().contains(offset))
     }
 
+    /// Classifies a committed use of a field, ordinary local, or method parameter
+    /// at its written name. Direct assignment targets are writes; other supported
+    /// value uses are reads. Declarations and method calls yield `None`.
+    pub fn value_access_at(&self, source: SourceId, offset: u32) -> Option<crate::ValueAccessKind> {
+        let file = self.files.get(&source)?;
+        if let Some((_, (_, kind))) = use_at(&file.local_uses, offset) {
+            return Some(kind);
+        }
+        self.field_at(source, offset)
+            .map(|f| f.kind)
+            .or_else(|| use_at(&file.parameter_uses, offset).map(|_| crate::ValueAccessKind::Read))
+    }
+
     /// Source usage and definition ranges at a committed call or field access.
     pub fn definition_at(
         &self,
@@ -308,7 +321,7 @@ impl ResolvedMemberIndex {
             (c.method, SymbolKind::Method, c.target, Some(c.origin))
         } else if let Some(f) = self.field_at(source, offset) {
             (f.field, SymbolKind::Field, f.target, Some(f.origin))
-        } else if let Some((origin, slot)) = use_at(&file.local_uses, offset) {
+        } else if let Some((origin, (slot, _))) = use_at(&file.local_uses, offset) {
             let (id, target) = file.locals[slot];
             (id, SymbolKind::Local, target, Some(origin))
         } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
@@ -331,7 +344,7 @@ impl ResolvedMemberIndex {
         })
     }
 
-    /// Committed calls, field accesses or reads of this exact parameter, in input file order then
+    /// Committed uses of this exact symbol, in input file order then
     /// token order. Omits the definition. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
