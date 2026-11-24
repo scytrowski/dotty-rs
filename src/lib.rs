@@ -144,7 +144,9 @@ pub use resolved_call_index::{
 };
 
 mod source_symbol_info;
-pub use source_symbol_info::{SourceNamedType, SourceSymbolInfo, SourceSymbolSignature};
+pub use source_symbol_info::{
+    SourceNamedType, SourceSignatureParameter, SourceSymbolInfo, SourceSymbolSignature,
+};
 
 mod source_locals;
 mod source_signature_types;

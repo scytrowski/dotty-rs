@@ -1,6 +1,8 @@
 //! Arena-independent signature data for indexed source symbols.
 
-use crate::core::{SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId, TypeRefTarget};
+use crate::core::{
+    MethodKind, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId, TypeRefTarget,
+};
 
 /// A reference to a class or trait by its canonical identity within one revision.
 /// Covers builtins and top-level class types with no prefix or a package prefix.
@@ -44,6 +46,15 @@ impl SourceNamedType {
     }
 }
 
+/// One formal of a completed ordinary method clause, in declaration order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceSignatureParameter {
+    /// Semantic name from the selected method's formal parameter.
+    pub name: Box<str>,
+    /// Completed type of this formal.
+    pub ty: SourceNamedType,
+}
+
 /// Declaration information supported by the retained source index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceSymbolSignature {
@@ -51,6 +62,15 @@ pub enum SourceSymbolSignature {
     Class,
     /// Completed declared or inferred type of a field, parameter or method local.
     Value(SourceNamedType),
+    /// A completed method with a named result and at most one plain value clause.
+    Method {
+        /// Original declaration type for clients retaining the semantic store.
+        ty: TypeId,
+        /// Ordered formals. `None` means a parameterless method; an empty slice means `()`.
+        parameters: Option<Box<[SourceSignatureParameter]>>,
+        /// Completed explicit or inferred result type of this declaration.
+        result: SourceNamedType,
+    },
 }
 
 /// Spelling and typed declaration information shared by all sites of one symbol.
@@ -72,6 +92,35 @@ impl SourceSymbolInfo {
                     return None;
                 };
                 SourceSymbolSignature::Value(SourceNamedType::capture(store, ty)?)
+            }
+            SymbolKind::Method => {
+                let SymbolInfo::Complete(ty) = symbol.info else {
+                    return None;
+                };
+                let (parameters, result) = match store.types.try_get(ty)? {
+                    Type::Method(method) if method.kind == MethodKind::Plain => {
+                        let parameters = method
+                            .params
+                            .iter()
+                            .map(|p| {
+                                if p.erased || p.varargs {
+                                    return None;
+                                }
+                                Some(SourceSignatureParameter {
+                                    name: store.names.resolve(p.name.as_name().text()).into(),
+                                    ty: SourceNamedType::capture(store, p.ty)?,
+                                })
+                            })
+                            .collect::<Option<Box<[_]>>>()?;
+                        (Some(parameters), method.result)
+                    }
+                    _ => (None, ty),
+                };
+                SourceSymbolSignature::Method {
+                    ty,
+                    parameters,
+                    result: SourceNamedType::capture(store, result)?,
+                }
             }
             _ => return None,
         };

@@ -720,10 +720,24 @@ let parameter_use = text.find("= current;").unwrap() as u32 + 2;
 assert!(index.member_at(id, parameter_use).is_none());
 let (method, _) = index.method_at(id, call.target.name.start()).ok_or("missing declaration")?;
 assert_eq!(method, call.method);
+let (site, info) = index.symbol_info_at(id, offset).ok_or("missing signature")?;
+assert_eq!(site.symbol, call.method);
+let dotty::SourceSymbolSignature::Method { parameters: Some(params), result, .. } = &info.signature
+    else { panic!("ordinary method expected") };
+assert_eq!((&*params[0].name, &*params[0].ty.name, &*result.name), ("x", "Int", "Int"));
 assert_eq!(index.references_to(method), &[call.origin]);
 assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+[`ResolvedMemberIndex::symbol_info_at`] follows the same declaration or committed
+usage as navigation. At a call it returns the selected overload's declaration
+signature, including parameter order and inferred results. Clients can render
+the retained names after releasing the arenas, or inspect the type and symbol
+IDs in the original session. The projection covers named class and trait types,
+including builtins, and methods with zero or one ordinary value clause. An
+unfinished signature or a type outside this subset yields `None`; the separate
+navigation query can still resolve its declaration.
 
 For a single lookup, [`NamedClassSources::resolved_call_at`] returns the written
 name, selected method symbol and source definition together. To collect one

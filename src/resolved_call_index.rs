@@ -326,8 +326,10 @@ impl ResolvedMemberIndex {
                 };
                 index.references.entry(symbol).or_default().push(origin);
             }
+            let method_declarations = navigation.method_targets();
             let symbols = class_declarations
                 .iter()
+                .chain(&method_declarations)
                 .chain(&field_declarations)
                 .chain(&locals)
                 .map(|(symbol, _)| (*symbol, *symbol))
@@ -358,7 +360,7 @@ impl ResolvedMemberIndex {
                     calls,
                     fields,
                     field_declarations,
-                    method_declarations: navigation.method_targets(),
+                    method_declarations,
                 },
             );
         }
