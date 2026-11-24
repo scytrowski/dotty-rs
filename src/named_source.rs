@@ -277,6 +277,28 @@ mod tests {
     mod projection;
 
     #[test]
+    fn definition_query_preserves_a_malformed_file_index_error() {
+        let mut store = SemanticStore::new();
+        let source = SourceId::from_index(3);
+        let mut file = crate::parse_source(source, "class A; class B", Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("Both.scala", &mut store, &mut Packages::new())
+            .unwrap()
+            .into_classes(&store)
+            .unwrap();
+        file.classes.reverse();
+        let sources = crate::NamedClassSources::new([&file], &store).unwrap();
+        assert_eq!(
+            sources.definition_at(source, 0, &Default::default(), &Default::default(), &store),
+            Err(DeclarationError::InvalidBinding {
+                source,
+                tree: file.classes[1].tree
+            })
+        );
+    }
+
+    #[test]
     fn navigation_is_lazy_and_shares_original_overload_name_tokens() {
         let text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";
         let mut store = SemanticStore::new();

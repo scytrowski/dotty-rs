@@ -26,7 +26,9 @@ clears the diagnostic. The fixture uses
 byte range. Body errors provide the same context through `into_reported_error`.
 The fixture calls `finish_with_body_work` and checks signature-ready members.
 A rejected signature supplies its own marker. Independent checked methods
-retain their navigation bindings while a dependency is broken. The fixture renders the message at
+retain their navigation bindings while a dependency is broken. The fixture
+records each outcome in `CheckedClassBodies` and uses `NamedClassSources::definition_at`
+to resolve calls in the current revision. The fixture renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 

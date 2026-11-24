@@ -17,6 +17,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Prepare primary constructors and attempt class headers by class symbol | [`NamedClassSources::complete_constructor_signature`], [`NamedClassSources::try_complete_class_header_reported`], [`ClassHeaderBindings`] |
 | Select ready classes and track member signatures, retries and failures | [`NamedClassSources::member_signatures`], [`MemberSignaturePhase`], [`MemberSignatureReport`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
+| Retain checked bodies for source navigation and JVM planning | [`CheckedClassBodies::record`], [`NamedClassSources::definition_at`], [`CheckedClassBodies::complete`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Check bodies of signature-ready members | [`MemberSignaturePhase::finish_with_body_work`], [`ClassBodyWork::members`], [`ClassBodyWork::check`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
@@ -340,10 +341,10 @@ assert!(bodies.members(good.symbol).unwrap().any(|(id, reason)|
     id == broken.symbol && reason == Some(&dotty::BodySkipReason::Rejected)));
 let (body, body_report) = bodies.check(good.symbol, &mut store, defs, &packages,
     &mut arena, dotty::core::NoResolver);
-let dotty::CheckedClassBody::Partial(index) = body else { panic!("skipped field") };
+let dotty::CheckedClassBody::Partial(partial) = body else { panic!("skipped field") };
 assert!(body_report.errors.is_empty());
-assert!(index.get(files[0].source(), value.tree).is_some());
-assert!(index.get(files[0].source(), broken.tree).is_none());
+assert!(partial.bindings().get(files[0].source(), value.tree).is_some());
+assert!(partial.bindings().get(files[0].source(), broken.tree).is_none());
 let [(source, warning)] = body_report.diagnostics.as_slice() else { panic!("one committed warning") };
 assert_eq!(*source, files[0].source());
 assert_eq!(warning.issue(), &dotty::typer::TyperWarning::ImplicitClauseWithoutUsing);
@@ -589,7 +590,7 @@ from the same source file. Moving the typed error into a report leaves the
 successful sibling's definition link available.
 
 ```rust
-use dotty::{CheckedClassBody, ClassBodyError, NamedClassSources, parse_source};
+use dotty::{CheckedBodyError, CheckedClassBodies, ClassBodyError, NamedClassSources, parse_source};
 use dotty::core::{AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId};
 use dotty::ClassHeaderBindings;
 use dotty::jvm_class_plan::JvmClassPlanner;
@@ -616,33 +617,44 @@ let mut arena = AstArena::new();
 # }
 let a = file.classes()[0].symbol;
 let b = file.classes()[1].symbol;
-let complete = sources.type_class_body(a, &mut store, defs, &packages, &mut arena, NoResolver)?;
+let mut bodies = CheckedClassBodies::default();
+for symbol in [b, a] {
+    let (body, report) = sources.check_class_body(symbol, &mut store, defs, &packages, &mut arena, NoResolver)
+        .into_parts();
+    bodies.record(body)?;
+    if symbol == a {
+        assert!(report.errors.is_empty());
+        continue;
+    }
+    let mut errors = report.errors.into_iter();
+    assert!(matches!(errors.next(), Some(ClassBodyError::Member {
+        error: TyperError::ApplicationArgumentTypeMismatch { .. }, ..
+    })));
+    assert!(errors.next().is_none());
+}
+assert_eq!(bodies.complete(b).unwrap_err(), CheckedBodyError::Partial(b));
 let (owner, class) = sources.class(a).ok_or("missing class")?;
-JvmClassPlanner::new(&store, owner.ast(), owner.index())
-    .with_header_bindings(&arena, &headers).plan_typed_class(class, &arena, &complete)?;
+let plan = JvmClassPlanner::new(&store, owner.ast(), owner.index())
+    .with_header_bindings(&arena, &headers).plan_typed_class(class, &arena, bodies.complete(a)?)?;
+assert_eq!(plan.class, a);
 
-let (body, report) = sources.check_class_body(b, &mut store, defs, &packages, &mut arena, NoResolver)
-    .into_parts();
-assert!(matches!(body, CheckedClassBody::Partial(_)));
-let mut errors = report.errors.into_iter();
-assert!(matches!(errors.next(), Some(ClassBodyError::Member {
-    error: TyperError::ApplicationArgumentTypeMismatch { .. }, ..
-})));
-assert!(errors.next().is_none());
 let offset = text.find("only(7)").ok_or("missing caller")? as u32;
-let target = file.navigation()?.definition_at_with_bindings(offset, file.ast(), &arena, &store,
-    |symbol| (symbol == b).then(|| body.bindings()).flatten(),
-    |source| sources.file(source)?.navigation().ok(),
-).ok_or("missing definition")?;
+let target = sources.definition_at(id, offset, &bodies, &arena, &store)?
+    .ok_or("missing definition")?;
 assert_eq!(target.name.start() as usize, text.find("only(x").unwrap());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 A complete check contains [`CheckedClassBody::Complete`] with its planning
 body. [`CheckedClassBody::Partial`] holds only committed source-to-typed
-mappings, and [`CheckedClassBody::Invalid`] represents a class rejected
-before typing. [`ClassBodyReport`] owns member errors and committed warnings.
-Rebuild the semantic data when a new edit starts a new session.
+mappings, accessible through [`PartialClassBody::bindings`].
+[`CheckedClassBody::Invalid`] carries the requested symbol when validation
+rejects it before typing. [`CheckedClassBody::class`] returns the symbol
+for each outcome. [`ClassBodyReport`] owns member errors and committed warnings.
+The collection borrows neither the report nor the arenas. Keep it with its original
+named files, semantic store and typed arena. After an edit, build a fresh
+collection and navigation indices from the new session. Numeric IDs and byte
+ranges from the previous version cannot identify declarations in the new one.
 
 ## Follow signature dependencies between source files
 
