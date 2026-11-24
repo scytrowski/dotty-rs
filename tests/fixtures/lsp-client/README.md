@@ -32,13 +32,16 @@ for the current document versions. Both `textDocument/definition` and
 `textDocument/references` read this index after the semantic arenas are released.
 Both requests use `ResolvedMemberIndex::symbol_at`. The references request
 accepts positions on direct calls, supported field accesses, method parameter
-reads and their declaration names. Field queries cover public selections,
+reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,
 bare uses of the enclosing class’s fields, and its private body fields written
 with a bare name or `this`. The stdio tests rename a parameter so it shadows a
 field and then undo the edit. The bare read changes from a field to a parameter at the same byte offset,
 while the explicit and cross-file field references stay available. Overload tests
 check the exact parameter token and its references in UTF-8 and UTF-16.
-Its `includeDeclaration` option adds the defining name. An edit that moves one
+Tests for nested blocks check distinct local declarations and reads before and
+after a sibling method fails. Renaming a local to shadow a parameter redirects
+a read at the same offset; undo restores both reference lists.
+The `includeDeclaration` option adds the defining name. An edit that moves one
 call between overloads preserves the other caller, even with a failing sibling. The fixture renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.

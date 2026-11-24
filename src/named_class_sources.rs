@@ -488,6 +488,7 @@ mod tests {
 
     mod field_access;
     mod headers;
+    mod locals;
     mod members;
     mod own_fields;
     mod parameters;

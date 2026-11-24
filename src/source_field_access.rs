@@ -11,14 +11,17 @@ use crate::{
     CheckedClassBodies, NamedClassSource, NamedClassSources, SourceFileCalls, SourceMemberTarget,
 };
 
-/// Operation performed on a source field.
+/// Operation performed on a checked source value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FieldAccessKind {
-    /// The checked expression reads the field value.
+pub enum ValueAccessKind {
+    /// The checked expression reads the value.
     Read,
-    /// The field name is the target of a checked direct assignment.
+    /// The written name is the target of a checked direct assignment.
     Write,
 }
+
+/// Access kind returned by the field-specific navigation queries.
+pub use ValueAccessKind as FieldAccessKind;
 
 /// Returns the canonical public field and its access kind for an original
 /// parser selection. Supply committed bindings from its owning class, both
@@ -33,13 +36,14 @@ pub fn selected_field_access(
 ) -> Option<(SymbolId, FieldAccessKind)> {
     match term_access(selection, None, ast, bindings, typed, store)? {
         TermAccess::Field(field, kind) => Some((field, kind)),
-        TermAccess::Parameter(_) => None,
+        TermAccess::Parameter(_) | TermAccess::Local(_, _) => None,
     }
 }
 
 pub(crate) enum TermAccess {
     Field(SymbolId, FieldAccessKind),
     Parameter(SymbolId),
+    Local(SymbolId, ValueAccessKind),
 }
 
 fn term_access(
@@ -80,15 +84,20 @@ fn term_access(
     {
         return Some(TermAccess::Parameter(*target));
     }
+    let bare = matches!(written.kind, TreeKind::Ident(_));
     let own_field = own_receiver && enclosing_class.is_some() && symbol.owner == enclosing_class;
-    if symbol.kind != SymbolKind::Field
-        || (matches!(written.kind, TreeKind::Ident(_)) && !own_field)
-        || !(symbol.visibility == Visibility::Public
-            || own_field && symbol.visibility == Visibility::Private)
-        || !matches!(symbol.origin, SymbolOrigin::Source(_))
-    {
-        return None;
-    }
+    let access = match symbol.kind {
+        SymbolKind::Local if bare => TermAccess::Local,
+        SymbolKind::Field
+            if (!bare || own_field)
+                && (symbol.visibility == Visibility::Public
+                    || own_field && symbol.visibility == Visibility::Private)
+                && matches!(symbol.origin, SymbolOrigin::Source(_)) =>
+        {
+            TermAccess::Field
+        }
+        _ => return None,
+    };
     let kind = if let Some(assign) = selection.assignment {
         let TreeKind::Assign(written) = &ast.try_get(assign)?.kind else {
             return None;
@@ -103,7 +112,7 @@ fn term_access(
     } else {
         FieldAccessKind::Read
     };
-    Some(TermAccess::Field(*target, kind))
+    Some(access(*target, kind))
 }
 
 /// A committed use of a field declared in the selected sources.

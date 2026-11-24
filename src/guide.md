@@ -697,8 +697,9 @@ usage and declaration name tokens, including fields without usages.
 [`ResolvedCallIndex`] remains available for existing direct-call clients.
 
 A complete check contains [`CheckedClassBody::Complete`] with its planning
-body. [`CheckedClassBody::Partial`] holds only committed source-to-typed
-mappings, accessible through [`PartialClassBody::bindings`].
+body. [`CheckedClassBody::Partial`] holds committed source-to-typed
+mappings and ordinary local declarations from successful members.
+[`CheckedClassBody::local_bindings`] borrows those declarations in typed order.
 [`CheckedClassBody::Invalid`] carries the requested symbol when validation
 rejects it before typing. [`CheckedClassBody::class`] returns the symbol
 for each outcome. [`ClassBodyReport`] owns member errors and committed warnings.
@@ -710,14 +711,18 @@ ranges from the previous version cannot identify declarations in the new one.
 ### Resolve a name after an edit
 
 [`ResolvedMemberIndex::symbol_at`] returns the symbol kind, canonical ID,
-declaration and optional usage token for methods, fields and ordinary named
-method parameters in a single value list. [`ResolvedMemberIndex::parameter_at`]
+declaration and optional usage token for methods, fields, ordinary named
+method parameters in a single value list, and simple method-local `val` and `var`
+declarations. [`ResolvedMemberIndex::value_access_at`] distinguishes reads
+from direct assignment targets. A local enters the index when its method
+commits, even if a sibling method fails. [`ResolvedMemberIndex::parameter_at`]
 also gives the owning method. Both work after the semantic arenas are released.
 The compiler can compare the parameter IDs with its method plan in the same
 session. An editor rebuilds the index for each revision.
 
-Here the parameter changes from `other` to `count`. The offset of the final
-`count` stays fixed, but its target moves from the field to the parameter.
+Two edits change first the parameter name and then the local name. The final
+`count` stays at the same offset while its target moves from field to parameter
+to local. Undoing the edits restores the preceding targets.
 
 ```rust
 use dotty::{ResolvedMemberIndex, core::{SourceId, SymbolKind}};
@@ -745,18 +750,21 @@ use dotty::{ResolvedMemberIndex, core::{SourceId, SymbolKind}};
 #     Ok(ResolvedMemberIndex::build(&sources, &bodies, &arena, &store))
 # }
 let id = SourceId::from_index(0);
-let original = "class A { val count: Int = 1; def read(other: Int): Int = count }";
-let edited = original.replace("other", "count");
+let original = "class A { val count: Int = 1; def read(other: Int): Int = { val spare = 2; count } }";
+let parameter = original.replace("other", "count");
+let local = parameter.replace("spare", "count");
 let offset = original.rfind("count").unwrap() as u32;
-for (text, kind, formal) in [
+for (text, kind, declaration) in [
     (original, SymbolKind::Field, "count:"),
-    (edited.as_str(), SymbolKind::Parameter, "count: Int)"),
+    (parameter.as_str(), SymbolKind::Parameter, "count: Int)"),
+    (local.as_str(), SymbolKind::Local, "count = 2"),
+    (parameter.as_str(), SymbolKind::Parameter, "count: Int)"),
     (original, SymbolKind::Field, "count:"),
 ] {
     let index = check(id, text)?;
     let site = index.symbol_at(id, offset).ok_or("missing read")?;
     assert_eq!(site.kind, kind);
-    assert_eq!(site.target.name.start(), text.find(formal).unwrap() as u32);
+    assert_eq!(site.target.name.start(), text.find(declaration).unwrap() as u32);
     assert_eq!(index.references_to(site.symbol), &[site.usage.unwrap()]);
 }
 # Ok::<(), Box<dyn std::error::Error>>(())

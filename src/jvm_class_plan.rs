@@ -71,6 +71,10 @@ impl TypedClassBody {
         selected_method(&self.index, call, source_ast, typed_ast, store)
     }
 
+    pub(crate) fn local_bindings(&self) -> &[TypedLocalBinding] {
+        &self.locals
+    }
+
     pub(crate) fn bindings(&self) -> &SourceTypedIndex {
         &self.index
     }

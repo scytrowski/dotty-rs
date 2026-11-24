@@ -71,3 +71,8 @@ Use [`SourceTyper::with_resolver`] to supply external symbols through the core
 resolver contract. Loading class files, discovering JDK modules, and decoding
 TASTy remain adapter responsibilities. Signature completion, expression typing,
 whole-class checking, and producer support have different supported subsets.
+
+Each [`TypedLocalBinding`] in [`TypedSourceOutput::local_bindings`] identifies
+the original file and declaration tree, its typed declaration, its symbol and
+its block scope. Resolve the written name against that file’s original parse.
+Bindings from a failed typing transaction are absent from the output.

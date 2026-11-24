@@ -275,7 +275,7 @@ impl SourceFileCalls {
         names
     }
 
-    fn target(&self, source: SourceId, method: SymbolId) -> Option<SourceMethodTarget> {
+    pub(crate) fn target(&self, source: SourceId, method: SymbolId) -> Option<SourceMethodTarget> {
         self.targets
             .get(&method)
             .copied()
