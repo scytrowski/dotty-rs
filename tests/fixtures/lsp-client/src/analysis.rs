@@ -223,7 +223,7 @@ fn analyze_sources(
         }
         bodies.record(body).expect("one check per ready class");
     }
-    let index = ResolvedMemberIndex::build(sources, &bodies, &arena, store);
+    let index = ResolvedMemberIndex::build_with_headers(sources, &bodies, &bindings, &arena, store);
     for diagnostic in index.diagnostics() {
         results
             .get_mut(&diagnostic.error.source_id())
