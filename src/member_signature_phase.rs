@@ -169,6 +169,31 @@ impl<'s, 'file> MemberSignaturePhase<'s, 'file> {
         }
     }
 
+    /// Completes the supplied field and method roots in order. Follows an eligible
+    /// missing provider immediately, then retries released waiters in registration
+    /// order. Already-ready roots are skipped. The observer receives every
+    /// completed or blocked attempt. Pass the same session resolver on retries
+    /// and subsequent body checks, or [`crate::core::NoResolver`] for source-only work.
+    /// On success, use the returned phase for more roots or for body selection.
+    /// A direct rejection or dependency cycle ends the run before later roots.
+    /// Earlier committed signatures remain in the store.
+    pub fn try_complete_roots(
+        self,
+        roots: impl IntoIterator<Item = SymbolId>,
+        mut resolver: impl crate::core::SymbolResolver,
+        observe: impl FnMut(SymbolId, crate::typer::SignatureCompletion),
+    ) -> Result<Self, crate::SignatureRunError<MemberSignatureError>> {
+        crate::signature_schedule::try_complete_roots(
+            self,
+            roots,
+            Self::is_ready,
+            |phase, id| phase.attempt_with_resolver(id, &mut resolver).ok(),
+            Self::dependencies,
+            Self::into_failure,
+            observe,
+        )
+    }
+
     /// Stops at a direct failure and moves its original phase error to the caller.
     /// Returns `None` if that symbol has no direct failure.
     pub fn into_failure(mut self, member: SymbolId) -> Option<MemberSignatureError> {

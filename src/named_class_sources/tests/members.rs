@@ -702,3 +702,47 @@ fn checked_bodies_keep_their_original_same_file_owners_after_reporting() {
         Some(crate::CheckedClassBody::Partial(_))
     ));
 }
+
+#[test]
+fn requested_member_path_stops_at_provider_rejection_before_the_next_root() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let provider = named(
+        2,
+        "class Provider { def value(): Int = 40; val seed = value(1) }",
+        &mut store,
+        &mut packages,
+    );
+    let user = named(
+        7,
+        "class Use(p: Provider) { val answer = p.seed; val later = 7 }",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&user, &provider], &store).unwrap();
+    headers(&sources, &mut store, defs, &packages);
+    let selection = sources
+        .member_signatures(sources.classes().map(|(_, c)| c.symbol), &store)
+        .unwrap();
+    let [answer, later] = user.classes()[0]
+        .fields()
+        .map(|d| d.symbol)
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("two roots")
+    };
+    let seed = provider.classes()[0].fields().next().unwrap().symbol;
+    let phase = crate::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    let mut trace = Vec::new();
+    let failure = phase
+        .try_complete_roots([answer, later], crate::core::NoResolver, |id, result| {
+            trace.push((id, result))
+        })
+        .unwrap_err();
+    assert_eq!(trace, [(answer, SignatureCompletion::BlockedOn(seed))]);
+    assert!(
+        matches!(failure,crate::SignatureRunError::Rejected(MemberSignatureError::Typing{member,error:TyperError::ApplicationArityMismatch {expected:0,actual:1,..},..}) if member==seed)
+    );
+    assert_eq!(store.symbols.info(later), &crate::core::SymbolInfo::Missing);
+}
