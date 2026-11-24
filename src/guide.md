@@ -783,8 +783,8 @@ Explicit constructor `val` and `var` declarations use field navigation.
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The
 [`ResolvedSourceParent`] gives the child, superclass and both source locations.
-Class references include these parents, simple method parameter and result
-annotations from completed signatures, and construction sites in checked bodies.
+Class references include these parents, simple parameter annotations in completed
+constructors and methods, explicit method result types, and construction sites in checked bodies.
 
 The example indexes a header before checking any class bodies. Changing
 `Base(left)` to `Peer(left)` redirects the superclass reference. Changing the
@@ -881,6 +881,40 @@ for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
     assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));
     assert_eq!(index.references_to(site.class), &[site.origin]);
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### Resolve a class type in a primary constructor
+
+After [`NamedClassSources::complete_constructor_signature`] succeeds, the
+two written uses of `Base` below are already available to an editor.
+[`ResolvedMemberIndex::constructor_type_at`] identifies the class-owned
+parameter or field and the constructor-owned formal for each use. A compiler
+can compare the latter with the corresponding JVM constructor parameter.
+A rejected constructor contributes no annotation sites. A later failure in
+a method body preserves the successful constructor's sites.
+
+```rust
+use dotty::{CheckedClassBodies, NamedClassSources, ResolvedMemberIndex, parse_source};
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
+
+let text = "class Base; class Holder(seed: Base, val first: Base)";
+# let source = SourceId::from_index(0);
+# let mut store = SemanticStore::new();
+# let defs = Definitions::bootstrap(&mut store);
+# let mut packages = Packages::new();
+# let file = parse_source(source, text, Default::default())?.bind(&mut store.names)
+#     .name("Holder.scala", &mut store, &mut packages)?.into_classes(&store)?;
+let sources = NamedClassSources::new([&file], &store)?;
+let holder = &file.classes()[1];
+sources.complete_constructor_signature(holder.symbol, &mut store, defs, &packages)?;
+let index = ResolvedMemberIndex::build(&sources, &CheckedClassBodies::default(), &AstArena::new(), &store);
+let offset = text.rfind("Base").unwrap() as u32;
+let site = index.constructor_type_at(source, offset).ok_or("missing type annotation")?;
+assert_eq!(site.class, file.classes()[0].symbol);
+assert_eq!(site.parameter, holder.constructor_fields[0]);
+assert_eq!(store.symbols.get(site.formal).owner, Some(holder.constructor));
+assert_eq!(index.references_to(site.class).len(), 2);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

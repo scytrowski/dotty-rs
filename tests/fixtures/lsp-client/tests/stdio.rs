@@ -1460,26 +1460,41 @@ fn constructor_type_annotations_link_to_the_class_and_share_its_references() {
             col(holder, "Base, var"),
             col(holder, "Peer)"),
         ];
-        for (line, class, offsets) in [(0, "Base", &positions[..2]), (1, "Peer", &positions[2..])] {
-            let name = col(model[line], class);
-            let name_range = range(line, name, name + class.len());
-            let target_range = range(line, col(model[line], "class"), name + class.len());
-            let uses: Vec<_> = offsets
-                .iter()
-                .map(|&pos| json!({"uri":B,"range":range(0,pos,pos+class.len())}))
-                .collect();
-            assert_eq!(client.references(A, line, name, false), json!(uses));
-            let mut all = vec![json!({"uri":A,"range":name_range})];
-            all.extend_from_slice(&uses);
-            for &pos in offsets {
-                assert_eq!(client.references(B, 0, pos, true), json!(all));
-                assert_eq!(
-                    client.request(
-                        "textDocument/definition",
-                        json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
-                    ),
-                    json!([{"targetUri":A,"targetRange":target_range,"targetSelectionRange":name_range,"originSelectionRange":range(0,pos,pos+class.len())}])
+        // The edit moves only the middle token between the two ordered reference lists.
+        for (version, first_type, split) in [(1, "Base", 2), (2, "Peer", 1), (3, "Base", 2)] {
+            if version > 1 {
+                client.edit(
+                    B,
+                    version,
+                    range(0, positions[1], positions[1] + 4),
+                    first_type,
                 );
+                client.diagnostics(B, version, json!([]));
+            }
+            for (line, class, offsets) in [
+                (0, "Base", &positions[..split]),
+                (1, "Peer", &positions[split..]),
+            ] {
+                let name = col(model[line], class);
+                let name_range = range(line, name, name + class.len());
+                let target_range = range(line, col(model[line], "class"), name + class.len());
+                let uses: Vec<_> = offsets
+                    .iter()
+                    .map(|&pos| json!({"uri":B,"range":range(0,pos,pos+class.len())}))
+                    .collect();
+                assert_eq!(client.references(A, line, name, false), json!(uses));
+                let mut all = vec![json!({"uri":A,"range":name_range})];
+                all.extend_from_slice(&uses);
+                for &pos in offsets {
+                    assert_eq!(client.references(B, 0, pos, true), json!(all));
+                    assert_eq!(
+                        client.request(
+                            "textDocument/definition",
+                            json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+                        ),
+                        json!([{"targetUri":A,"targetRange":target_range,"targetSelectionRange":name_range,"originSelectionRange":range(0,pos,pos+class.len())}])
+                    );
+                }
             }
         }
         client.shutdown();
