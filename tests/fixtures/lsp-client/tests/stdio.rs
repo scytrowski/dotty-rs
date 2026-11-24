@@ -1252,32 +1252,49 @@ fn superclass_navigation_separates_the_parent_type_from_its_argument() {
         let parent_use = loc(B, 0, use_pos);
         let kept_use = loc(A, 2, col(kept, "Base"));
         let query = |pos| json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}});
-        let decl = col(base, "Base");
-        assert_eq!(
-            client.references(A, 0, decl, false),
-            json!([kept_use, parent_use])
-        );
-        assert_eq!(
-            client.references(B, 0, use_pos, true),
-            json!([loc(A, 0, decl), kept_use, parent_use])
-        );
-        assert_eq!(
-            client.request("textDocument/definition", query(use_pos)),
-            json!([{
-                "originSelectionRange":parent_use["range"],"targetUri":A,
-                "targetRange":range(0,col(base,"class"),decl+"Base(n: Int)".len()),
-                "targetSelectionRange":range(0,decl,decl+4)
-            }])
-        );
-        assert_eq!(
-            client.request("textDocument/definition", query(arg_pos)),
-            json!([{
-                "originSelectionRange":range(0,arg_pos,arg_pos+5),"targetUri":B,
-                "targetRange":range(0,arg_decl,arg_decl+"start: Int".len()),
-                "targetSelectionRange":range(0,arg_decl,arg_decl+5)
-            }])
-        );
-        assert_eq!(client.references(A, 1, col(peer, "Peer"), false), json!([]));
+        for (version, name, line, provider) in [
+            (1, "Base", 0, base),
+            (2, "Peer", 1, peer),
+            (3, "Base", 0, base),
+        ] {
+            if version > 1 {
+                client.edit(B, version, range(0, use_pos, use_pos + 4), name);
+                client.diagnostics(B, version, json!([]));
+            }
+            let decl = col(provider, name);
+            let (base_refs, peer_refs, all) = if name == "Base" {
+                (
+                    json!([kept_use, parent_use]),
+                    json!([]),
+                    json!([loc(A, 0, decl), kept_use, parent_use]),
+                )
+            } else {
+                (
+                    json!([kept_use]),
+                    json!([parent_use]),
+                    json!([loc(A, 1, decl), parent_use]),
+                )
+            };
+            assert_eq!(client.references(A, 0, col(base, "Base"), false), base_refs);
+            assert_eq!(client.references(A, 1, col(peer, "Peer"), false), peer_refs);
+            assert_eq!(client.references(B, 0, use_pos, true), all);
+            assert_eq!(
+                client.request("textDocument/definition", query(use_pos)),
+                json!([{
+                    "originSelectionRange":parent_use["range"],"targetUri":A,
+                    "targetRange":range(line,col(provider,"class"),decl+"Base(n: Int)".len()),
+                    "targetSelectionRange":range(line,decl,decl+4)
+                }])
+            );
+            assert_eq!(
+                client.request("textDocument/definition", query(arg_pos)),
+                json!([{
+                    "originSelectionRange":range(0,arg_pos,arg_pos+5),"targetUri":B,
+                    "targetRange":range(0,arg_decl,arg_decl+"start: Int".len()),
+                    "targetSelectionRange":range(0,arg_decl,arg_decl+5)
+                }])
+            );
+        }
         client.shutdown();
     }
 }

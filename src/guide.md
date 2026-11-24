@@ -770,7 +770,7 @@ for (text, kind, declaration) in [
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### Follow a primary constructor argument
+### Follow a superclass and its constructor argument
 
 [`ResolvedMemberIndex::build_with_headers`] includes parent argument reads
 from the supplied [`ClassHeaderBindings`]. The body-only builder remains
@@ -780,18 +780,32 @@ constructor parameter has one written declaration and two symbols. Use
 [`SourceConstructorParameter::formal`] to compare with the constructor plan.
 Explicit constructor `val` and `var` declarations use field navigation.
 
-This example indexes a checked header before checking any class bodies. An
-edit to `Base(left)` moves its sole reference to the second parameter.
+[`ResolvedMemberIndex::parent_at`] uses the same completed class information
+as the JVM planner for both `extends Base` and `extends Base(left)`. The
+[`ResolvedSourceParent`] gives the child, superclass and both source locations.
+Class references cover these single, unqualified written parents in the
+selected sources. Annotations and `new` expressions are outside this subset.
+
+The example indexes a header before checking any class bodies. Changing
+`Base(left)` to `Peer(left)` redirects the superclass reference. Changing the
+argument to `next` redirects the parameter read. Undo restores both targets.
 
 ```rust
 use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, ResolvedMemberIndex, parse_source};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
 use dotty::typer::SignatureCompletion;
 
-let original = "class Base(seed: Int); class Derived(left: Int, next: Int) extends Base(left)";
-let edit = original.replace("Base(left)", "Base(next)");
+let original = "class Base(seed: Int); class Peer(seed: Int); class Derived(left: Int, next: Int) extends Base(left)";
+let peer = original.replace("Base(left)", "Peer(left)");
+let edit = peer.replace("Peer(left)", "Peer(next)");
+let parent_pos = original.rfind("Base").unwrap() as u32;
 let arg = original.rfind("left").unwrap() as u32;
-for (text, selected, unused) in [(original, "left:", "next:"), (edit.as_str(), "next:", "left:"), (original, "left:", "next:")] {
+for (text, base, selected, unused) in [
+    (original, "Base", "left:", "next:"),
+    (peer.as_str(), "Peer", "left:", "next:"),
+    (edit.as_str(), "Peer", "next:", "left:"),
+    (original, "Base", "left:", "next:"),
+] {
     let source = SourceId::from_index(0);
 #   let mut store = SemanticStore::new();
 #   let defs = Definitions::bootstrap(&mut store);
@@ -808,6 +822,11 @@ for (text, selected, unused) in [(original, "left:", "next:"), (edit.as_str(), "
 #       assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
 #   }
     let index = ResolvedMemberIndex::build_with_headers(&sources, &CheckedClassBodies::default(), &headers, &arena, &store);
+    let relation = index.parent_at(source, parent_pos).ok_or("missing superclass")?;
+    let declaration = index.symbol_at(source, text.find(base).unwrap() as u32).unwrap();
+    assert_eq!(relation.parent, declaration.symbol);
+    assert_eq!(index.references_to(relation.parent), &[relation.origin]);
+
     let p = index.constructor_parameter_at(source, arg).ok_or("missing parent argument")?;
     assert_eq!(p.target.name.start() as usize, text.find(selected).unwrap());
     assert_ne!(p.parameter, p.formal);

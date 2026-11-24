@@ -41,6 +41,9 @@ check the exact parameter token and its references in UTF-8 and UTF-16.
 Tests for nested blocks check distinct local declarations and reads before and
 after a sibling method fails. Renaming a local to shadow a parameter redirects
 a read at the same offset; undo restores both reference lists.
+The superclass scenario follows `Base` in `extends Base(start)` into its defining file.
+An edit to `Peer(start)` and undo move one reference while preserving the other subclass
+and the argument definition in both position encodings.
 The index includes committed parent argument bindings from the header phase.
 An edit between two constructor parameters in a parent application moves that
 reference between declarations while retaining the initializer reads in both files.
