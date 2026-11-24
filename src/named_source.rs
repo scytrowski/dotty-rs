@@ -296,6 +296,17 @@ mod tests {
                 tree: file.classes[1].tree
             })
         );
+        let index = crate::ResolvedCallIndex::build(
+            &sources,
+            &Default::default(),
+            &Default::default(),
+            &store,
+        );
+        let expected = DeclarationError::InvalidBinding {
+            source,
+            tree: file.classes[1].tree,
+        };
+        assert_eq!(index.diagnostics(), [expected.diagnostic(file.ast())]);
     }
 
     #[test]

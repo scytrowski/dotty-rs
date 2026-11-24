@@ -813,6 +813,70 @@ mod tests {
     }
 
     #[test]
+    fn retained_calls_separate_overloads_in_input_file_and_token_order() {
+        let first = "class B { def one(a: A): Int = a.take(1) }";
+        let second =
+            "class C { def two(a: A): Int = a.take(2); def yes(a: A): Int = a.take(false) }";
+        let target = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7; def unused(): Int = 1 }";
+        let (index, methods) = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let b = named(90, first, &mut store, &mut packages);
+            let c = named(4, second, &mut store, &mut packages);
+            let a = named(42, target, &mut store, &mut packages);
+            let sources = NamedClassSources::new([&b, &a, &c], &store).unwrap();
+            let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+            let mut bodies = crate::CheckedClassBodies::default();
+            for (_, class) in sources.classes() {
+                let (body, report) = sources
+                    .check_class_body(
+                        class.symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                        &mut arena,
+                        crate::core::NoResolver,
+                    )
+                    .into_parts();
+                assert!(report.errors.is_empty());
+                bodies.record(body).unwrap();
+            }
+            let methods: Vec<_> = a.classes()[0].methods().map(|d| d.symbol).collect();
+            (
+                crate::ResolvedCallIndex::build(&sources, &bodies, &arena, &store),
+                methods,
+            )
+        };
+        assert!(index.diagnostics().is_empty());
+        let uses = |n: usize| {
+            index
+                .references_to(methods[n])
+                .iter()
+                .map(|p| (p.source(), p.span().range().start() as usize))
+                .collect::<Vec<_>>()
+        };
+        let (b, c) = (SourceId::from_index(90), SourceId::from_index(4));
+        assert_eq!(
+            uses(0),
+            [
+                (b, first.find("take").unwrap()),
+                (c, second.find("take").unwrap())
+            ]
+        );
+        assert_eq!(uses(1), [(c, second.rfind("take").unwrap())]);
+        assert!(uses(2).is_empty());
+        for (n, positions) in [uses(0), uses(1)].into_iter().enumerate() {
+            for (file, start) in positions {
+                let call = index.call_at(file, start as u32 + 3).unwrap();
+                assert_eq!(call.method, methods[n]);
+                assert_eq!(call.target.source, SourceId::from_index(42));
+                assert!(index.call_at(file, start as u32 + 4).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn projected_classes_navigate_past_an_omitted_owner() {
         use crate::core::{NoResolver, TreeKind};
         let mut store = SemanticStore::new();

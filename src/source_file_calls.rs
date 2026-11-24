@@ -352,7 +352,7 @@ impl crate::NamedClassSources<'_> {
             .collect()
     }
 
-    fn calls_in_file(
+    pub(crate) fn calls_in_file(
         &self,
         caller: &crate::NamedClassSource,
         calls: &SourceFileCalls,
