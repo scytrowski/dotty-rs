@@ -770,6 +770,55 @@ for (text, kind, declaration) in [
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Follow a primary constructor argument
+
+[`ResolvedMemberIndex::build_with_headers`] includes parent argument reads
+from the supplied [`ClassHeaderBindings`]. The body-only builder remains
+available for clients that retain just body results. A plain primary
+constructor parameter has one written declaration and two symbols. Use
+[`SourceConstructorParameter::parameter`] for source references and
+[`SourceConstructorParameter::formal`] to compare with the constructor plan.
+Explicit constructor `val` and `var` declarations use field navigation.
+
+This example indexes a checked header before checking any class bodies. An
+edit to `Base(left)` moves its sole reference to the second parameter.
+
+```rust
+use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, ResolvedMemberIndex, parse_source};
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::SignatureCompletion;
+
+let original = "class Base(seed: Int); class Derived(left: Int, next: Int) extends Base(left)";
+let edit = original.replace("Base(left)", "Base(next)");
+let arg = original.rfind("left").unwrap() as u32;
+for (text, selected, unused) in [(original, "left:", "next:"), (edit.as_str(), "next:", "left:"), (original, "left:", "next:")] {
+    let source = SourceId::from_index(0);
+#   let mut store = SemanticStore::new();
+#   let defs = Definitions::bootstrap(&mut store);
+#   let mut packages = Packages::new();
+#   let file = parse_source(source, text, Default::default())?.bind(&mut store.names)
+#       .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
+#   let sources = NamedClassSources::new([&file], &store)?;
+#   let mut arena = AstArena::new();
+    let mut headers = ClassHeaderBindings::default();
+#   for (_, class) in sources.classes() {
+#       sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
+#   }
+#   for (_, class) in sources.classes() {
+#       assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
+#   }
+    let index = ResolvedMemberIndex::build_with_headers(&sources, &CheckedClassBodies::default(), &headers, &arena, &store);
+    let p = index.constructor_parameter_at(source, arg).ok_or("missing parent argument")?;
+    assert_eq!(p.target.name.start() as usize, text.find(selected).unwrap());
+    assert_ne!(p.parameter, p.formal);
+    let site = index.symbol_at(source, arg).unwrap();
+    assert_eq!(index.references_to(p.parameter), &[site.usage.unwrap()]);
+    let other = index.constructor_parameter_at(source, text.find(unused).unwrap() as u32).unwrap();
+    assert!(index.references_to(other.parameter).is_empty());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## Follow signature dependencies between source files
 
 A compiler following one provider can query [`SignatureDependencies::blockage`]

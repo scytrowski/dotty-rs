@@ -41,5 +41,5 @@ or selector on the left of a direct assignment identifies its assignment tree.
 [`SourceMemberNames::term_names`] visits both expression forms in token order. Resolve field identity against
 the committed typed bindings for the same parse.
 
-Use [`SourceMemberNames::parameter_name`] with a written method parameter’s
-declaration tree to obtain its exact name, including any backticks.
+Use [`SourceMemberNames::parameter_name`] with a named method parameter or plain constructor
+parameter declaration tree to obtain its exact name, including any backticks.

@@ -1191,6 +1191,44 @@ fn constructor_parameters_navigate_across_headers_and_bodies_in_both_encodings()
                 );
             }
         }
+        let next_decl = col(child, "next:");
+        assert_eq!(client.references(B, 0, next_decl, false), json!([]));
+        for (version, replacement) in [(2, "next"), (3, "left")] {
+            client.edit(
+                B,
+                version,
+                range(0, parent_arg, parent_arg + 4),
+                replacement,
+            );
+            client.diagnostics(B, version, json!([]));
+            let (target, left_reads, next_reads) = if replacement == "next" {
+                (
+                    next_decl,
+                    json!([loc(B, child_read)]),
+                    json!([loc(B, parent_arg)]),
+                )
+            } else {
+                (
+                    child_decl,
+                    json!([loc(B, parent_arg), loc(B, child_read)]),
+                    json!([]),
+                )
+            };
+            assert_eq!(client.references(B, 0, child_decl, false), left_reads);
+            assert_eq!(client.references(B, 0, next_decl, false), next_reads);
+            assert_eq!(
+                client.references(A, 0, base_decl, false),
+                json!([loc(A, base_read)])
+            );
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":parent_arg}})
+                ),
+                json!([{"originSelectionRange":range(0,parent_arg,parent_arg+4),"targetUri":B,
+                "targetRange":range(0,target,target+"next: Int".len()),"targetSelectionRange":range(0,target,target+4)}])
+            );
+        }
         client.shutdown();
     }
 }
