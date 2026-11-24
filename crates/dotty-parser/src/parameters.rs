@@ -316,7 +316,7 @@ where
         } else {
             metadata.modifiers.push(Modifier::Param);
         }
-        let name = self.parse_param_name();
+        let (name, name_range) = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
             self.advance();
             self.with_parse_kind(ParseKind::Type, |parser| {
@@ -383,7 +383,7 @@ where
             None
         };
 
-        self.alloc_from(
+        let tree = self.alloc_from(
             mark,
             TreeKind::ValDef(ValDef {
                 name,
@@ -391,7 +391,14 @@ where
                 rhs,
                 metadata,
             }),
-        )
+        );
+        if explicit_accessor.is_some()
+            && is_class_parameter_owner(owner)
+            && let Some(name_range) = name_range
+        {
+            self.member_names.value(tree, name_range);
+        }
+        tree
     }
 
     fn parse_class_parameter_modifiers(&mut self, metadata: &mut Modifiers) -> bool {
@@ -615,15 +622,16 @@ where
         )
     }
 
-    fn parse_param_name(&mut self) -> TermName {
+    fn parse_param_name(&mut self) -> (TermName, Option<dotty_core::TextRange>) {
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 match self.intern_current_term_name() {
                     Ok(name) => {
+                        let range = self.current().span;
                         self.advance();
-                        name
+                        (name, Some(range))
                     }
-                    Err(_) => self.missing_param_name(),
+                    Err(_) => (self.missing_param_name(), None),
                 }
             }
             _ => {
@@ -632,7 +640,7 @@ where
                         found: self.current().kind,
                     },
                 ));
-                self.missing_param_name()
+                (self.missing_param_name(), None)
             }
         }
     }

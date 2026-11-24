@@ -279,6 +279,7 @@ where
         location: Location,
         mut metadata: Modifiers,
     ) -> ParsedStatement {
+        let name_range = self.current().span;
         let name = match self.current().kind {
             TokenKind::Identifier
             | TokenKind::BackquotedIdentifier
@@ -368,6 +369,7 @@ where
                 metadata,
             }),
         );
+        self.member_names.value(definition, name_range);
         ParsedStatement::Definition(definition)
     }
 

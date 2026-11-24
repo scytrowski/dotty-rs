@@ -26,6 +26,7 @@ where
     pub(crate) source_id: SourceId,
     pub(crate) names: &'names mut NameInterner,
     pub(crate) ast: AstArena<Untyped>,
+    pub(crate) member_names: crate::SourceMemberNames,
     pub(crate) method_names: Vec<(TreeId<Untyped>, TextRange)>,
     pub(crate) call_names: Vec<(TextRange, TreeId<Untyped>)>,
     // Matches a written name to the exact callee before consuming an argument list.
@@ -115,6 +116,7 @@ where
             source_id,
             names,
             ast: AstArena::new(),
+            member_names: Default::default(),
             method_names: Vec::new(),
             call_names: Vec::new(),
             last_written_name: None,

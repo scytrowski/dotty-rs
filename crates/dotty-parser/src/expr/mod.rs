@@ -499,10 +499,14 @@ where
             .map(|position| position.span().range().end())
             .unwrap_or(self.last_real_token_end);
         let range = TextRange::new(start, end).expect("assignment child spans are ordered");
-        self.alloc(
+        let tree = self.alloc(
             TreeKind::Assign(Assign { lhs, rhs }),
             Some(SourceSpan::new(self.source_id, Span::without_point(range))),
-        )
+        );
+        if matches!(self.ast.get(lhs).kind, TreeKind::Select(_)) {
+            self.member_names.assign(lhs, tree);
+        }
+        tree
     }
 }
 

@@ -60,6 +60,8 @@ pub struct ParseResult {
     pub root: TreeId<Untyped>,
     /// Recoverable diagnostics collected while constructing the AST.
     pub diagnostics: Vec<ParseDiagnostic>,
+    /// Explicit selection and value names from this source arena.
+    pub member_names: crate::SourceMemberNames,
     /// Direct call names in this source arena.
     pub call_names: SourceCallNames,
     /// Parser feature policy after processing this input.
@@ -103,8 +105,10 @@ where
         // Nested applications complete before the application containing them.
         self.call_names
             .sort_unstable_by_key(|(range, _)| range.start());
+        self.member_names.finish();
         ParseResult {
             effective_features: *self.features(),
+            member_names: self.member_names,
             ast: self.ast,
             root,
             diagnostics: self.diagnostics,
