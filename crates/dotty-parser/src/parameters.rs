@@ -397,6 +397,10 @@ where
             && let Some(name_range) = name_range
         {
             self.member_names.value(tree, name_range);
+        } else if owner == ParamOwner::Def
+            && let Some(name_range) = name_range
+        {
+            self.member_names.parameter(tree, name_range);
         }
         tree
     }

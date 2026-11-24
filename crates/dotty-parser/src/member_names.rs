@@ -19,6 +19,7 @@ pub type SourceSelection = SourceTermName;
 /// and visibility are determined later by the namer and typer.
 #[derive(Debug, Default)]
 pub struct SourceMemberNames {
+    parameters: Vec<(TreeId<Untyped>, TextRange)>,
     values: Vec<(TreeId<Untyped>, TextRange)>,
     identifiers: Vec<SourceTermName>,
     selections: Vec<SourceSelection>,
@@ -28,11 +29,13 @@ impl SourceMemberNames {
     /// Exact name token for a simple value definition or explicit constructor
     /// `val`/`var` parameter. Supply a definition from this parse.
     pub fn value_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
-        let i = self
-            .values
-            .binary_search_by_key(&tree.index(), |(id, _)| id.index())
-            .ok()?;
-        Some(self.values[i].1)
+        declaration_name(&self.values, tree)
+    }
+
+    /// Exact written token of a named `def` parameter in this parse, including
+    /// any backticks. Anonymous, synthetic and constructor parameters have no entry.
+    pub fn parameter_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
+        declaration_name(&self.parameters, tree)
     }
 
     /// Written term selections in token order, including selections used as callees.
@@ -65,6 +68,10 @@ impl SourceMemberNames {
     /// Bare expression identifier whose half-open name contains this UTF-8 byte offset.
     pub fn identifier_at(&self, offset: u32) -> Option<SourceTermName> {
         name_at(&self.identifiers, offset)
+    }
+
+    pub(crate) fn parameter(&mut self, tree: TreeId<Untyped>, name: TextRange) {
+        self.parameters.push((tree, name));
     }
 
     pub(crate) fn value(&mut self, tree: TreeId<Untyped>, name: TextRange) {
@@ -104,6 +111,16 @@ impl SourceMemberNames {
     }
 }
 
+fn declaration_name(
+    entries: &[(TreeId<Untyped>, TextRange)],
+    tree: TreeId<Untyped>,
+) -> Option<TextRange> {
+    let i = entries
+        .binary_search_by_key(&tree.index(), |(id, _)| id.index())
+        .ok()?;
+    Some(entries[i].1)
+}
+
 fn name_at(entries: &[SourceTermName], offset: u32) -> Option<SourceTermName> {
     let i = entries.partition_point(|s| s.name.end() <= offset);
     entries.get(i).copied().filter(|s| s.name.contains(offset))
@@ -113,6 +130,40 @@ fn name_at(entries: &[SourceTermName], offset: u32) -> Option<SourceTermName> {
 mod tests {
     use super::*;
     use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
+    #[test]
+    fn parameter_tokens_distinguish_formals_from_fields_and_uses() {
+        let text =
+            "class A(val field: Int) { def diff(left: Int, `right`: Int): Int = left - `right` }";
+        let parsed = crate::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            SourceId::from_index(0),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut NameInterner::new(),
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let tokens: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let name = parsed.member_names.parameter_name(tree)?;
+                assert!(matches!(node.kind, TreeKind::ValDef(_)));
+                assert!(parsed.member_names.value_name(tree).is_none());
+                assert!(!name.contains(name.end()));
+                Some((
+                    name.start() as usize,
+                    &text[name.start() as usize..name.end() as usize],
+                ))
+            })
+            .collect();
+        assert_eq!(
+            tokens,
+            [
+                (text.find("left").unwrap(), "left"),
+                (text.find("`right`").unwrap(), "`right`")
+            ]
+        );
+    }
+
     #[test]
     fn written_selection_and_value_tokens_survive_comments_backticks_and_assignment() {
         let text =
