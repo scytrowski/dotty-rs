@@ -13,7 +13,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use dotty::ClassHeaderBindings;
 use dotty::NamedClassSource as NamedUnit;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
@@ -25,6 +24,7 @@ use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::source_declarations::{Declaration, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
+use dotty::{CheckedBodyError, CheckedClassBodies, ClassHeaderBindings};
 use dotty::{DetachedSource, NamedClassSources, PreparationDiagnostic, SyntaxDiagnostic};
 
 trait FixtureMethods {
@@ -140,7 +140,7 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         store.symbols.info(field.symbol),
         &SymbolInfo::Complete(defs.int)
     );
-    bodies.get(class.symbol).unwrap();
+    bodies.complete(class.symbol).unwrap();
 }
 
 fn name_units_with_diagnostics(
@@ -593,7 +593,7 @@ fn type_bodies(
     definitions: Definitions,
     packages: &Packages,
     mut headers: TypedHeaders,
-) -> (TypedHeaders, TypedClassBodies) {
+) -> (TypedHeaders, CheckedClassBodies) {
     let selection = sources
         .member_signatures(sources.classes().map(|(_, c)| c.symbol), store)
         .unwrap();
@@ -608,7 +608,7 @@ fn type_bodies(
     )
     .unwrap();
     let (_, work) = phase.finish_with_body_work();
-    let mut typed_classes = TypedClassBodies::default();
+    let mut typed_classes = CheckedClassBodies::default();
     for (_, class) in sources.classes() {
         let (body, report) = work.check(
             class.symbol,
@@ -618,27 +618,37 @@ fn type_bodies(
             &mut headers.arena,
             dotty::core::NoResolver,
         );
-        let dotty::CheckedClassBody::Complete(body) = body else {
-            panic!("incomplete class body: {report:?}")
-        };
+        assert!(report.errors.is_empty(), "{report:?}");
         typed_classes.record(body).unwrap();
     }
 
     (headers, typed_classes)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PlanningError {
+    Body(CheckedBodyError),
+    Plan(ClassPlanError),
+}
+
 fn class_plans(
     units: &[NamedUnit],
-    typed_classes: &TypedClassBodies,
+    typed_classes: &CheckedClassBodies,
     output: &TypedHeaders,
     store: &SemanticStore,
-) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
+) -> Result<Vec<JvmClassPlan>, PlanningError> {
     let mut classes = Vec::new();
     for (unit, class) in named_classes(units) {
-        let body = typed_classes.get(class.symbol)?;
+        let body = typed_classes
+            .complete(class.symbol)
+            .map_err(PlanningError::Body)?;
         let planner = JvmClassPlanner::new(store, unit.ast(), unit.index())
             .with_header_bindings(&output.arena, &output.bindings);
-        classes.push(planner.plan_typed_class(class, &output.arena, body)?);
+        classes.push(
+            planner
+                .plan_typed_class(class, &output.arena, body)
+                .map_err(PlanningError::Plan)?,
+        );
     }
     Ok(classes)
 }
@@ -753,7 +763,16 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let provider = sources.file(a).unwrap();
             let calls = caller.navigation().unwrap();
             let method_at = |offset| {
-                calls.selected_method_at(offset, caller.ast(), &bodies, &output.arena, &store)
+                bodies
+                    .complete(caller.classes()[0].symbol)
+                    .unwrap()
+                    .selected_method_at(
+                        offset,
+                        calls.call_names(),
+                        caller.ast(),
+                        &output.arena,
+                        &store,
+                    )
             };
             let name_start = text.find("take(").unwrap() as u32;
             let method = method_at(name_start).unwrap();
@@ -769,7 +788,7 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let expected = provider.methods().nth(overload).unwrap();
             assert_overload_target(&sources, method, provider, expected, declaration);
 
-            let body = bodies.get(caller.classes()[0].symbol).unwrap();
+            let body = bodies.complete(caller.classes()[0].symbol).unwrap();
             let read = caller.methods().next().unwrap();
             let TreeKind::DefDef(def) = &caller.ast().get(read.tree).kind else {
                 panic!("expected B.read")
@@ -779,7 +798,7 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
                 body.selected_method(read.tree, caller.ast(), &output.arena, &store),
                 None
             );
-            let other_body = bodies.get(provider.classes()[0].symbol).unwrap();
+            let other_body = bodies.complete(provider.classes()[0].symbol).unwrap();
             assert_eq!(
                 other_body.selected_method_at(
                     name_start,
@@ -985,7 +1004,7 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
         &packages,
         headers,
     );
-    let body = bodies.get(unit.classes()[0].symbol).unwrap();
+    let body = bodies.complete(unit.classes()[0].symbol).unwrap();
     let mut methods = unit.methods();
     let apply = methods.next().unwrap().symbol;
     for (spelling, expected) in [("apply(42)", Some(apply)), ("c(42)", None)] {
