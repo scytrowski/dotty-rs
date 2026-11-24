@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    method_types: Vec<crate::ResolvedMethodType>,
     constructions: Vec<crate::ResolvedSourceConstruction>,
     parents: Vec<ResolvedSourceParent>,
     class_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -307,6 +308,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    method_types: crate::source_method_types::method_types(file, &targets, store),
                     constructions,
                     parents,
                     class_declarations,
@@ -327,6 +329,23 @@ impl ResolvedMemberIndex {
     /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Resolves a byte within a simple written class type in a method parameter
+    /// or result. Requires a completed ordinary, non-generic method signature
+    /// with one plain value list, even when empty. Both files must be indexed.
+    /// Body checking is independent. Inferred results, aliases, qualified or
+    /// compound annotations and offsets outside the name yield `None`.
+    pub fn method_type_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedMethodType> {
+        let sites = &self.files.get(&source)?.method_types;
+        let i = sites.partition_point(|s| s.origin.span().range().end() <= offset);
+        sites
+            .get(i)
+            .filter(|s| s.origin.span().range().contains(offset))
     }
 
     /// Looks up a byte within the unqualified class name of a written `new` in
