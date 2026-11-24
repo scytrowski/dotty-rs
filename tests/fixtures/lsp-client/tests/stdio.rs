@@ -219,6 +219,7 @@ fn exercise(encoding: &str, take_column: usize) {
             "  def good(a: A): Int = /* 😀 */ a.take(42)\r\n",
             "  def only(n: Int): Int = n\r\n",
             "  def bad(): Int = only(1)\r\n",
+            "  def keep(a: A): Int = a.take(9)\r\n",
             "}\r\n"
         ),
     );
@@ -226,18 +227,29 @@ fn exercise(encoding: &str, take_column: usize) {
     client.definition(take_column, 1, INT_METHOD);
 
     let caller = json!({"uri": B, "range":range(1,take_column,take_column+4)});
+    let stable_start = "  def keep(a: A): Int = a.".len();
+    let stable = json!({"uri": B, "range":range(4,stable_start,stable_start+4)});
+    let boolean = json!({"uri": A, "range":range(2,6,10)});
     let integer = json!({"uri": A, "range":range(1,6,10)});
     assert_eq!(
         client.references(B, 1, take_column + 1, false),
-        json!([caller])
+        json!([caller, stable])
     );
-    assert_eq!(client.references(A, 1, 7, true), json!([integer, caller]));
+    assert_eq!(
+        client.references(A, 1, 7, true),
+        json!([integer, caller, stable])
+    );
     assert_eq!(client.references(A, 2, 7, false), json!([]));
     assert_eq!(client.references(B, 1, take_column + 4, true), Value::Null);
 
     client.edit(B, 2, range(1, take_column + 5, take_column + 7), "false");
     client.diagnostics(B, 2, json!([]));
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(client.references(A, 1, 7, false), json!([stable]));
+    assert_eq!(
+        client.references(B, 1, take_column + 1, true),
+        json!([boolean, caller])
+    );
 
     client.edit(B, 3, range(3, 24, 25), "false");
     client.diagnostics(
@@ -249,6 +261,11 @@ fn exercise(encoding: &str, take_column: usize) {
         }]),
     );
     client.definition(take_column, 2, BOOL_METHOD);
+    assert_eq!(client.references(A, 1, 7, false), json!([stable]));
+    assert_eq!(
+        client.references(B, 1, take_column + 1, true),
+        json!([boolean, caller])
+    );
 
     let only_position = json!({"textDocument": {"uri": B}, "position": {"line":3, "character":20}});
     assert_eq!(

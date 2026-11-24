@@ -18,6 +18,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Select ready classes and track member signatures, retries and failures | [`NamedClassSources::member_signatures`], [`MemberSignaturePhase`], [`MemberSignatureReport`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Retain checked bodies for source navigation and JVM planning | [`CheckedClassBodies::record`], [`NamedClassSources::definition_at`], [`CheckedClassBodies::complete`] |
+| Resolve a checked call or find uses of one source overload | [`NamedClassSources::resolved_call_at`], [`NamedClassSources::resolved_calls_in`], [`ResolvedCallIndex`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Check bodies of signature-ready members | [`MemberSignaturePhase::finish_with_body_work`], [`ClassBodyWork::members`], [`ClassBodyWork::check`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
@@ -649,11 +650,30 @@ let plan = JvmClassPlanner::new(&store, owner.ast(), owner.index())
 assert_eq!(plan.class, a);
 
 let offset = text.find("only(7)").ok_or("missing caller")? as u32;
-let target = sources.definition_at(id, offset, &bodies, &arena, &store)?
-    .ok_or("missing definition")?;
-assert_eq!(target.name.start() as usize, text.find("only(x").unwrap());
+let call = sources.resolved_call_at(id, offset, &bodies, &arena, &store)?
+    .ok_or("missing call")?;
+assert_eq!(call.target.name.start() as usize, text.find("only(x").unwrap());
+
+let index = dotty::ResolvedCallIndex::build(&sources, &bodies, &arena, &store);
+assert!(index.diagnostics().is_empty());
+drop((bodies, arena, store));
+let (method, _) = index.method_at(id, call.target.name.start()).ok_or("missing declaration")?;
+assert_eq!(method, call.method);
+assert_eq!(index.references_to(method), &[call.origin]);
+assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+For a single lookup, [`NamedClassSources::resolved_call_at`] returns the written
+name, selected method symbol and source definition together. To collect one
+file's calls in source order, use [`NamedClassSources::resolved_calls_in`].
+For repeated queries across files, build one [`ResolvedCallIndex`] per checked
+revision and inspect its [`diagnostics`](ResolvedCallIndex::diagnostics).
+[`ResolvedCallIndex::references_to`] returns written direct call sites in file
+input order and then byte order. A client can add the declaration returned by
+[`ResolvedCallIndex::method_at`] when requested. These queries cover explicit
+parenthesized source calls. A synthetic `apply` selection has no written
+method token of its own.
 
 A complete check contains [`CheckedClassBody::Complete`] with its planning
 body. [`CheckedClassBody::Partial`] holds only committed source-to-typed

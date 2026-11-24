@@ -2445,7 +2445,11 @@ Rebuild the snapshot after further signature attempts or source edits.
 `CheckedClassBodies::record` takes the owner from the outcome of each
 check. The collection retains navigation bindings after diagnostics move
 to the client. `NamedClassSources::definition_at` uses those bindings and
-the original files' navigation indices. For JVM planning, `complete`
+the original files' navigation indices. `NamedClassSources::resolved_call_at`
+also returns the selected method symbol and written caller token. An owned
+`ResolvedCallIndex` built from the committed checks supports definition and
+direct-call reference queries for one revision after the arenas are released.
+For JVM planning, `complete`
 distinguishes a missing body, a partial body and a rejected class.
 
 Direct constructor, class-header, member-signature and body diagnostics can

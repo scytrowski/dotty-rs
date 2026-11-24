@@ -27,8 +27,12 @@ including warnings from successful members of a partial class.
 The fixture calls `finish_with_body_work` and checks signature-ready members.
 A rejected signature supplies its own marker. Independent checked methods
 retain their navigation bindings while a dependency is broken. The fixture
-records each outcome in `CheckedClassBodies` and uses `NamedClassSources::definition_at`
-to resolve calls in the current revision. The fixture renders the message at
+records each outcome in `CheckedClassBodies` and builds one `ResolvedCallIndex`
+for the current document versions. Both `textDocument/definition` and
+`textDocument/references` read this index after the semantic arenas are released.
+The references request accepts positions on direct calls and on source method names.
+Its `includeDeclaration` option adds the defining name. An edit that moves one
+call between overloads preserves the other caller, even with a failing sibling. The fixture renders the message at
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 
