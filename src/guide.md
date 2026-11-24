@@ -707,6 +707,61 @@ named files, semantic store and typed arena. After an edit, build a fresh
 collection and navigation indices from the new session. Numeric IDs and byte
 ranges from the previous version cannot identify declarations in the new one.
 
+### Resolve a name after an edit
+
+[`ResolvedMemberIndex::symbol_at`] returns the symbol kind, canonical ID,
+declaration and optional usage token for methods, fields and ordinary named
+method parameters in a single value list. [`ResolvedMemberIndex::parameter_at`]
+also gives the owning method. Both work after the semantic arenas are released.
+The compiler can compare the parameter IDs with its method plan in the same
+session. An editor rebuilds the index for each revision.
+
+Here the parameter changes from `other` to `count`. The offset of the final
+`count` stays fixed, but its target moves from the field to the parameter.
+
+```rust
+use dotty::{ResolvedMemberIndex, core::{SourceId, SymbolKind}};
+# use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, parse_source};
+# use dotty::core::{AstArena, Definitions, NoResolver, Packages, SemanticStore};
+# use dotty::typer::SignatureCompletion;
+# fn check(id: SourceId, text: &str) -> Result<ResolvedMemberIndex, Box<dyn std::error::Error>> {
+#     let mut store = SemanticStore::new();
+#     let defs = Definitions::bootstrap(&mut store);
+#     let mut packages = Packages::new();
+#     let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
+#         .name("A.scala", &mut store, &mut packages)?.into_classes(&store)?;
+#     let sources = NamedClassSources::new([&file], &store)?;
+#     let mut arena = AstArena::new();
+#     let class = &file.classes()[0];
+#     sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
+#     assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut ClassHeaderBindings::default())?, SignatureCompletion::Complete(_)));
+#     for member in class.methods().chain(class.fields()) {
+#         assert!(matches!(sources.try_complete_member_signature(member.symbol, &mut store, defs, &packages)?, SignatureCompletion::Complete(_)));
+#     }
+#     let (body, report) = sources.check_class_body(class.symbol, &mut store, defs, &packages, &mut arena, NoResolver).into_parts();
+#     assert!(report.errors.is_empty());
+#     let mut bodies = CheckedClassBodies::default();
+#     bodies.record(body)?;
+#     Ok(ResolvedMemberIndex::build(&sources, &bodies, &arena, &store))
+# }
+let id = SourceId::from_index(0);
+let original = "class A { val count: Int = 1; def read(other: Int): Int = count }";
+let edited = original.replace("other", "count");
+let offset = original.rfind("count").unwrap() as u32;
+for (text, kind, formal) in [
+    (original, SymbolKind::Field, "count:"),
+    (edited.as_str(), SymbolKind::Parameter, "count: Int)"),
+    (original, SymbolKind::Field, "count:"),
+] {
+    let index = check(id, text)?;
+    let site = index.symbol_at(id, offset).ok_or("missing read")?;
+    assert_eq!(site.kind, kind);
+    assert_eq!(site.target.name.start(), text.find(formal).unwrap() as u32);
+    assert_eq!(index.references_to(site.symbol), &[site.usage.unwrap()]);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## Follow signature dependencies between source files
 
 A compiler following one provider can query [`SignatureDependencies::blockage`]

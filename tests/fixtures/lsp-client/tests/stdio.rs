@@ -969,10 +969,18 @@ fn own_and_external_field_navigation_share_declarations_in_both_encodings() {
         }
         let parameter = col(3, "other");
         let use_site = col(3, "count");
+        let formal = loc(A, 3, parameter, 5);
+        assert_eq!(client.references(A, 3, parameter, true), json!([formal]));
         // Equal-length replacement keeps the written usage at exactly the same position.
         for (version, replacement) in [(2, "count"), (3, "other")] {
             client.edit(A, version, range(3, parameter, parameter + 5), replacement);
             client.diagnostics(A, version, json!([]));
+            let parameter_sites = if version == 2 {
+                json!([formal, read])
+            } else {
+                json!([formal])
+            };
+            assert_eq!(client.references(A, 3, parameter, true), parameter_sites);
             let (expected_sites, expected_definition) = if version == 2 {
                 (
                     json!([keep, get]),
