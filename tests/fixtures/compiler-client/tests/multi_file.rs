@@ -1113,6 +1113,38 @@ fn same_named_methods_in_one_source_execute_on_jdk21_in_either_file_order() {
                 assert_eq!(site.target.name.start() as usize, text.find(name).unwrap());
                 assert_eq!(index.references_to(formal), &[site.usage.unwrap()]);
             }
+            let read = text.rfind("delta").unwrap() as u32;
+            let site = index.symbol_at(source, read).unwrap();
+            let [local] = method.locals() else {
+                panic!("one local in diff")
+            };
+            assert_eq!(
+                (site.kind, site.symbol),
+                (dotty::core::SymbolKind::Local, local.symbol)
+            );
+            assert_eq!(site.target.name.start(), text.find("delta").unwrap() as u32);
+            assert_eq!(index.references_to(local.symbol), &[site.usage.unwrap()]);
+            let class = sources.file(source).unwrap().classes()[0].symbol;
+            let binding = bodies
+                .get(class)
+                .unwrap()
+                .local_bindings()
+                .iter()
+                .find(|b| b.symbol() == site.symbol)
+                .unwrap();
+            assert_eq!(binding.declaration(), local.declaration);
+            let (file, tree) = binding.source_declaration();
+            assert_eq!(file, source);
+            assert_eq!(
+                sources
+                    .file(file)
+                    .unwrap()
+                    .named()
+                    .syntax()
+                    .member_names
+                    .value_name(tree),
+                Some(site.target.name)
+            );
             checked_emission(plan, defs)
         });
         let mut names: Vec<_> = classes.iter().map(|class| class.internal_name()).collect();
