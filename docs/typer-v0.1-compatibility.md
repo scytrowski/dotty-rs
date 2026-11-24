@@ -2426,6 +2426,11 @@ keep their reasons in the snapshot. Skipping even one declaration makes the
 body partial, including when every attempted body succeeds. Partial bindings
 support navigation. Only a complete body can be passed to the JVM planner.
 Rebuild the snapshot after further signature attempts or source edits.
+`CheckedClassBodies::record` takes the owner from the outcome of each
+check. The collection retains navigation bindings after diagnostics move
+to the client. `NamedClassSources::definition_at` uses those bindings and
+the original files' navigation indices. For JVM planning, `complete`
+distinguishes a missing body, a partial body and a rejected class.
 
 After signature completion, `dotty::check_class_body` uses the same resolver
 to check every member in declaration order. Each failed method or field
