@@ -5,11 +5,12 @@ use crate::core::{AstArena, SemanticStore, SourceId, SourceSpan, Span, SymbolId,
 use crate::source_declarations::DeclarationDiagnostic;
 use crate::{
     CheckedClassBodies, NamedClassSources, ResolvedFieldAccess, ResolvedSourceCall,
-    SourceMemberTarget, SourceMethodTarget,
+    SourceMemberTarget, SourceMethodParameter, SourceMethodTarget,
 };
 
 #[derive(Debug)]
 struct IndexedFile {
+    parameters: Vec<SourceMethodParameter>,
     calls: Vec<ResolvedSourceCall>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -76,9 +77,11 @@ impl ResolvedMemberIndex {
                 }
             }
             field_declarations.sort_unstable_by_key(|(_, target)| target.name.start());
-            valid_files.push((file, navigation, field_declarations));
+            let parameters =
+                crate::source_parameters::declarations(file, store, &mut index.diagnostics);
+            valid_files.push((file, navigation, field_declarations, parameters));
         }
-        for (file, navigation, field_declarations) in valid_files {
+        for (file, navigation, field_declarations, parameters) in valid_files {
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -114,6 +117,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    parameters,
                     calls,
                     fields,
                     field_declarations,
@@ -157,6 +161,18 @@ impl ResolvedMemberIndex {
             .get(i)
             .copied()
             .filter(|(_, target)| target.name.contains(offset))
+    }
+
+    /// Finds a named parameter by its declaration token, including unused formals.
+    /// Only ordinary parameters of class methods with one value list are indexed.
+    /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
+    pub fn parameter_at(&self, source: SourceId, offset: u32) -> Option<SourceMethodParameter> {
+        let parameters = &self.files.get(&source)?.parameters;
+        let i = parameters.partition_point(|p| p.target.name.end() <= offset);
+        parameters
+            .get(i)
+            .copied()
+            .filter(|p| p.target.name.contains(offset))
     }
 
     /// Gets the committed read or write at a written field name. The
