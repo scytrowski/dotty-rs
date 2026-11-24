@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
 SUPPLEMENTAL_CONTROLS = (
+    MODULE + "fractional_conversion::explicit",
     MODULE + "lookup::binary_fractional_companion_search",
     MODULE + "inherited_nested::fractional_numeric_ops_uses_the_subclass_prefix",
     "typer::tests::contextual_arguments::envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses",
@@ -63,6 +64,7 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("FractionalConversion.scala", 0, ["scala.math.Fractional.Implicits.infixFractionalOps[T](x)(using f) / y"]),
         ("FractionalStandard.scala", 0, ["def standard: scala.math.Fractional[Double] = scala.math.Numeric.DoubleIsFractional",
           "def single: scala.math.Fractional[Float] = scala.math.Numeric.FloatIsFractional"]),
         ("FractionalInherited.scala", 0, ["def inherited(v: Slice.this.NumericOps): Slice.this.NumericOps = v"]),

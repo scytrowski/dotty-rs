@@ -1,4 +1,7 @@
 use crate::binary_name::BinaryName;
+mod nested_methods;
+pub(crate) use nested_methods::{matches_contextual_projection, nested_methods};
+
 use crate::error::ClassLoadCategory;
 use dotty_classfile::access_flags::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
@@ -358,6 +361,11 @@ pub(crate) struct DecodedTastyMethod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DecodedTastyType {
     Named(BinaryName),
+    /// A nested class selected on an applied outer type in a source signature.
+    Projected {
+        qualifier: Box<DecodedTastyType>,
+        member: String,
+    },
     ParamRef(u32),
     /// A by-name method parameter whose declared type is a method-local
     /// parameter reference. The bounded decoder admits only this selected
@@ -1845,6 +1853,7 @@ where
             &file,
             requested,
             &template.stats,
+            false,
             package,
             &class_type_parameters,
             &mut profiled_bare,
@@ -3198,6 +3207,7 @@ fn decode_members(
     file: &TastyFile<'_>,
     owner: &BinaryName,
     stats: &[RawTree<'_>],
+    retain_projected_result: bool,
     package: &str,
     class_type_parameters: &HashMap<u32, u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
@@ -3412,6 +3422,29 @@ fn decode_members(
                         resolve_bare,
                         0,
                     )
+                };
+                let return_type = if retain_projected_result
+                    && return_type.is_none()
+                    && has_modifier(&body.tail, dotty_tasty::tasty::IMPLICIT_TAG)
+                    && let Ok(StructuredTree::Select(select)) = body.return_type.decode_structured()
+                    && select.tag == dotty_tasty::tasty::SELECTTPT_TAG
+                {
+                    decode_tasty_member_type(
+                        file,
+                        &select.qualifier,
+                        package,
+                        &type_parameters_by_address,
+                        class_type_parameters,
+                        resolve_bare,
+                        0,
+                    )
+                    .zip(wire_name(file, select.name))
+                    .map(|(qualifier, member)| DecodedTastyType::Projected {
+                        qualifier: Box::new(qualifier),
+                        member,
+                    })
+                } else {
+                    return_type
                 };
                 let clauses = term_clauses(&body.header_items)?;
                 let has_term_clause = !clauses.is_empty();
@@ -6057,6 +6090,55 @@ mod tests {
         eprintln!(
             "wrote {root_count} roots ({total_weight} weighted observations) to {}",
             output_path.display()
+        );
+    }
+
+    #[test]
+    fn nested_conversion_requires_matching_source_signature_and_erasure() {
+        use dotty_classfile::{descriptor::MethodDescriptor, signature::MethodSignature};
+        let bytes = fixture_bytes("scala3-library/scala/math/Fractional.tasty");
+        let owner = BinaryName::from_internal("scala/math/Fractional");
+        let methods = nested_methods(&bytes, &owner, "ExtraImplicits", true)
+            .unwrap()
+            .unwrap();
+        let method = methods
+            .iter()
+            .find(|m| m.name == "infixFractionalOps")
+            .unwrap();
+        let signature = "<T:Ljava/lang/Object;>(TT;Lscala/math/Fractional<TT;>;)Lscala/math/Fractional<TT;>.FractionalOps;";
+        let descriptor = MethodDescriptor::parse(
+            "(Ljava/lang/Object;Lscala/math/Fractional;)Lscala/math/Fractional$FractionalOps;",
+        )
+        .unwrap();
+        assert!(matches_contextual_projection(
+            method,
+            &MethodSignature::parse(signature).unwrap(),
+            &descriptor
+        ));
+        for mismatch in [
+            signature.replace(".FractionalOps;", ".Other;"),
+            signature.replace(
+                "Lscala/math/Fractional<TT;>;",
+                "Lscala/math/Fractional<Ljava/lang/Object;>;",
+            ),
+            signature.replace("T:Ljava/lang/Object;", "T:Ljava/lang/Number;"),
+        ] {
+            assert!(!matches_contextual_projection(
+                method,
+                &MethodSignature::parse(&mismatch).unwrap(),
+                &descriptor
+            ));
+        }
+        let erased = MethodDescriptor::parse("(Ljava/lang/Object;)Ljava/lang/Object;").unwrap();
+        assert!(!matches_contextual_projection(
+            method,
+            &MethodSignature::parse(signature).unwrap(),
+            &erased
+        ));
+        assert!(
+            nested_methods(&bytes, &owner, "ExtraImplicits", false)
+                .unwrap()
+                .is_none()
         );
     }
 

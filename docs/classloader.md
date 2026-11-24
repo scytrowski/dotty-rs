@@ -293,6 +293,16 @@ behavior — each with a doc comment at its own definition site:
   type-variable names in the nested class signature can resolve through the
   enclosing class scopes described above.
 
+For a direct nested Scala conversion, the loader correlates the classfile
+descriptor and generic signature with the method in its enclosing TASTy
+resource from the same origin. The supported shape is
+`[A](x: A)(implicit ev: C[A]): C[A]#M` with unconstrained `A`.
+The source view keeps both clauses, the implicit flag, and the applied outer
+type of the result. An inherited JVM copy with the same signature remains in
+classfile metadata. Source lookup selects the declaring conversion.
+A unary `/` declared in a nested template can be selected under its Scala
+name while the classfile symbol retains its JVM spelling `$div`.
+
 ## 4. Architecture
 
 ```text

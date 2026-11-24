@@ -121,25 +121,49 @@ impl SourceTyper<'_> {
             } else {
                 Ok(declaration)
             }
-        } else if view.applied && !view.arguments.is_empty() {
-            let Some(parameters) = self.external_class_type_parameters(candidate.declaring_class)
-            else {
-                return Err(TyperError::ExternalGenericInstantiationDeferred {
-                    class: candidate.declaring_class,
-                });
-            };
-            if parameters.len() != view.arguments.len() {
-                return Err(TyperError::ReceiverGenericArityMismatch {
-                    class: candidate.declaring_class,
-                    expected: parameters.len(),
-                    actual: view.arguments.len(),
-                });
-            }
-            let substitutions: Vec<_> = parameters.into_iter().zip(view.arguments).collect();
-            substitute_type_symbols(self.store, declaration, &substitutions)
-                .map_err(TyperError::TypeSubstitution)
         } else {
-            Ok(declaration)
+            let mut substitutions = Vec::new();
+            if let Some(owner) = self.store.symbols.get(candidate.declaring_class).owner
+                && let Some(prefix) = view.prefix
+                && let Some(Type::Applied { tycon, args }) = self.store.types.try_get(prefix)
+                && self.store.types.get(*tycon).reference_symbol() == Some(owner)
+            {
+                // A member of Outer[A]#Inner can refer to Outer's own parameters
+                // even when Inner declares no type parameters of its own.
+                let args = args.clone();
+                let parameters = self
+                    .external_class_type_parameters(owner)
+                    .ok_or(TyperError::ExternalGenericInstantiationDeferred { class: owner })?;
+                if parameters.len() != args.len() {
+                    return Err(TyperError::ReceiverGenericArityMismatch {
+                        class: owner,
+                        expected: parameters.len(),
+                        actual: args.len(),
+                    });
+                }
+                substitutions.extend(parameters.into_iter().zip(args));
+            }
+            if view.applied && !view.arguments.is_empty() {
+                let parameters = self
+                    .external_class_type_parameters(candidate.declaring_class)
+                    .ok_or(TyperError::ExternalGenericInstantiationDeferred {
+                        class: candidate.declaring_class,
+                    })?;
+                if parameters.len() != view.arguments.len() {
+                    return Err(TyperError::ReceiverGenericArityMismatch {
+                        class: candidate.declaring_class,
+                        expected: parameters.len(),
+                        actual: view.arguments.len(),
+                    });
+                }
+                substitutions.extend(parameters.into_iter().zip(view.arguments));
+            }
+            if substitutions.is_empty() {
+                Ok(declaration)
+            } else {
+                substitute_type_symbols(self.store, declaration, &substitutions)
+                    .map_err(TyperError::TypeSubstitution)
+            }
         }
     }
 
@@ -403,7 +427,12 @@ impl SourceTyper<'_> {
             }) => Some(*class),
             _ => None,
         };
+        let prefix = match self.store.types.try_get(normalized_tycon) {
+            Some(Type::TypeRef { prefix, .. }) => Some(*prefix),
+            _ => None,
+        };
         Ok(ClassView {
+            prefix,
             class,
             arguments,
             applied,
@@ -413,6 +442,7 @@ impl SourceTyper<'_> {
 
 #[derive(Debug)]
 struct ClassView {
+    prefix: Option<TypeId>,
     class: Option<SymbolId>,
     arguments: Vec<TypeId>,
     applied: bool,

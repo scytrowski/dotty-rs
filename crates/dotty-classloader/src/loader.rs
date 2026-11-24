@@ -853,7 +853,7 @@ fn metadata_captures_enclosing_type_parameters(metadata: &ClassfileMetadata) -> 
     })
 }
 
-fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryName {
+pub(crate) fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryName {
     let mut simple_name = signature.simple_name.clone();
     for suffix in &signature.suffix {
         simple_name.push('$');
@@ -8061,6 +8061,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     }
                 }
             }
+            Some(tasty_symbol::DecodedTastyType::Projected { qualifier, member }) => {
+                let tasty_symbol::DecodedTastyType::Applied { tycon, .. } = qualifier.as_ref()
+                else {
+                    return self
+                        .unresolved_tasty_type("nested class needs an applied enclosing type");
+                };
+                let tasty_symbol::DecodedTastyType::Named(outer) = tycon.as_ref() else {
+                    return self
+                        .unresolved_tasty_type("nested class needs a named enclosing class");
+                };
+                let binary = BinaryName::from_internal(format!("{}${member}", outer.as_internal()));
+                let prefix = self.lower_tasty_type(
+                    owner,
+                    Some(qualifier),
+                    type_parameters,
+                    class_type_parameters,
+                );
+                let Type::Applied { tycon, .. } = *self.store.types.get(prefix) else {
+                    return self.unresolved_tasty_type("unresolved enclosing prefix");
+                };
+                let Some(enclosing) = self.store.types.get(tycon).reference_symbol() else {
+                    return self.unresolved_tasty_type("unresolved enclosing class");
+                };
+                match self.ensure_dependency_identity(owner, &binary) {
+                    Ok(symbol) if self.store.symbols.owner(symbol) == Some(enclosing) => {
+                        self.store.types.alloc(Type::type_ref(prefix, symbol))
+                    }
+                    _ => {
+                        self.unresolved_tasty_type("nested class does not match its declared owner")
+                    }
+                }
+            }
             Some(tasty_symbol::DecodedTastyType::ParamRef(index)) => type_parameters
                 .get(*index as usize)
                 .copied()
@@ -8139,12 +8171,37 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         {
             return Ok(None);
         }
+        let Some((owner, member, resource, true)) =
+            self.nested_tasty_resource(name, class_file, origin)?
+        else {
+            return Ok(None);
+        };
+        let argument =
+            tasty_symbol::nested_trait_parent_argument(resource.bytes(), &owner, &member, parent)
+                .map_err(|error| ClassLoadError::InvalidTastyFile(owner, error))?;
+        Ok(argument.and_then(|arg| match arg.as_internal() {
+            "scala/Boolean" => Some(self.definitions.boolean),
+            "scala/Byte" => Some(self.definitions.byte),
+            "scala/Short" => Some(self.definitions.short),
+            "scala/Char" => Some(self.definitions.char),
+            "scala/Int" => Some(self.definitions.int),
+            "scala/Long" => Some(self.definitions.long),
+            "scala/Float" => Some(self.definitions.float),
+            "scala/Double" => Some(self.definitions.double),
+            _ => None,
+        }))
+    }
+
+    fn nested_tasty_resource(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+        origin: &ClassOrigin,
+    ) -> Result<Option<(BinaryName, String, ClassResource, bool)>, ClassLoadError> {
         let Some(entry) = class_file.attributes.iter().find_map(|attr| match attr {
             Attribute::InnerClasses(entries) => entries.iter().find(|entry| {
-                entry.inner_class_access_flags & ACC_STATIC != 0
-                    && self
-                        .resolve_name(name, class_file, entry.inner_class_info_index)
-                        .is_ok_and(|inner| inner == *name)
+                self.resolve_name(name, class_file, entry.inner_class_info_index)
+                    .is_ok_and(|inner| inner == *name)
             }),
             _ => None,
         }) else {
@@ -8169,20 +8226,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if resource.origin() != origin || resource.format() != ClassFormat::Tasty {
             return Ok(None);
         }
-        let argument =
-            tasty_symbol::nested_trait_parent_argument(resource.bytes(), &owner, &member, parent)
-                .map_err(|error| ClassLoadError::InvalidTastyFile(owner, error))?;
-        Ok(argument.and_then(|arg| match arg.as_internal() {
-            "scala/Boolean" => Some(self.definitions.boolean),
-            "scala/Byte" => Some(self.definitions.byte),
-            "scala/Short" => Some(self.definitions.short),
-            "scala/Char" => Some(self.definitions.char),
-            "scala/Int" => Some(self.definitions.int),
-            "scala/Long" => Some(self.definitions.long),
-            "scala/Float" => Some(self.definitions.float),
-            "scala/Double" => Some(self.definitions.double),
-            _ => None,
-        }))
+        Ok(Some((
+            owner,
+            member,
+            resource,
+            entry.inner_class_access_flags & ACC_STATIC != 0,
+        )))
     }
 
     fn load_uncached_class(
@@ -8279,17 +8328,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )?);
         }
 
+        let scala_marked = class_file.attributes.iter().any(|attr| {
+            matches!(attr,
+                Attribute::Other(raw) if raw.bytes.is_empty() &&
+                    class_file.constant_pool.utf8(raw.name_index) == Ok("Scala"))
+        });
         let parents = if let Some(signature) = &signature {
             let env = self.class_type_var_env(declarations, None);
             let parent_indices = class_file.super_class.iter().chain(&class_file.interfaces);
             // Scala may add erased JVM interfaces (e.g. Comparator or Serializable)
             // before or after its declared generic parents. Match the signature
             // as an ordered subsequence, keeping each JVM-only interface raw.
-            let scala_interfaces = class_file.attributes.iter().any(|attr| {
-                matches!(attr,
-                Attribute::Other(raw) if raw.bytes.is_empty() &&
-                    class_file.constant_pool.utf8(raw.name_index) == Ok("Scala"))
-            });
             let mut signatures = std::iter::once(&signature.superclass)
                 .chain(&signature.superinterfaces)
                 .map(|sig| (class_type_signature_binary_name(sig), sig))
@@ -8308,7 +8357,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             {
                 let erased = self.resolve_name(name, &class_file, *index)?;
                 if let Some((_, sig)) = signatures.next_if(|(expected, _)| *expected == erased) {
-                    let parent = if scala_interfaces
+                    let parent = if scala_marked
                         && let Some(arg) = self.nested_primitive_parent_argument(
                             name,
                             &class_file,
@@ -8325,7 +8374,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         self.apply_class_signature_arguments(name, &env, symbol, sig)?
                     };
                     parents.push(parent);
-                } else if scala_interfaces && ordinal > 0 {
+                } else if scala_marked && ordinal > 0 {
                     parents.push(self.type_ref(symbol));
                 } else {
                     return Err(mismatch());
@@ -8380,6 +8429,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
 
+        let mut source_methods = None;
         let mut methods = Vec::with_capacity(class_file.methods.len());
         for method in &class_file.methods {
             let method_name =
@@ -8396,6 +8446,63 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let annotations =
                 self.resolve_annotations(name, &method.attributes, &class_file.constant_pool)?;
 
+            let returns_inner = signature.as_ref().is_some_and(|sig|
+                matches!(&sig.result, Some(TypeSignature::Reference(ReferenceTypeSignature::Class(class))) if !class.suffix.is_empty() && !class.type_arguments.is_empty()));
+            if source_methods.is_none() && (returns_inner || method_name == "$div") && scala_marked
+            {
+                source_methods = Some(
+                    match self.nested_tasty_resource(name, &class_file, &resource_origin)? {
+                        Some((outer, inner, resource, is_static)) => tasty_symbol::nested_methods(
+                            resource.bytes(),
+                            &outer,
+                            &inner,
+                            is_static,
+                        )
+                        .map_err(|e| ClassLoadError::InvalidTastyFile(outer, e))?,
+                        None => None,
+                    },
+                );
+            }
+            let decoded = source_methods.as_ref().and_then(Option::as_ref);
+            let named = |source_name: &str| {
+                decoded.and_then(|methods| {
+                    let mut matching = methods.iter().filter(|m| m.name == source_name);
+                    let method = matching.next()?;
+                    matching.next().is_none().then_some(method)
+                })
+            };
+            let contextual = named(&method_name).filter(|m| {
+                !method.access_flags.is_static()
+                    && !method.access_flags.is_varargs()
+                    && signature.as_ref().is_some_and(|sig| {
+                        tasty_symbol::matches_contextual_projection(m, sig, &descriptor)
+                    })
+            });
+            let inherited = returns_inner
+                && decoded.is_some_and(|methods| methods.iter().all(|m| m.name != method_name))
+                && parents
+                    .iter()
+                    .filter_map(|p| self.store.types.get(*p).reference_symbol())
+                    .filter_map(|parent| self.session.metadata.get(&parent))
+                    .flat_map(|metadata| &metadata.methods)
+                    .any(|m| {
+                        m.name() == method_name
+                            && m.descriptor() == &descriptor
+                            && m.signature() == signature.as_ref()
+                            && m.symbol().is_some_and(|sym| {
+                                self.store
+                                    .symbols
+                                    .get(sym)
+                                    .flags
+                                    .contains(SymbolFlags::IMPLICIT)
+                            })
+                    });
+            let division_alias = method_name == "$div"
+                && !method.access_flags.is_static()
+                && descriptor.parameters.len() == 1
+                && named("/").is_some_and(|m| m.parameters.len() == 1)
+                && decoded.is_some_and(|methods| methods.iter().all(|m| m.name != "$div"));
+
             // `<clinit>` is a JVM static-initializer entry point, not a
             // source-level member -- see `enter_method`'s doc comment.
             let method_symbol = if method_name != "<clinit>" {
@@ -8404,14 +8511,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     &method.attributes,
                     &class_file.constant_pool,
                 )?;
-                let resolved_type = self.lower_method_descriptor(
-                    name,
-                    declarations,
-                    &descriptor,
-                    signature.as_ref(),
-                    &parameter_names,
-                    method.access_flags.is_varargs(),
-                )?;
+                let resolved_type = if let Some(method) = contextual {
+                    self.lower_tasty_method_with_class_parameters(name, method, &[])
+                } else {
+                    self.lower_method_descriptor(
+                        name,
+                        declarations,
+                        &descriptor,
+                        signature.as_ref(),
+                        &parameter_names,
+                        method.access_flags.is_varargs(),
+                    )?
+                };
                 let method_symbol = self.enter_method(
                     class_symbol,
                     declarations,
@@ -8420,6 +8531,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     resolved_type,
                     origin,
                 );
+                // Preserve the JVM spelling and physical method identity in the sidecar.
+                // Scala lookup uses the declared operator or the inherited conversion.
+                if division_alias {
+                    let slash = Name::new(self.store.names.intern("/"), Namespace::Term);
+                    self.store
+                        .scopes
+                        .get_mut(declarations)
+                        .enter(slash, method_symbol);
+                }
+                if inherited {
+                    self.store
+                        .scopes
+                        .get_mut(declarations)
+                        .remove(method_symbol);
+                }
+                if contextual.is_some() {
+                    let entry = self.store.symbols.get_mut(method_symbol);
+                    entry.flags = entry.flags | SymbolFlags::IMPLICIT;
+                }
                 self.enter_annotations(method_symbol, &annotations);
                 Some(method_symbol)
             } else {
