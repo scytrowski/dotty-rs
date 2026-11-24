@@ -759,6 +759,60 @@ mod tests {
     }
 
     #[test]
+    fn bulk_calls_in_source_order_skip_only_uncommitted_members() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class A { def value(i: Int): Int = i; def one(): Int = value(1); def bad(): Int = value(false) }; class B { def read(a: A): Int = a.value(a.value(2)) }";
+        let file = named(9, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let mut bodies = crate::CheckedClassBodies::default();
+        for class in file.classes() {
+            let check = sources.check_class_body(
+                class.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            );
+            let (body, report) = check.into_parts();
+            assert_eq!(
+                report.errors.len(),
+                usize::from(class.symbol == file.classes()[0].symbol)
+            );
+            bodies.record(body).unwrap();
+        }
+        let calls = sources
+            .resolved_calls_in(file.source(), &bodies, &arena, &store)
+            .unwrap();
+        let offsets: Vec<_> = calls
+            .iter()
+            .map(|c| c.origin.span().range().start() as usize)
+            .collect();
+        assert_eq!(
+            offsets,
+            ["value(1)", "value(a.value", "value(2)"].map(|s| text.find(s).unwrap())
+        );
+        for c in calls {
+            assert_eq!(c.method, file.classes()[0].methods().next().unwrap().symbol);
+            assert_eq!(
+                sources
+                    .resolved_call_at(
+                        file.source(),
+                        c.origin.span().range().start(),
+                        &bodies,
+                        &arena,
+                        &store
+                    )
+                    .unwrap(),
+                Some(c)
+            );
+        }
+    }
+
+    #[test]
     fn projected_classes_navigate_past_an_omitted_owner() {
         use crate::core::{NoResolver, TreeKind};
         let mut store = SemanticStore::new();

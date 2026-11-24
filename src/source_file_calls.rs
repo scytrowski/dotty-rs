@@ -334,6 +334,41 @@ impl crate::NamedClassSources<'_> {
         self.resolved_target(source, entry.0, method, store)
     }
 
+    /// Collects resolved direct source calls in written token order, including calls
+    /// in committed members of partial classes. Use the bodies, typed arena and
+    /// store of this naming session. Unknown files yield an empty vector.
+    /// Returns the first caller or target navigation error without a partial vector.
+    pub fn resolved_calls_in(
+        &self,
+        source: SourceId,
+        bodies: &crate::CheckedClassBodies,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Result<Vec<ResolvedSourceCall>, DeclarationError> {
+        let Some(caller) = self.file(source) else {
+            return Ok(Vec::new());
+        };
+        self.calls_in_file(caller, caller.navigation()?, bodies, typed_ast, store)
+            .collect()
+    }
+
+    fn calls_in_file(
+        &self,
+        caller: &crate::NamedClassSource,
+        calls: &SourceFileCalls,
+        bodies: &crate::CheckedClassBodies,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> impl Iterator<Item = Result<ResolvedSourceCall, DeclarationError>> {
+        calls.call_names().iter().filter_map(move |entry| {
+            let method = calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
+                bodies.bindings(owner)
+            })?;
+            self.resolved_target(caller.source(), entry.0, method, store)
+                .transpose()
+        })
+    }
+
     fn resolved_target(
         &self,
         caller: SourceId,
