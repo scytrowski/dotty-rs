@@ -974,7 +974,13 @@ fn own_and_external_field_navigation_share_declarations_in_both_encodings() {
             client.edit(A, version, range(3, parameter, parameter + 5), replacement);
             client.diagnostics(A, version, json!([]));
             let (expected_sites, expected_definition) = if version == 2 {
-                (json!([keep, get]), Value::Null)
+                (
+                    json!([keep, get]),
+                    json!([{
+                        "originSelectionRange":read["range"], "targetUri":A,
+                        "targetSelectionRange":range(3, parameter, parameter+5), "targetRange":range(3,parameter,parameter+"count: Int".len())
+                    }]),
+                )
             } else {
                 (
                     json!([read, keep, get]),
@@ -991,6 +997,45 @@ fn own_and_external_field_navigation_share_declarations_in_both_encodings() {
             assert_eq!(
                 client.request("textDocument/definition", lookup(3, use_site)),
                 expected_definition
+            );
+        }
+        client.shutdown();
+    }
+}
+
+#[test]
+fn overloaded_method_parameters_navigate_by_symbol_in_both_encodings() {
+    let lines = [
+        "class A {",
+        "  def pick(/* 😀 */ x: Int): Int = x + x",
+        "  def pick(/* 😀 */ x: Boolean): Boolean = x",
+        "}",
+    ];
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &lines.join("\n"));
+        for (line, formal) in [(1, "x: Int"), (2, "x: Boolean")] {
+            let col = |token| token_column(encoding, lines[line], token);
+            let decl = col(formal);
+            let read = col("= x") + 2;
+            let location = |x| json!({"uri":A,"range":range(line,x,x+1)});
+            let mut uses = vec![location(read)];
+            if line == 1 {
+                uses.push(location(col("+ x") + 2));
+            }
+            let mut all = vec![location(decl)];
+            all.extend_from_slice(&uses);
+            for pos in [decl, read] {
+                assert_eq!(client.references(A, line, pos, true), json!(all));
+                assert_eq!(client.references(A, line, pos, false), json!(uses));
+            }
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":A},"position":{"line":line,"character":read}})
+                ),
+                json!([{"originSelectionRange":range(line,read,read+1),"targetUri":A,
+                "targetRange":range(line,decl,decl+formal.len()),"targetSelectionRange":range(line,decl,decl+1)}])
             );
         }
         client.shutdown();

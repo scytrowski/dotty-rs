@@ -125,8 +125,9 @@ impl Workspace {
         let pos = offset(text, &p["position"], enc)?;
         let analysis = self.ready.as_ref()?;
         let source = analysis.source(uri)?;
+        let site = analysis.members.symbol_at(source, pos)?;
+        let target = site.target;
         if method == "textDocument/references" {
-            let (member, target) = analysis.members.member_at(source, pos)?;
             let location = |file, range| {
                 let uri = analysis.uri(file)?;
                 Some(json!({"uri":uri, "range":wire_range(&self.docs.get(uri)?.text, range, enc)?}))
@@ -135,19 +136,19 @@ impl Workspace {
             if p["context"]["includeDeclaration"].as_bool()? {
                 locations.push(location(target.source, target.name)?);
             }
-            for site in analysis.members.references_to(member) {
-                locations.push(location(site.source(), site.span().range())?);
+            for reference in analysis.members.references_to(site.symbol) {
+                locations.push(location(reference.source(), reference.span().range())?);
             }
             return Some(Value::Array(locations));
         }
-        let (origin, declaration) = analysis.members.definition_at(source, pos)?;
-        let target_uri = analysis.uri(declaration.source)?;
-        let target = &self.docs.get(target_uri)?.text;
-        let name = wire_range(target, declaration.name, enc)?;
+        let origin = site.usage?;
+        let target_uri = analysis.uri(target.source)?;
+        let target_text = &self.docs.get(target_uri)?.text;
+        let name = wire_range(target_text, target.name, enc)?;
         if links {
             Some(
                 json!([{"originSelectionRange":wire_range(text,origin.span().range(),enc)?,
-                "targetUri":target_uri,"targetRange":wire_range(target,declaration.declaration,enc)?,"targetSelectionRange":name}]),
+                "targetUri":target_uri,"targetRange":wire_range(target_text,target.declaration,enc)?,"targetSelectionRange":name}]),
             )
         } else {
             Some(json!({"uri":target_uri,"range":name}))
