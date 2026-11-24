@@ -32,3 +32,10 @@ For parallel parsing, [`DetachedParse`] owns local names until binding into a
 session interner. Bind sources in stable input order and retain their source
 identity. Keep parser features and effective language-import policy with the
 parse result when reproducing dialect-dependent behavior.
+
+
+For navigation, `ParseResult::member_names` exposes half-open UTF-8 name
+tokens for written selections and simple value declarations, including
+explicit constructor accessors. A selection on the left of a direct assignment
+also identifies its enclosing assignment tree. Resolve field identity against
+the committed typed bindings for the same parse.

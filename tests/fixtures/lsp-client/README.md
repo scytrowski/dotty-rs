@@ -27,10 +27,10 @@ including warnings from successful members of a partial class.
 The fixture calls `finish_with_body_work` and checks signature-ready members.
 A rejected signature supplies its own marker. Independent checked methods
 retain their navigation bindings while a dependency is broken. The fixture
-records each outcome in `CheckedClassBodies` and builds one `ResolvedCallIndex`
+records each outcome in `CheckedClassBodies` and builds one `ResolvedMemberIndex`
 for the current document versions. Both `textDocument/definition` and
 `textDocument/references` read this index after the semantic arenas are released.
-The references request accepts positions on direct calls and on source method names.
+The references request accepts positions on direct calls, explicit public field accesses and their declaration names.
 Its `includeDeclaration` option adds the defining name. An edit that moves one
 call between overloads preserves the other caller, even with a failing sibling. The fixture renders the message at
 publication. Two inferred fields with matching bad calls retain independent
@@ -99,3 +99,10 @@ DOTTY_LSP_BIN="$PWD/target/debug/dotty-lsp" nvim --clean --headless -l tests/edi
 ```
 
 The editor command jumps from a call in B.scala to the method name in A.scala.
+
+
+The public-field stdio scenario reads and writes a constructor field. Editing
+the writer's receiver type moves that usage to a body field in a different class.
+A subsequent Boolean assignment reports the mismatched value and removes the
+uncommitted write. The sibling method's read remains navigable in both UTF-8
+and UTF-16.

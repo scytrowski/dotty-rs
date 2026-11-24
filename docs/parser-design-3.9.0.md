@@ -59,6 +59,11 @@ Ranges use UTF-8 byte offsets and include the delimiters on backquoted names.
 Entries are in source order and retain their tree IDs when a detached parse
 is bound to a session.
 
+`ParseResult::member_names` retains written selector tokens and names of simple
+value definitions and explicit constructor accessors. In `a.count = b.count`
+both tokens refer to their respective selection trees, and the left selection
+also refers to the assignment tree. The typer supplies the selected symbol.
+
 Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
 standalone source pattern through the real pattern productions, requires the
 fragment to end at EOF, and is not a separate pattern dialect.

@@ -841,3 +841,75 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         client.shutdown();
     }
 }
+
+#[test]
+fn public_fields_navigate_from_reads_writes_and_declarations_in_both_encodings() {
+    let providers = "/* 😀 */ class A(var count: Int)\nclass B { var count: Int = 2 }";
+    let read = "  def read(a: A): Int = /* 😀 */ a.count";
+    let write = "  def set(b: A): Unit = /* 😀 */ b.count = 1";
+    for encoding in ["utf-8", "utf-16"] {
+        let column = |line: &str, token: &str| {
+            let prefix = &line[..line.find(token).unwrap()];
+            if encoding == "utf-8" {
+                prefix.len()
+            } else {
+                prefix.encode_utf16().count()
+            }
+        };
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, providers);
+        client.open(B, &format!("class Use {{\n{read}\n{write}\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        let target = column(providers, "count");
+        let name = range(0, target, target + 5);
+        let decl = json!({"uri":A,"range":name});
+        let r = column(read, "count");
+        let w = column(write, "count");
+        let read_site = json!({"uri":B,"range":range(1,r,r+5)});
+        let write_site = json!({"uri":B,"range":range(2,w,w+5)});
+        for (uri, line, col) in [(A, 0, target), (B, 1, r), (B, 2, w)] {
+            assert_eq!(
+                client.references(uri, line, col, true),
+                json!([decl, read_site, write_site])
+            );
+            assert_eq!(
+                client.references(uri, line, col, false),
+                json!([read_site, write_site])
+            );
+        }
+        for (line, col) in [(1, r), (2, w)] {
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":line,"character":col+1}})
+                ),
+                json!([{"originSelectionRange":range(line,col,col+5),"targetUri":A,"targetSelectionRange":name,"targetRange":range(0,target-4,target+10)}])
+            );
+        }
+        let other = column(providers.lines().nth(1).unwrap(), "count");
+        assert_eq!(client.references(A, 1, other, false), json!([]));
+        let receiver = column(write, "A");
+        client.edit(B, 2, range(2, receiver, receiver + 1), "B");
+        client.diagnostics(B, 2, json!([]));
+        assert_eq!(client.references(A, 0, target, false), json!([read_site]));
+        assert_eq!(client.references(A, 1, other, false), json!([write_site]));
+        let write_position = json!({"textDocument":{"uri":B},"position":{"line":2,"character":w}});
+        assert_eq!(
+            client.request("textDocument/definition", write_position.clone()),
+            json!([{"originSelectionRange":write_site["range"],"targetUri":A,"targetSelectionRange":range(1,other,other+5),"targetRange":range(1,other-4,other+"count: Int = 2".len())}])
+        );
+
+        let rhs = column(write, "1");
+        client.edit(B, 3, range(2, rhs, rhs + 1), "false");
+        client.diagnostics(B,3,json!([{"range":range(2,rhs,rhs+5),"severity":1,"source":"dotty",
+            "code":"typer.expected_expression_type_mismatch","message":"Expression does not conform to the expected type"}]));
+        assert_eq!(client.references(A, 1, other, false), json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", write_position),
+            Value::Null
+        );
+        assert_eq!(client.references(B, 1, r, true), json!([decl, read_site]));
+
+        client.shutdown();
+    }
+}

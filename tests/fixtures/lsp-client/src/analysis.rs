@@ -9,7 +9,7 @@ use dotty::core::{
 use dotty::{
     CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
     NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
-    ResolvedCallIndex, SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport,
+    ResolvedMemberIndex, SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport,
     SignatureCycle,
 };
 
@@ -56,7 +56,7 @@ pub struct FileResult {
 #[derive(Default)]
 pub struct Analysis {
     pub files: BTreeMap<String, FileResult>,
-    pub calls: ResolvedCallIndex,
+    pub members: ResolvedMemberIndex,
     // Source IDs follow the open documents' URI order in this revision.
     uris: Vec<String>,
 }
@@ -156,20 +156,24 @@ pub fn analyze(docs: &Documents) -> Analysis {
             units.push(unit);
         }
     }
-    let calls = match NamedClassSources::new(&units, &store) {
+    let members = match NamedClassSources::new(&units, &store) {
         Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &mut results),
         Err(error) => {
             for result in results.values_mut() {
                 result.problems.push(Problem::Sources(error));
             }
-            ResolvedCallIndex::default()
+            ResolvedMemberIndex::default()
         }
     };
     let files = results
         .into_iter()
         .map(|(id, file)| (uris[id.index() as usize].clone(), file))
         .collect();
-    Analysis { files, calls, uris }
+    Analysis {
+        files,
+        members,
+        uris,
+    }
 }
 
 fn analyze_sources(
@@ -178,7 +182,7 @@ fn analyze_sources(
     defs: Definitions,
     packages: &Packages,
     results: &mut HashMap<SourceId, FileResult>,
-) -> ResolvedCallIndex {
+) -> ResolvedMemberIndex {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
     let mut phase =
@@ -219,7 +223,7 @@ fn analyze_sources(
         }
         bodies.record(body).expect("one check per ready class");
     }
-    let index = ResolvedCallIndex::build(sources, &bodies, &arena, store);
+    let index = ResolvedMemberIndex::build(sources, &bodies, &arena, store);
     for diagnostic in index.diagnostics() {
         results
             .get_mut(&diagnostic.error.source_id())
@@ -422,13 +426,13 @@ mod tests {
         assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
         let source = results.source(uri).unwrap();
         let start = text.rfind("get").unwrap() as u32;
-        let call = results.calls.call_at(source, start).unwrap();
+        let call = results.members.call_at(source, start).unwrap();
         assert_eq!(call.target.source, source);
         assert_eq!(call.origin.span().range().start(), start);
         assert_eq!(call.target.name.start() as usize, text.find("get").unwrap());
         assert!(
             results
-                .calls
+                .members
                 .call_at(source, text.rfind("only").unwrap() as u32)
                 .is_none()
         );
@@ -531,14 +535,14 @@ mod tests {
         assert_eq!(&b[range.start() as usize..range.end() as usize], "x");
         let source = files.source("file:///B.scala").unwrap();
         let call = files
-            .calls
+            .members
             .call_at(source, b.find("take").unwrap() as u32)
             .unwrap();
         assert_eq!(files.uri(call.target.source), Some("file:///A.scala"));
         assert_eq!(call.target.name.start(), a.rfind("take").unwrap() as u32);
         assert!(
             files
-                .calls
+                .members
                 .call_at(source, b.rfind("good").unwrap() as u32)
                 .is_none()
         );
