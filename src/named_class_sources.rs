@@ -489,6 +489,7 @@ mod tests {
     mod field_access;
     mod headers;
     mod members;
+    mod own_fields;
 
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,

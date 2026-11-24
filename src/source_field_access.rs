@@ -1,21 +1,22 @@
-//! Checked reads and assignments of explicitly selected public source fields.
+//! Checked reads and assignments of written source fields.
+use crate::core::ast::{Modifier, VisibilitySyntax};
 use crate::core::{
     AstArena, SemanticStore, SourceTypedIndex, SymbolId, SymbolKind, SymbolOrigin, TermRefTarget,
     TreeKind, Type, Typed, Untyped, Visibility,
 };
 use crate::core::{SourceDefinition, SourceId, SourceSpan, Span};
-use crate::parser::SourceSelection;
+use crate::parser::{SourceSelection, SourceTermName};
 use crate::source_declarations::DeclarationError;
 use crate::{
     CheckedClassBodies, NamedClassSource, NamedClassSources, SourceFileCalls, SourceMemberTarget,
 };
 
-/// Operation performed on a selected source field.
+/// Operation performed on a source field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldAccessKind {
     /// The checked expression reads the field value.
     Read,
-    /// The field selection is the target of a checked direct assignment.
+    /// The field name is the target of a checked direct assignment.
     Write,
 }
 
@@ -30,19 +31,30 @@ pub fn selected_field_access(
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<(SymbolId, FieldAccessKind)> {
-    let node = ast.try_get(selection.tree)?;
-    let source = node.position?.source();
-    let TreeKind::Select(written) = &node.kind else {
-        return None;
-    };
+    field_access(selection, None, ast, bindings, typed, store)
+}
+
+fn field_access(
+    selection: SourceTermName,
+    enclosing_class: Option<SymbolId>,
+    ast: &AstArena<Untyped>,
+    bindings: &SourceTypedIndex,
+    typed: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Option<(SymbolId, FieldAccessKind)> {
+    let written = ast.try_get(selection.tree)?;
+    let source = written.position?.source();
     let id = bindings.get(source, selection.tree)?;
     let node = typed.try_get(id)?;
-    let TreeKind::Select(resolved) = &node.kind else {
-        return None;
+    let own_receiver = match (&written.kind, &node.kind) {
+        (TreeKind::Select(w), TreeKind::Select(r))
+            if bindings.get(source, w.qualifier) == Some(r.qualifier) =>
+        {
+            matches!(&ast.try_get(w.qualifier)?.kind, TreeKind::This(t) if t.qual.is_none())
+        }
+        (TreeKind::Ident(_), TreeKind::Ident(_)) if enclosing_class.is_some() => true,
+        _ => return None,
     };
-    if bindings.get(source, written.qualifier)? != resolved.qualifier {
-        return None;
-    }
     let Type::TermRef {
         target: TermRefTarget::Symbol(field),
         ..
@@ -54,8 +66,11 @@ pub fn selected_field_access(
         return None;
     }
     let symbol = store.symbols.get(*field);
+    let own_field = own_receiver && enclosing_class.is_some() && symbol.owner == enclosing_class;
     if symbol.kind != SymbolKind::Field
-        || symbol.visibility != Visibility::Public
+        || (matches!(written.kind, TreeKind::Ident(_)) && !own_field)
+        || !(symbol.visibility == Visibility::Public
+            || own_field && symbol.visibility == Visibility::Private)
         || !matches!(symbol.origin, SymbolOrigin::Source(_))
     {
         return None;
@@ -77,7 +92,7 @@ pub fn selected_field_access(
     Some((*field, kind))
 }
 
-/// A committed selection of a public field declared in the selected sources.
+/// A committed use of a field declared in the selected sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedFieldAccess {
     /// Written name at the usage site, in UTF-8 bytes.
@@ -91,8 +106,10 @@ pub struct ResolvedFieldAccess {
 }
 
 impl NamedClassSources<'_> {
-    /// Resolves a byte within an explicit selection of a public body or constructor
-    /// field. Use committed bodies, typed arena and store from the same revision.
+    /// Resolves a byte within a public field selection or a bare use of the enclosing
+    /// class’s field. An ordinary private body field is supported when written
+    /// as a bare name or selected on unqualified `this` inside its declaring class.
+    /// Use committed bodies, typed arena and store from the same revision.
     /// Missing files, uncommitted uses and unsupported targets yield `Ok(None)`.
     /// Caller or provider navigation failures preserve their typed error.
     pub fn resolved_field_at(
@@ -107,7 +124,11 @@ impl NamedClassSources<'_> {
             return Ok(None);
         };
         let navigation = file.navigation()?;
-        let Some(selection) = file.named().syntax().member_names.selection_at(offset) else {
+        let names = &file.named().syntax().member_names;
+        let Some(selection) = names
+            .selection_at(offset)
+            .or_else(|| names.identifier_at(offset))
+        else {
             return Ok(None);
         };
         let Some((field, kind)) = field_binding(file, navigation, selection, bodies, typed, store)
@@ -135,8 +156,9 @@ pub(crate) fn field_binding(
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<(SymbolId, FieldAccessKind)> {
-    let bindings = bodies.bindings(navigation.class_at(selection.name.start())?)?;
-    selected_field_access(selection, caller.ast(), bindings, typed, store)
+    let owner = navigation.class_at(selection.name.start())?;
+    let bindings = bodies.bindings(owner)?;
+    field_access(selection, Some(owner), caller.ast(), bindings, typed, store)
 }
 
 pub(crate) fn field_target(
@@ -146,7 +168,8 @@ pub(crate) fn field_target(
     field: SymbolId,
     store: &SemanticStore,
 ) -> Result<Option<SourceMemberTarget>, DeclarationError> {
-    if store.symbols.get(field).visibility != Visibility::Public {
+    let visibility = store.symbols.get(field).visibility;
+    if !matches!(visibility, Visibility::Public | Visibility::Private) {
         return Ok(None);
     }
     let Some(SourceDefinition::Canonical { source, tree }) = file.index().definition_of(field)
@@ -158,6 +181,15 @@ pub(crate) fn field_target(
     };
     let invalid = DeclarationError::InvalidBinding { source, tree };
     let node = file.ast().try_get(tree).ok_or(invalid)?;
+    let TreeKind::ValDef(value) = &node.kind else {
+        return Err(invalid);
+    };
+    if visibility == Visibility::Private
+        && (value.metadata.visibility != Some(VisibilitySyntax::Private { qualifier: None })
+            || value.metadata.modifiers.contains(&Modifier::ParamAccessor))
+    {
+        return Ok(None);
+    }
     let declaration = node
         .position
         .filter(|p| p.source() == file.source())
@@ -165,7 +197,6 @@ pub(crate) fn field_target(
         .span()
         .range();
     if source != file.source()
-        || !matches!(node.kind, TreeKind::ValDef(_))
         || name.start() < declaration.start()
         || name.end() > declaration.end()
         || navigation.class_at(name.start()) != Some(owner)

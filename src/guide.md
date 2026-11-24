@@ -610,7 +610,7 @@ use dotty::typer::{SignatureCompletion, TyperError};
 # let mut store = SemanticStore::new();
 # let defs = Definitions::bootstrap(&mut store);
 # let mut packages = Packages::new();
-let text = "class A { def only(x: Int): Int = x }; class B { var count: Int = 0; def bad(a: A): Int = a.only(false); def good(a: A): Int = a.only(7); def copy(b: B): Unit = b.count = b.count }";
+let text = "class A { def only(x: Int): Int = x }; class B { var count: Int = 0; def bad(a: A): Int = a.only(false); def good(a: A): Int = a.only(7); def copy(b: B): Unit = b.count = b.count; private var current: Int = 0; def set(current: Int): Unit = this.current = current; def value(): Int = current }";
 let id = SourceId::from_index(42);
 let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
     .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
@@ -666,6 +666,14 @@ assert_eq!(sites.len(), 2);
 assert_eq!(sites[0], field.origin);
 let read = index.field_at(id, sites[1].span().range().start()).unwrap();
 assert_eq!((read.field, read.kind), (count, dotty::FieldAccessKind::Read));
+let private_name = text.find("var current").unwrap() as u32 + 4;
+let (current, _) = index.member_at(id, private_name).unwrap();
+let write = text.find("this.current").unwrap() as u32 + 5;
+let read = text.rfind("current").unwrap() as u32;
+let sites: Vec<_> = index.references_to(current).iter().map(|s| s.span().range().start()).collect();
+assert_eq!(sites, [write, read]);
+let parameter_use = text.find("= current;").unwrap() as u32 + 2;
+assert!(index.member_at(id, parameter_use).is_none());
 let (method, _) = index.method_at(id, call.target.name.start()).ok_or("missing declaration")?;
 assert_eq!(method, call.method);
 assert_eq!(index.references_to(method), &[call.origin]);
@@ -676,10 +684,12 @@ assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 For a single lookup, [`NamedClassSources::resolved_call_at`] returns the written
 name, selected method symbol and source definition together. To collect one
 file's calls in source order, use [`NamedClassSources::resolved_calls_in`].
-[`NamedClassSources::resolved_field_at`] returns the canonical public field
-and distinguishes a read from a direct assignment on an explicit receiver.
-This includes fields declared with `val` or `var` in the body or primary
-constructor of an ordinary class. For repeated queries across files, build
+[`NamedClassSources::resolved_field_at`] returns the canonical field symbol and
+distinguishes a read from a direct assignment. Public body and constructor
+fields support explicit selections and bare uses in the declaring class.
+Ordinary private body fields support bare uses and `this.field` in that class.
+A parameter or local that shadows the field has its own symbol and contributes
+no field reference. For repeated queries across files, build
 one [`ResolvedMemberIndex`] per checked revision and inspect its diagnostics.
 [`ResolvedMemberIndex::references_to`] returns committed usages in input file
 order and then byte order. [`ResolvedMemberIndex::member_at`] accepts both

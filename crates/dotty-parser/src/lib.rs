@@ -20,7 +20,7 @@ mod case_clauses;
 mod class_definitions;
 mod compilation_unit;
 mod member_names;
-pub use member_names::{SourceMemberNames, SourceSelection};
+pub use member_names::{SourceMemberNames, SourceSelection, SourceTermName};
 mod context;
 mod cursor;
 mod definitions;

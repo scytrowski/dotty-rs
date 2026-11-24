@@ -842,20 +842,22 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
     }
 }
 
+fn token_column(encoding: &str, line: &str, token: &str) -> usize {
+    let prefix = &line[..line.find(token).unwrap()];
+    if encoding == "utf-8" {
+        prefix.len()
+    } else {
+        prefix.encode_utf16().count()
+    }
+}
+
 #[test]
 fn public_fields_navigate_from_reads_writes_and_declarations_in_both_encodings() {
     let providers = "/* 😀 */ class A(var count: Int)\nclass B { var count: Int = 2 }";
     let read = "  def read(a: A): Int = /* 😀 */ a.count";
     let write = "  def set(b: A): Unit = /* 😀 */ b.count = 1";
     for encoding in ["utf-8", "utf-16"] {
-        let column = |line: &str, token: &str| {
-            let prefix = &line[..line.find(token).unwrap()];
-            if encoding == "utf-8" {
-                prefix.len()
-            } else {
-                prefix.encode_utf16().count()
-            }
-        };
+        let column = |line: &str, token: &str| token_column(encoding, line, token);
         let mut client = Client::start(encoding, vec![A]);
         client.open(A, providers);
         client.open(B, &format!("class Use {{\n{read}\n{write}\n}}"));
@@ -910,6 +912,87 @@ fn public_fields_navigate_from_reads_writes_and_declarations_in_both_encodings()
         );
         assert_eq!(client.references(B, 1, r, true), json!([decl, read_site]));
 
+        client.shutdown();
+    }
+}
+
+#[test]
+fn own_and_external_field_navigation_share_declarations_in_both_encodings() {
+    let lines = [
+        "class A {",
+        "  var count: Int = 0",
+        "  private var hidden: Int = 1",
+        "  def read(other: Int): Int = /* 😀 */ count",
+        "  def keep(): Int = this.count",
+        "  def copy(): Unit = /* 😀 */ this.hidden = hidden",
+        "}",
+    ];
+    let external = "class B { def get(a: A): Int = a.count }";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A, B]);
+        client.open(A, &lines.join("\n"));
+        client.open(B, external);
+        let col = |line: usize, token: &str| token_column(encoding, lines[line], token);
+        let loc = |uri: &str, line: usize, col: usize, len: usize| json!({"uri":uri,"range":range(line,col,col+len)});
+        let count = loc(A, 1, col(1, "count"), 5);
+        let read = loc(A, 3, col(3, "count"), 5);
+        let keep = loc(A, 4, col(4, "count"), 5);
+        let get = loc(B, 0, token_column(encoding, external, "count"), 5);
+        assert_eq!(
+            client.references(A, 3, col(3, "count"), true),
+            json!([count, read, keep, get])
+        );
+        assert_eq!(
+            client.references(B, 0, token_column(encoding, external, "count"), false),
+            json!([read, keep, get])
+        );
+        let private = loc(A, 2, col(2, "hidden"), 6);
+        let write = col(5, "hidden");
+        let rhs = col(5, "= hidden") + 2;
+        assert_eq!(
+            client.references(A, 5, rhs, true),
+            json!([private, loc(A, 5, write, 6), loc(A, 5, rhs, 6)])
+        );
+        let lookup = |line, character| json!({"textDocument":{"uri":A}, "position":{"line":line,"character":character}});
+        for (line, name, len, decl_line, decl_name) in [
+            (3, col(3, "count"), 5, 1, col(1, "count")),
+            (5, write, 6, 2, col(2, "hidden")),
+        ] {
+            assert_eq!(
+                client.request("textDocument/definition", lookup(line, name)),
+                json!([{
+                    "originSelectionRange":range(line,name,name+len), "targetUri":A,
+                    "targetSelectionRange":range(decl_line,decl_name,decl_name+len),
+                    "targetRange":range(decl_line,2,lines[decl_line].len())
+                }])
+            );
+        }
+        let parameter = col(3, "other");
+        let use_site = col(3, "count");
+        // Equal-length replacement keeps the written usage at exactly the same position.
+        for (version, replacement) in [(2, "count"), (3, "other")] {
+            client.edit(A, version, range(3, parameter, parameter + 5), replacement);
+            client.diagnostics(A, version, json!([]));
+            let (expected_sites, expected_definition) = if version == 2 {
+                (json!([keep, get]), Value::Null)
+            } else {
+                (
+                    json!([read, keep, get]),
+                    json!([{
+                        "originSelectionRange":read["range"], "targetUri":A,
+                        "targetSelectionRange":count["range"], "targetRange":range(1,2,lines[1].len())
+                    }]),
+                )
+            };
+            assert_eq!(
+                client.references(A, 4, col(4, "count"), false),
+                expected_sites
+            );
+            assert_eq!(
+                client.request("textDocument/definition", lookup(3, use_site)),
+                expected_definition
+            );
+        }
         client.shutdown();
     }
 }

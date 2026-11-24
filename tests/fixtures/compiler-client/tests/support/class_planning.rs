@@ -803,7 +803,7 @@ fn class_plans_require_exact_methods_and_restore_source_order() {
 #[test]
 fn ordinary_constructor_parameters_initialize_instance_state_in_source_order_on_jdk21() {
     use dotty::classfile::{ACC_PUBLIC, ClassFile, MethodAccessFlags, Reader};
-    let artifacts = super::compile([
+    let inputs = [
         (
             SourceId::from_index(0),
             "Counter.scala",
@@ -824,7 +824,59 @@ class Pair(z: Int, a: Int):
   def difference(): Int = first - second
 "#,
         ),
-    ]);
+    ];
+    let compile = |files: [_; 2]| {
+        super::with_plan(&files, |plan, defs, sources, bodies| {
+            let (id, _, text) = inputs[0];
+            let field = sources.file(id).unwrap().classes()[0]
+                .fields()
+                .next()
+                .unwrap()
+                .symbol;
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            assert!(index.diagnostics().is_empty());
+            let offsets: Vec<_> = text
+                .match_indices("current")
+                .map(|(i, _)| i as u32)
+                .collect();
+            let [declaration, read, write, rhs] = offsets[..] else {
+                panic!("Counter field sites")
+            };
+            let sites = index.references_to(field);
+            assert_eq!(sites.len(), 3);
+            for (site, (offset, kind)) in sites.iter().zip([
+                (read, dotty::FieldAccessKind::Read),
+                (write, dotty::FieldAccessKind::Write),
+                (rhs, dotty::FieldAccessKind::Read),
+            ]) {
+                let access = sources
+                    .resolved_field_at(id, offset, bodies, plan.typed_ast, plan.store)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(index.field_at(id, offset), Some(&access));
+                assert_eq!(
+                    (
+                        site.source(),
+                        site.span().range().start(),
+                        access.field,
+                        access.kind,
+                        access.target.name.start()
+                    ),
+                    (id, offset, field, kind, declaration)
+                );
+            }
+            assert!(
+                index
+                    .member_at(id, text.rfind("start").unwrap() as u32)
+                    .is_none()
+            );
+            super::checked_emission(plan, defs)
+        })
+    };
+    let artifacts = compile(inputs);
+    let reversed = compile([inputs[1], inputs[0]]);
+    assert!(artifacts.iter().eq(reversed.iter().rev()));
     let counter = artifacts
         .iter()
         .find(|a| a.internal_name() == "demo/Counter")

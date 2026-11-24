@@ -1,4 +1,4 @@
-//! Retained direct calls and field selections in one revision.
+//! Retained direct calls and field accesses in one revision.
 use std::collections::HashMap;
 
 use crate::core::{AstArena, SemanticStore, SourceId, SourceSpan, Span, SymbolId, Typed};
@@ -16,7 +16,7 @@ struct IndexedFile {
     method_declarations: Vec<(SymbolId, SourceMethodTarget)>,
 }
 
-/// Index of direct source calls and public field selections with committed body bindings in one session.
+/// Index of direct source calls and source field accesses with committed body bindings in one session.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -93,7 +93,7 @@ impl ResolvedMemberIndex {
                 calls.push(call);
             }
             let mut fields = Vec::new();
-            for &selection in file.named().syntax().member_names.selections() {
+            for selection in file.named().syntax().member_names.term_names() {
                 let Some((field, kind)) = crate::source_field_access::field_binding(
                     file, navigation, selection, bodies, typed_ast, store,
                 ) else {
@@ -159,7 +159,7 @@ impl ResolvedMemberIndex {
             .filter(|(_, target)| target.name.contains(offset))
     }
 
-    /// Gets the committed read or write at a written public field name. The
+    /// Gets the committed read or write at a written field name. The
     /// receiver, the dot and the exclusive token end are outside the usage.
     pub fn field_at(&self, source: SourceId, offset: u32) -> Option<&ResolvedFieldAccess> {
         let fields = &self.files.get(&source)?.fields;
@@ -180,7 +180,7 @@ impl ResolvedMemberIndex {
             .or_else(|| self.field_at(source, offset).map(|f| (f.origin, f.target)))
     }
 
-    /// Identifies the method or public field at its declaration name or one of
+    /// Identifies the method or supported field at its declaration name or one of
     /// its committed, explicitly written usages. Includes unused declarations.
     pub fn member_at(
         &self,
