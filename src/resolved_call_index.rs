@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    constructions: Vec<crate::ResolvedSourceConstruction>,
     parents: Vec<ResolvedSourceParent>,
     class_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     locals: Vec<(SymbolId, SourceMemberTarget)>,
@@ -208,6 +209,29 @@ impl ResolvedMemberIndex {
                     .or_default()
                     .push(parent.origin);
             }
+            let constructions = file
+                .named()
+                .syntax()
+                .member_names
+                .constructions()
+                .iter()
+                .filter_map(|&(root, name)| {
+                    let owner = navigation.class_at(name.start())?;
+                    let bindings = bodies.bindings(owner)?;
+                    let (class, constructor) = crate::source_construction::selected_constructor(
+                        file, root, bindings, typed_ast, store,
+                    )?;
+                    let (_, declaration) = sources.class(class)?;
+                    (declaration.constructor == constructor).then_some(
+                        crate::ResolvedSourceConstruction {
+                            class,
+                            constructor,
+                            origin: SourceSpan::new(file.source(), Span::without_point(name)),
+                            target: *targets.get(&class)?,
+                        },
+                    )
+                })
+                .collect();
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -276,6 +300,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    constructions,
                     parents,
                     class_declarations,
                     locals,
@@ -295,6 +320,22 @@ impl ResolvedMemberIndex {
     /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Looks up a byte within the unqualified class name of a written `new` in
+    /// a checked class body. Returns the selected primary constructor when its
+    /// class is in the indexed sources. Missing bindings, unsupported forms and
+    /// positions outside the half-open name token yield `None`.
+    pub fn construction_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedSourceConstruction> {
+        let sites = &self.files.get(&source)?.constructions;
+        let i = sites.partition_point(|s| s.origin.span().range().end() <= offset);
+        sites
+            .get(i)
+            .filter(|s| s.origin.span().range().contains(offset))
     }
 
     /// Resolves a UTF-8 byte within the name of a single, unqualified, explicit
