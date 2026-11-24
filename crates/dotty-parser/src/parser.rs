@@ -28,6 +28,7 @@ where
     pub(crate) ast: AstArena<Untyped>,
     pub(crate) member_names: crate::SourceMemberNames,
     pub(crate) method_names: Vec<(TreeId<Untyped>, TextRange)>,
+    pub(crate) call_arguments: Vec<crate::CallArgumentList>,
     pub(crate) call_names: Vec<(TextRange, TreeId<Untyped>)>,
     // Matches a written name to the exact callee before consuming an argument list.
     pub(crate) last_written_name: Option<(TreeId<Untyped>, TextRange)>,
@@ -119,6 +120,7 @@ where
             member_names: Default::default(),
             method_names: Vec::new(),
             call_names: Vec::new(),
+            call_arguments: Vec::new(),
             last_written_name: None,
             last_real_token_end,
             last_real_token_kind,

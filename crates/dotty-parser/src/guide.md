@@ -50,3 +50,21 @@ Use [`SourceMemberNames::class_name`] on an ordinary class declaration and
 
 [`SourceMemberNames::constructions`] lists the written type name and application tree
 of each simple explicit `new` in token order, including nested allocations.
+
+A cursor between the parentheses of a completed call selects the innermost
+argument list. The returned index follows written argument order.
+
+```rust
+use dotty_core::{NameInterner, SourceId, SourceText};
+use dotty_lexer::ContextualScanner;
+use dotty_parser::parse_expression_fragment;
+
+let text = "outer(inner(1, 2), 3)";
+let parsed = parse_expression_fragment(SourceText::new(text)?, SourceId::from_index(0),
+    ContextualScanner::new(text)?, &mut NameInterner::new());
+let cursor = text.find(", 2").unwrap() as u32 + 1;
+let inner = parsed.call_arguments.at(cursor).unwrap();
+assert_eq!(inner.argument_index(cursor), Some(1));
+assert_eq!(inner.range.start(), text.find("(1").unwrap() as u32);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```

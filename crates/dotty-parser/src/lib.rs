@@ -16,6 +16,8 @@
 #![deny(missing_docs)]
 #![doc = include_str!("guide.md")]
 
+mod call_arguments;
+pub use call_arguments::{CallArgumentList, SourceCallArguments};
 mod case_clauses;
 mod class_definitions;
 mod compilation_unit;
