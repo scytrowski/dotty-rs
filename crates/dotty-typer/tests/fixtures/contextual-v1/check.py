@@ -29,6 +29,7 @@ SUPPLEMENTAL_CONTROLS = (
     "typer::tests::contextual_arguments::case_class_bound_reports_missing_and_ambiguous_evidence_at_apply",
     "typer::tests::contextual_arguments::case_class_copy_defaults_the_field_and_forwards_the_call_site_witness",
     "typer::tests::contextual_arguments::case_class_copy_reports_missing_and_ambiguous_call_site_evidence",
+    MODULE + "numeric_ops_parent::inherited_constructor_checks_the_argument_against_the_outer_base_view",
 )
 
 

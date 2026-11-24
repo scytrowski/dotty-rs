@@ -920,6 +920,11 @@ For the tested subset, source Typer completion currently supports:
   constructor parameters remain directly available. Curried, contextual, erased,
   by-name, repeated, defaulted, generic, secondary, and private parent
   constructors are rejected.
+- For an inherited binary member class of a directly applied generic parent,
+  the constructor is checked with the outer type arguments of that parent.
+  In Scala 3.9.0's `Fractional[T]`, this makes the parameter of
+  `extends NumericOps(lhs)` use the enclosing trait's `T`. Its typed
+  constructor selection keeps the `Fractional.this` prefix.
 
 Expression typing currently includes typed identifiers, stable term selections,
 ordinary method application on a direct constructor result, literal expressions,

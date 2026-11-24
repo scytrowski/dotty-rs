@@ -9,6 +9,7 @@ mod clauses;
 mod fractional_conversion;
 mod inherited_nested;
 mod lookup;
+mod numeric_ops_parent;
 mod search;
 
 fn upstream(path: &str) -> String {
