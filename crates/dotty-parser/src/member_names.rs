@@ -21,6 +21,7 @@ pub type SourceSelection = SourceTermName;
 pub struct SourceMemberNames {
     pub(super) classes: Vec<(TreeId<Untyped>, TextRange)>,
     pub(super) parents: Vec<(TreeId<Untyped>, TextRange)>,
+    pub(super) constructions: Vec<(TreeId<Untyped>, TextRange)>,
     parameters: Vec<(TreeId<Untyped>, TextRange)>,
     values: Vec<(TreeId<Untyped>, TextRange)>,
     identifiers: Vec<SourceTermName>,
@@ -37,6 +38,13 @@ impl SourceMemberNames {
     /// list. Supply the parent tree from the template in this parse.
     pub fn parent_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
         declaration_name(&self.parents, tree)
+    }
+
+    /// Whole application trees and exact class-name tokens for simple written `new`
+    /// expressions in token order. Includes a bare zero-argument construction.
+    /// Qualified, generic and anonymous class constructions are excluded.
+    pub fn constructions(&self) -> &[(TreeId<Untyped>, TextRange)] {
+        &self.constructions
     }
 
     /// Exact name token for a simple value definition or explicit constructor
@@ -120,6 +128,8 @@ impl SourceMemberNames {
         }
     }
     pub(crate) fn finish(&mut self) {
+        self.constructions
+            .sort_unstable_by_key(|(_, name)| name.start());
         self.identifiers.sort_unstable_by_key(|s| s.name.start());
         self.selections.sort_unstable_by_key(|s| s.name.start());
     }
@@ -144,6 +154,38 @@ fn name_at(entries: &[SourceTermName], offset: u32) -> Option<SourceTermName> {
 mod tests {
     use super::*;
     use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
+    #[test]
+    fn written_constructions_bind_the_name_to_the_whole_application_in_token_order() {
+        let text = "class C { def f() = { new Empty; new Empty(); new /* comment */ `Base`(new Inner()); new pkg.Other(); new Anon() {} } }";
+        let parsed = crate::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            SourceId::from_index(0),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut NameInterner::new(),
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let slice = |r: TextRange| &text[r.start() as usize..r.end() as usize];
+        let sites: Vec<_> = parsed
+            .member_names
+            .constructions()
+            .iter()
+            .map(|&(tree, name)| {
+                let node = parsed.ast.get(tree);
+                assert!(matches!(node.kind, TreeKind::Apply(_)));
+                (slice(name), slice(node.position.unwrap().span().range()))
+            })
+            .collect();
+        assert_eq!(
+            sites,
+            [
+                ("Empty", "new Empty"),
+                ("Empty", "new Empty()"),
+                ("`Base`", "new /* comment */ `Base`(new Inner())"),
+                ("Inner", "new Inner()")
+            ]
+        );
+    }
+
     #[test]
     fn written_class_and_parent_names_exclude_arguments_and_qualified_types() {
         let text = "class `Base`; class A extends /*comment*/ `Base`; class B(start: Int) extends `Base`(start); class C extends pkg.Base";

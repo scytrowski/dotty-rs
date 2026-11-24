@@ -744,7 +744,7 @@ where
             self.new_with_anonymous_template(mark, parents, body)
         } else {
             let parent = parents[0];
-            if matches!(self.ast.get(parent).kind, TreeKind::Apply(_)) {
+            let application = if matches!(self.ast.get(parent).kind, TreeKind::Apply(_)) {
                 if let Some(position) = self.ast.get(parent).position {
                     let end = position.span().range().end();
                     let range =
@@ -767,7 +767,11 @@ where
                         kind: ApplyKind::Regular,
                     }),
                 )
+            };
+            if let Some(name) = self.member_names.parent_name(parent) {
+                self.member_names.constructions.push((application, name));
             }
+            application
         }
     }
 
