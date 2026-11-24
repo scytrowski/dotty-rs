@@ -265,6 +265,26 @@ pub trait ClassPathEntry: Send + Sync {
     }
 }
 
+/// Borrows an entry, including its package index and profiling counters. This lets
+/// separate semantic sessions share an already-open archive or composite classpath.
+impl<E: ClassPathEntry + ?Sized> ClassPathEntry for &E {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        (**self).find_class(name)
+    }
+
+    fn resource_profile(&self) -> crate::class_path::ClassPathResourceProfile {
+        (**self).resource_profile()
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        (**self).contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        (**self).contains_package_prefix(package)
+    }
+}
+
 /// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
 /// `BinaryName` to `<root>/<internal name>.tasty`, preferred, or
 /// `<root>/<internal name>.class` as a fallback (`docs/classloader.md`
