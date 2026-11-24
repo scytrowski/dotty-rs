@@ -138,6 +138,23 @@ impl<'file> MemberSignatureSelection<'_, 'file> {
         definitions: crate::core::Definitions,
         packages: &crate::core::Packages,
     ) -> Result<crate::typer::SignatureCompletion, crate::MemberSignatureError> {
+        self.try_complete_with_resolver(
+            member,
+            store,
+            definitions,
+            packages,
+            crate::core::NoResolver,
+        )
+    }
+
+    pub(crate) fn try_complete_with_resolver(
+        &self,
+        member: SymbolId,
+        store: &mut SemanticStore,
+        definitions: crate::core::Definitions,
+        packages: &crate::core::Packages,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> Result<crate::typer::SignatureCompletion, crate::MemberSignatureError> {
         let (file, _) = self
             .sources
             .declaration(member)
@@ -150,6 +167,7 @@ impl<'file> MemberSignatureSelection<'_, 'file> {
             store,
             definitions,
             packages,
+            resolver,
         )
     }
 }

@@ -146,9 +146,11 @@ pub fn try_complete_member_signature(
         store,
         definitions,
         packages,
+        crate::core::NoResolver,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_complete_selected_member(
     member: SymbolId,
     declaration_for: impl Fn(SymbolId) -> Option<SourceDeclaration>,
@@ -157,6 +159,7 @@ pub(crate) fn try_complete_selected_member(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
+    resolver: impl crate::core::SymbolResolver,
 ) -> Result<SignatureCompletion, MemberSignatureError> {
     let invalid = || MemberSignatureError::InvalidMember(member);
     let declaration = declaration_for(member).ok_or_else(invalid)?;
@@ -184,6 +187,7 @@ pub(crate) fn try_complete_selected_member(
     }
 
     SourceTyper::new(ast, source, index, store, definitions, packages)
+        .with_resolver(Box::new(resolver))
         .try_complete_signature(member, |dep| declaration_for(dep).is_some())
         .map_err(|error| MemberSignatureError::Typing {
             member,

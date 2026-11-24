@@ -1,6 +1,4 @@
-use dotty::classloader::{
-    ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JmodClassPath, LoadingSession,
-};
+use dotty::classloader::{ClasspathSymbolResolver, LoadingSession};
 use dotty::core::{
     Definitions, Packages, SemanticStore, SourceId, SymbolInfo, SymbolKind, SymbolOrigin, Type,
     TypeRefTarget,
@@ -15,10 +13,7 @@ const TEXT: &str = "package demo\nclass Holder(x: External)";
 #[test]
 fn binary_constructor_parameter_and_missing_dependency_use_the_same_source() {
     let fixture = fixture::ExternalDependency::compile();
-    let path = CompositeClassPath::new(vec![
-        Box::new(DirectoryClassPath::new(&fixture.directory)),
-        Box::new(JmodClassPath::new(&fixture.java_base).unwrap()),
-    ]);
+    let path = fixture.classpath();
     for present in [true, false] {
         if !present {
             fixture.remove_external();
@@ -101,6 +96,105 @@ fn binary_constructor_parameter_and_missing_dependency_use_the_same_source() {
             assert_eq!(
                 &TEXT[range.start() as usize..range.end() as usize],
                 "External"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_method_can_be_the_first_use_of_the_external_type_in_a_session() {
+    let fixture = fixture::ExternalDependency::compile();
+    let path = fixture.classpath();
+    let text = "package demo\nclass Echo { def echo(x: External): External = x }";
+    for present in [true, false] {
+        if !present {
+            fixture.remove_external();
+        }
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let id = SourceId::from_index(2);
+        let file = dotty::parse_source(id, text, Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("Echo.scala", &mut store, &mut packages)
+            .unwrap()
+            .into_classes(&store)
+            .unwrap();
+        let owner = &file.classes()[0];
+        let method = owner.methods().next().unwrap().symbol;
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = Default::default();
+        let mut bindings = Default::default();
+        let mut resolver = ClasspathSymbolResolver::new(
+            &path,
+            defs,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut headers = ClassHeaderPhase::try_prepare_with_constructor_resolver(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+            &mut resolver,
+        )
+        .unwrap();
+        assert!(matches!(
+            headers.attempt(owner.symbol).unwrap().completion,
+            SignatureCompletion::Complete(_)
+        ));
+        let selected = sources
+            .member_signatures(headers.finish().ready, &store)
+            .unwrap();
+        let mut phase = dotty::MemberSignaturePhase::new(&selected, &mut store, defs, &packages);
+        if present {
+            assert!(matches!(
+                phase
+                    .attempt_with_resolver(method, &mut resolver)
+                    .unwrap()
+                    .completion,
+                SignatureCompletion::Complete(_)
+            ));
+            let (_, work) = phase.finish_with_body_work();
+            let (_, report) = work.check(
+                owner.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                &mut resolver,
+            );
+            assert!(report.errors.is_empty(), "{report:?}");
+            let SymbolInfo::Complete(ty) = store.symbols.info(method) else {
+                panic!("completed method")
+            };
+            let Type::Method(signature) = store.types.get(*ty) else {
+                panic!("method type")
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(param),
+                ..
+            } = store.types.get(signature.params[0].ty)
+            else {
+                panic!("parameter class")
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(result),
+                ..
+            } = store.types.get(signature.result)
+            else {
+                panic!("result class")
+            };
+            assert_eq!(param, result);
+            assert!(matches!(
+                store.symbols.get(*param).origin,
+                SymbolOrigin::Classfile(_)
+            ));
+        } else {
+            assert!(
+                matches!(phase.attempt_with_resolver(method,&mut resolver),Err(dotty::MemberSignatureError::Typing {member,error:TyperError::TypeNameNotFound {source,..},..}) if *member==method && *source==id)
             );
         }
     }
