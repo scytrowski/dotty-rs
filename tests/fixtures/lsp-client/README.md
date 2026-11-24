@@ -41,6 +41,9 @@ check the exact parameter token and its references in UTF-8 and UTF-16.
 Tests for nested blocks check distinct local declarations and reads before and
 after a sibling method fails. Renaming a local to shadow a parameter redirects
 a read at the same offset; undo restores both reference lists.
+The method signature scenario follows both type annotations in `def copy(x: Base): Base = new Base()`.
+Editing only the parameter type to `Peer` moves one reference. The result and allocation continue to
+point to `Base`. Undo restores all three references in both UTF-8 and UTF-16.
 The construction scenario follows the class, argument and method in `new Base(start).read()`.
 An edit to `new Peer(start)` retargets the allocation and `read` method. Undo restores
 both links, and a separate subclass retains its reference to `Base` throughout.

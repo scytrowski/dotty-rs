@@ -1400,27 +1400,47 @@ fn method_type_annotations_link_to_the_class_and_share_its_references() {
         let result = col(factory, "Base =");
         let allocation = col(factory, "Base()");
         let loc = |uri: &str, line, column| json!({"uri":uri,"range":range(line,column,column+4)});
-        let name = col(base, "Base");
-        let uses = json!([loc(B, 0, input), loc(B, 0, result), loc(B, 0, allocation)]);
-        let all = json!([
-            loc(A, 0, name),
-            loc(B, 0, input),
-            loc(B, 0, result),
-            loc(B, 0, allocation)
-        ]);
-        for pos in [input, result, allocation] {
-            assert_eq!(client.references(B, 0, pos, false), uses);
-            assert_eq!(client.references(B, 0, pos, true), all);
+        for (version, param_type) in [(1, "Base"), (2, "Peer"), (3, "Base")] {
+            if version > 1 {
+                client.edit(B, version, range(0, input, input + 4), param_type);
+                client.diagnostics(B, version, json!([]));
+            }
+            let mut base_uses = vec![loc(B, 0, result), loc(B, 0, allocation)];
+            let mut peer_uses = Vec::new();
+            if param_type == "Base" {
+                base_uses.insert(0, loc(B, 0, input));
+            } else {
+                peer_uses.push(loc(B, 0, input));
+            }
             assert_eq!(
-                client.request(
-                    "textDocument/definition",
-                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
-                ),
-                json!([{"originSelectionRange":range(0,pos,pos+4),"targetUri":A,
-                    "targetRange":range(0,col(base,"class"),name+4),"targetSelectionRange":range(0,name,name+4)}])
+                client.references(A, 0, col(base, "Base"), false),
+                json!(base_uses)
             );
+            assert_eq!(
+                client.references(A, 1, col(peer, "Peer"), false),
+                json!(peer_uses)
+            );
+            for pos in [input, result, allocation] {
+                let (line, provider, class, uses) = if pos == input && param_type == "Peer" {
+                    (1, peer, "Peer", &peer_uses)
+                } else {
+                    (0, base, "Base", &base_uses)
+                };
+                let name = col(provider, class);
+                let mut all = vec![loc(A, line, name)];
+                all.extend_from_slice(uses);
+                assert_eq!(client.references(B, 0, pos, false), json!(uses));
+                assert_eq!(client.references(B, 0, pos, true), json!(all));
+                assert_eq!(
+                    client.request(
+                        "textDocument/definition",
+                        json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+                    ),
+                    json!([{"originSelectionRange":range(0,pos,pos+4),"targetUri":A,
+                        "targetRange":range(line,col(provider,"class"),name+4),"targetSelectionRange":range(line,name,name+4)}])
+                );
+            }
         }
-        assert_eq!(client.references(A, 1, col(peer, "Peer"), false), json!([]));
         client.shutdown();
     }
 }
