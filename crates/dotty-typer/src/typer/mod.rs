@@ -240,12 +240,19 @@ pub struct TypedSourceOutput {
 /// declaration's printed name or source position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypedLocalBinding {
+    source_declaration: (SourceId, TreeId<Untyped>),
     declaration: TreeId<Typed>,
     symbol: SymbolId,
     scope: ScopeId,
 }
 
 impl TypedLocalBinding {
+    /// Original file and untyped declaration. Use the parse and typed arena from
+    /// this session; its source-to-typed index maps this pair to [`Self::declaration`].
+    pub const fn source_declaration(self) -> (SourceId, TreeId<Untyped>) {
+        self.source_declaration
+    }
+
     /// Typed `ValDef` declaration in this typer's arena.
     pub const fn declaration(self) -> TreeId<Typed> {
         self.declaration
@@ -1010,6 +1017,7 @@ impl<'a> SourceTyper<'a> {
             return None;
         }
         Some(TypedLocalBinding {
+            source_declaration: (source, tree),
             declaration,
             symbol,
             scope,
@@ -26450,7 +26458,10 @@ mod tests {
         };
         assert_eq!((outer.symbol(), inner.symbol()), (outer_local, inner_local));
         assert_ne!(outer.scope(), inner.scope());
+        let mut ranges = Vec::new();
         for (tree, binding) in [(outer_local_tree, outer), (inner_local_tree, inner)] {
+            assert_eq!(binding.source_declaration(), (source, tree));
+            ranges.push(parsed.member_names.value_name(tree).unwrap());
             assert_eq!(
                 output.source_typed_index.get(source, tree),
                 Some(binding.declaration())
@@ -26461,6 +26472,7 @@ mod tests {
                 TreeKind::ValDef(_)
             ));
         }
+        assert!(ranges[0].end() < ranges[1].start());
     }
 
     #[test]
