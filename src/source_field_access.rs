@@ -1,10 +1,10 @@
-//! Checked reads and assignments of explicitly selected public source fields.
+//! Checked reads and assignments of written source fields.
 use crate::core::{
     AstArena, SemanticStore, SourceTypedIndex, SymbolId, SymbolKind, SymbolOrigin, TermRefTarget,
     TreeKind, Type, Typed, Untyped, Visibility,
 };
 use crate::core::{SourceDefinition, SourceId, SourceSpan, Span};
-use crate::parser::SourceSelection;
+use crate::parser::{SourceSelection, SourceTermName};
 use crate::source_declarations::DeclarationError;
 use crate::{
     CheckedClassBodies, NamedClassSource, NamedClassSources, SourceFileCalls, SourceMemberTarget,
@@ -30,18 +30,26 @@ pub fn selected_field_access(
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<(SymbolId, FieldAccessKind)> {
-    let node = ast.try_get(selection.tree)?;
-    let source = node.position?.source();
-    let TreeKind::Select(written) = &node.kind else {
-        return None;
-    };
+    field_access(selection, None, ast, bindings, typed, store)
+}
+
+fn field_access(
+    selection: SourceTermName,
+    enclosing_class: Option<SymbolId>,
+    ast: &AstArena<Untyped>,
+    bindings: &SourceTypedIndex,
+    typed: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Option<(SymbolId, FieldAccessKind)> {
+    let written = ast.try_get(selection.tree)?;
+    let source = written.position?.source();
     let id = bindings.get(source, selection.tree)?;
     let node = typed.try_get(id)?;
-    let TreeKind::Select(resolved) = &node.kind else {
-        return None;
-    };
-    if bindings.get(source, written.qualifier)? != resolved.qualifier {
-        return None;
+    match (&written.kind, &node.kind) {
+        (TreeKind::Select(w), TreeKind::Select(r))
+            if bindings.get(source, w.qualifier) == Some(r.qualifier) => {}
+        (TreeKind::Ident(_), TreeKind::Ident(_)) if enclosing_class.is_some() => {}
+        _ => return None,
     }
     let Type::TermRef {
         target: TermRefTarget::Symbol(field),
@@ -55,6 +63,7 @@ pub fn selected_field_access(
     }
     let symbol = store.symbols.get(*field);
     if symbol.kind != SymbolKind::Field
+        || (matches!(written.kind, TreeKind::Ident(_)) && symbol.owner != enclosing_class)
         || symbol.visibility != Visibility::Public
         || !matches!(symbol.origin, SymbolOrigin::Source(_))
     {
@@ -91,8 +100,8 @@ pub struct ResolvedFieldAccess {
 }
 
 impl NamedClassSources<'_> {
-    /// Resolves a byte within an explicit selection of a public body or constructor
-    /// field. Use committed bodies, typed arena and store from the same revision.
+    /// Resolves a byte within a public field selection or a bare use of the enclosing
+    /// class’s public field. Use committed bodies, typed arena and store from the same revision.
     /// Missing files, uncommitted uses and unsupported targets yield `Ok(None)`.
     /// Caller or provider navigation failures preserve their typed error.
     pub fn resolved_field_at(
@@ -107,7 +116,11 @@ impl NamedClassSources<'_> {
             return Ok(None);
         };
         let navigation = file.navigation()?;
-        let Some(selection) = file.named().syntax().member_names.selection_at(offset) else {
+        let names = &file.named().syntax().member_names;
+        let Some(selection) = names
+            .selection_at(offset)
+            .or_else(|| names.identifier_at(offset))
+        else {
             return Ok(None);
         };
         let Some((field, kind)) = field_binding(file, navigation, selection, bodies, typed, store)
@@ -135,8 +148,9 @@ pub(crate) fn field_binding(
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<(SymbolId, FieldAccessKind)> {
-    let bindings = bodies.bindings(navigation.class_at(selection.name.start())?)?;
-    selected_field_access(selection, caller.ast(), bindings, typed, store)
+    let owner = navigation.class_at(selection.name.start())?;
+    let bindings = bodies.bindings(owner)?;
+    field_access(selection, Some(owner), caller.ast(), bindings, typed, store)
 }
 
 pub(crate) fn field_target(
