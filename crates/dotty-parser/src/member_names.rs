@@ -155,6 +155,55 @@ mod tests {
     use super::*;
     use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
     #[test]
+    fn explicit_method_type_identifiers_have_exact_independent_source_ranges() {
+        let text =
+            "class A { def copy(x: /*in*/ `Base`): /*out*/ `Base` = x; def infer(x: Base) = x }";
+        let parsed = crate::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            SourceId::from_index(1),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut NameInterner::new(),
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let mut ranges = Vec::new();
+        for (_, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(def) = &node.kind else {
+                continue;
+            };
+            let [params] = def.value_param_clauses.as_slice() else {
+                continue;
+            };
+            let [param] = params.as_slice() else { continue };
+            let TreeKind::ValDef(param) = &parsed.ast.get(*param).kind else {
+                panic!("parameter")
+            };
+            for tree in [param.tpt, def.tpt] {
+                let node = parsed.ast.get(tree);
+                match &node.kind {
+                    TreeKind::Ident(id) if id.name.is_type() => {
+                        let range = node.position.unwrap().span().range();
+                        assert!(!range.contains(range.end()));
+                        ranges.push((
+                            range.start() as usize,
+                            &text[range.start() as usize..range.end() as usize],
+                        ));
+                    }
+                    TreeKind::TypeTree(_) => assert_eq!(ranges.len(), 3),
+                    _ => panic!("unexpected type tree"),
+                }
+            }
+        }
+        assert_eq!(
+            ranges,
+            [
+                (text.find("`Base`").unwrap(), "`Base`"),
+                (text.rfind("`Base`").unwrap(), "`Base`"),
+                (text.rfind("Base").unwrap(), "Base")
+            ]
+        );
+    }
+
+    #[test]
     fn written_constructions_bind_the_name_to_the_whole_application_in_token_order() {
         let text = "class C { def f() = { new Empty; new Empty(); new /* comment */ `Base`(new Inner()); new pkg.Other(); new Anon() {} } }";
         let parsed = crate::parse_compilation_unit(
