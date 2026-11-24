@@ -808,6 +808,9 @@ for (text, kind, declaration) in [
     let index = check(id, text)?;
     let site = index.symbol_at(id, offset).ok_or("missing read")?;
     assert_eq!(site.kind, kind);
+    let (_, info) = index.symbol_info_at(id, offset).ok_or("missing type")?;
+    let dotty::SourceSymbolSignature::Value(ty) = &info.signature else { panic!("value expected") };
+    assert_eq!((&*info.name, &*ty.name), ("count", "Int"));
     assert_eq!(site.target.name.start(), text.find(declaration).unwrap() as u32);
     assert_eq!(index.references_to(site.symbol), &[site.usage.unwrap()]);
 }
