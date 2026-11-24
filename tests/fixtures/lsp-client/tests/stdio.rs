@@ -1384,3 +1384,43 @@ fn construction_class_argument_and_method_have_independent_definition_links() {
         client.shutdown();
     }
 }
+
+#[test]
+fn method_type_annotations_link_to_the_class_and_share_its_references() {
+    let base = "/* 😀 */ class Base";
+    let peer = "/* 😀 */ class Peer";
+    let factory = "class Factory { def copy(/* 😀 */ x: Base): Base = new Base() }";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &[base, peer].join("\n"));
+        client.open(B, factory);
+        client.diagnostics(B, 1, json!([]));
+        let col = |text, token| token_column(encoding, text, token);
+        let input = col(factory, "Base)");
+        let result = col(factory, "Base =");
+        let allocation = col(factory, "Base()");
+        let loc = |uri: &str, line, column| json!({"uri":uri,"range":range(line,column,column+4)});
+        let name = col(base, "Base");
+        let uses = json!([loc(B, 0, input), loc(B, 0, result), loc(B, 0, allocation)]);
+        let all = json!([
+            loc(A, 0, name),
+            loc(B, 0, input),
+            loc(B, 0, result),
+            loc(B, 0, allocation)
+        ]);
+        for pos in [input, result, allocation] {
+            assert_eq!(client.references(B, 0, pos, false), uses);
+            assert_eq!(client.references(B, 0, pos, true), all);
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+                ),
+                json!([{"originSelectionRange":range(0,pos,pos+4),"targetUri":A,
+                    "targetRange":range(0,col(base,"class"),name+4),"targetSelectionRange":range(0,name,name+4)}])
+            );
+        }
+        assert_eq!(client.references(A, 1, col(peer, "Peer"), false), json!([]));
+        client.shutdown();
+    }
+}
