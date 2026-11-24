@@ -1070,7 +1070,31 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             (Type::ThisType { class: left }, Type::ThisType { class: right }) => {
                 return Ok(left == right);
             }
-            (Type::TypeRef { .. }, Type::TypeRef { .. }) => {}
+            (
+                Type::TypeRef { prefix: path, .. },
+                Type::TypeRef {
+                    prefix: projected, ..
+                },
+            ) => {
+                // A stable p: Outer[A] supplies an instance of Outer[A]#Inner.
+                // Two different singleton paths must still compare by identity.
+                let (path, projected) = (*path, *projected);
+                if let Type::Applied { tycon, .. } = self.type_at(projected)?
+                    && let Some(owner) = self.typer.store.symbols.owner(left.class)
+                    && self.type_at(*tycon)?.reference_symbol() == Some(owner)
+                    && let Type::TermRef {
+                        target: dotty_core::types::TermRefTarget::Symbol(param),
+                        ..
+                    } = self.type_at(path)?
+                    && self.typer.store.symbols.contains(*param)
+                    && self.typer.store.symbols.get(*param).kind == SymbolKind::Parameter
+                {
+                    let widened = TypeNormalizer::new(self.typer.store)
+                        .widen_term_ref(path)
+                        .map_err(TypeRelationError::Normalization)?;
+                    return self.is_subtype(widened, projected);
+                }
+            }
             _ => return Ok(false),
         }
 

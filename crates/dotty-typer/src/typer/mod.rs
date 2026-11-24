@@ -10328,6 +10328,7 @@ mod tests {
     mod method_parameter_capture;
     mod nested_context_client;
     mod nested_context_evidence;
+    mod nested_conversion_factories;
 
     #[test]
     fn function1_expectation_infers_lambda_parameter_and_checks_body() {
