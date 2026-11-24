@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::core::{AstArena, SemanticStore, SourceId, SourceSpan, Span, SymbolId, Typed};
 use crate::source_declarations::DeclarationDiagnostic;
+use crate::source_field_access::TermAccess;
 use crate::{
     CheckedClassBodies, NamedClassSources, ResolvedFieldAccess, ResolvedSourceCall,
     SourceMemberTarget, SourceMethodParameter, SourceMethodTarget,
@@ -11,6 +12,7 @@ use crate::{
 #[derive(Debug)]
 struct IndexedFile {
     parameters: Vec<SourceMethodParameter>,
+    parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -95,29 +97,48 @@ impl ResolvedMemberIndex {
                     .push(call.origin);
                 calls.push(call);
             }
+            let parameter_slots: HashMap<_, _> = parameters
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.parameter, i))
+                .collect();
             let mut fields = Vec::new();
-            for selection in file.named().syntax().member_names.term_names() {
-                let Some((field, kind)) = crate::source_field_access::field_binding(
-                    file, navigation, selection, bodies, typed_ast, store,
+            let mut parameter_uses = Vec::new();
+            for name in file.named().syntax().member_names.term_names() {
+                let Some(access) = crate::source_field_access::term_binding(
+                    file, navigation, name, bodies, typed_ast, store,
                 ) else {
                     continue;
                 };
-                if let Some(&target) = targets.get(&field) {
-                    let origin =
-                        SourceSpan::new(file.source(), Span::without_point(selection.name));
-                    index.references.entry(field).or_default().push(origin);
-                    fields.push(ResolvedFieldAccess {
-                        origin,
-                        field,
-                        kind,
-                        target,
-                    });
-                }
+                let origin = SourceSpan::new(file.source(), Span::without_point(name.name));
+                let symbol = match access {
+                    TermAccess::Parameter(id) => {
+                        let Some(&slot) = parameter_slots.get(&id) else {
+                            continue;
+                        };
+                        parameter_uses.push((origin, slot));
+                        id
+                    }
+                    TermAccess::Field(field, kind) => {
+                        let Some(&target) = targets.get(&field) else {
+                            continue;
+                        };
+                        fields.push(ResolvedFieldAccess {
+                            origin,
+                            field,
+                            kind,
+                            target,
+                        });
+                        field
+                    }
+                };
+                index.references.entry(symbol).or_default().push(origin);
             }
             index.files.insert(
                 file.source(),
                 IndexedFile {
                     parameters,
+                    parameter_uses,
                     calls,
                     fields,
                     field_declarations,
@@ -163,16 +184,37 @@ impl ResolvedMemberIndex {
             .filter(|(_, target)| target.name.contains(offset))
     }
 
-    /// Finds a named parameter by its declaration token, including unused formals.
+    /// Finds a named parameter at its declaration or a committed bare read.
+    /// Includes unused declarations and successful members of a partial body.
     /// Only ordinary parameters of class methods with one value list are indexed.
     /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
     pub fn parameter_at(&self, source: SourceId, offset: u32) -> Option<SourceMethodParameter> {
+        if let Some((_, parameter)) = self.parameter_use_at(source, offset) {
+            return Some(parameter);
+        }
         let parameters = &self.files.get(&source)?.parameters;
         let i = parameters.partition_point(|p| p.target.name.end() <= offset);
         parameters
             .get(i)
             .copied()
             .filter(|p| p.target.name.contains(offset))
+    }
+
+    fn parameter_use_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<(SourceSpan, SourceMethodParameter)> {
+        let file = self.files.get(&source)?;
+        let i = file
+            .parameter_uses
+            .partition_point(|(s, _)| s.span().range().end() <= offset);
+        let &(origin, slot) = file.parameter_uses.get(i)?;
+        origin
+            .span()
+            .range()
+            .contains(offset)
+            .then(|| (origin, file.parameters[slot]))
     }
 
     /// Gets the committed read or write at a written field name. The

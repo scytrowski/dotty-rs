@@ -50,3 +50,71 @@ fn overloaded_methods_own_their_exact_parameter_declarations_before_body_checkin
         );
     }
 }
+
+#[test]
+fn committed_parameter_reads_respect_shadowing_and_partial_body_rollback() {
+    let text = "class A { var count: Int = 0; def set(count: Int): Unit = this.count = count; def read(count: Int): Int = { val before = count; { val count = 2; count }; before + count }; def bad(count: Int): Int = count + false }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(7, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let class = &file.classes()[0];
+    let (body, report) = sources
+        .check_class_body(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    assert!(index.diagnostics().is_empty());
+    let names: Vec<_> = text.match_indices("count").map(|(i, _)| i as u32).collect();
+    let [
+        field,
+        setter,
+        lhs,
+        rhs,
+        reader,
+        before,
+        local,
+        local_read,
+        after,
+        bad,
+        bad_read,
+    ] = names[..]
+    else {
+        panic!("fixture names")
+    };
+    let at = |offset| index.parameter_at(file.source(), offset);
+    let set = at(setter).unwrap();
+    let read = at(reader).unwrap();
+    assert_ne!(set.parameter, read.parameter);
+    assert_eq!(at(rhs), Some(set));
+    assert_eq!(at(before), Some(read));
+    assert_eq!(at(after), Some(read));
+    for pos in [field, lhs, local, local_read, bad_read] {
+        assert!(at(pos).is_none(), "offset {pos}");
+    }
+    assert_eq!(
+        index.field_at(file.source(), lhs).unwrap().kind,
+        crate::FieldAccessKind::Write
+    );
+    assert!(index.references_to(at(bad).unwrap().parameter).is_empty());
+    let offsets = |p| {
+        index
+            .references_to(p)
+            .iter()
+            .map(|s| s.span().range().start())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(offsets(set.parameter), [rhs]);
+    assert_eq!(offsets(read.parameter), [before, after]);
+}
