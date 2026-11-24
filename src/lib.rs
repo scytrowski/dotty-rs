@@ -129,7 +129,7 @@ pub mod source_declarations;
 
 mod source_declaration_index;
 pub use source_declaration_index::{
-    SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
+    SignatureDeclaration, SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
 
 mod source_file_calls;
