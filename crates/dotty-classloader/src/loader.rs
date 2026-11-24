@@ -216,27 +216,6 @@ fn direct_template_stat_address(
     })
 }
 
-#[allow(dead_code)]
-struct BorrowedClassPath<'a, E>(&'a E);
-
-impl<E: ClassPathEntry> ClassPathEntry for BorrowedClassPath<'_, E> {
-    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
-        self.0.find_class(name)
-    }
-
-    fn resource_profile(&self) -> crate::class_path::ClassPathResourceProfile {
-        self.0.resource_profile()
-    }
-
-    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-        self.0.contains_package(package)
-    }
-
-    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-        self.0.contains_package_prefix(package)
-    }
-}
-
 fn symbol_matches_binary_name(
     store: &SemanticStore,
     symbol: SymbolId,
@@ -1515,7 +1494,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let result = (|| {
             let session = std::mem::replace(&mut self.session, LoadingSession::new());
             let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
-                BorrowedClassPath(&self.class_path),
+                &self.class_path,
                 self.definitions,
                 session,
             );
@@ -2890,7 +2869,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<(SymbolId, SymbolId), SemanticTastyLoadError> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
-            BorrowedClassPath(&self.class_path),
+            &self.class_path,
             self.definitions,
             session,
         );
@@ -4589,7 +4568,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // positive cache, origin and rollback journals to this loader.
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
-            BorrowedClassPath(&self.class_path),
+            &self.class_path,
             self.definitions,
             session,
         );

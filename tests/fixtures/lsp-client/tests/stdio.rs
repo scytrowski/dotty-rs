@@ -24,6 +24,14 @@ struct Client {
 
 impl Client {
     fn start(encoding: &str, initially_clean: Vec<&'static str>) -> Self {
+        Self::start_with_options(encoding, initially_clean, Value::Null)
+    }
+
+    fn start_with_options(
+        encoding: &str,
+        initially_clean: Vec<&'static str>,
+        options: Value,
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_dotty-lsp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -49,7 +57,7 @@ impl Client {
         let init = client.request(
             "initialize",
             json!({
-                "processId": null, "rootUri": null,
+                "processId": null, "rootUri": null, "initializationOptions": options,
                 "capabilities": {
                     "general": {"positionEncodings": [encoding]},
                     "textDocument": {
@@ -1497,6 +1505,96 @@ fn constructor_type_annotations_link_to_the_class_and_share_its_references() {
                 }
             }
         }
+        client.shutdown();
+    }
+}
+
+#[path = "../../external-dependency/fixture.rs"]
+mod external_fixture;
+
+#[test]
+fn removing_a_compiled_dependency_reports_its_exact_type_token() {
+    use dotty::core::DocumentText;
+    use dotty::{SemanticIssue, SemanticPhase, typer::TyperError};
+    use dotty_lsp::analysis::{Document, Problem, analyze_with_classpath};
+    let fixture = external_fixture::ExternalDependency::compile();
+    let path = fixture.classpath();
+    let line = "class Holder(/* 😀 */ x: External) { def value(): External = x }";
+    let text = format!("package demo\n{line}");
+    let docs = [(
+        B.to_owned(),
+        Document {
+            version: 1,
+            text: std::sync::Arc::new(DocumentText::new(text.clone()).unwrap()),
+        },
+    )]
+    .into();
+    assert!(
+        analyze_with_classpath(&docs, Some(&path)).files[B]
+            .problems
+            .is_empty()
+    );
+    let clients: Vec<_> = ["utf-8", "utf-16"]
+        .into_iter()
+        .map(|encoding| {
+            let mut client = Client::start_with_options(
+                encoding,
+                vec![],
+                json!({"classDirectory":fixture.directory}),
+            );
+            client.open(B, &text);
+            client.diagnostics(B, 1, json!([]));
+            let declaration = token_column(encoding, line, "x:");
+            let usage = token_column(encoding, line, "= x") + 2;
+            let definition = client.request(
+                "textDocument/definition",
+                json!({"textDocument":{"uri":B},"position":{"line":1,"character":usage}}),
+            );
+            assert_eq!(
+                definition,
+                json!([{
+                    "originSelectionRange": range(1, usage, usage + 1),
+                    "targetUri": B,
+                    "targetRange": range(1, declaration, declaration + "x: External".len()),
+                    "targetSelectionRange": range(1, declaration, declaration + 1)
+                }])
+            );
+            (encoding, client)
+        })
+        .collect();
+    fixture.remove_external();
+    let analysis = analyze_with_classpath(&docs, Some(&path));
+    let [Problem::Semantic(issue)] = analysis.files[B].problems.as_slice() else {
+        panic!("one semantic diagnostic")
+    };
+    assert_eq!(issue.phase, SemanticPhase::Constructor);
+    let SemanticIssue::Typing(report) = &issue.issue else {
+        panic!("typed error")
+    };
+    assert!(
+        matches!(report.error(),TyperError::TypeNameNotFound {source,..} if Some(*source)==analysis.source(B))
+    );
+    let location = report.location().unwrap();
+    assert_eq!(Some(location.source()), analysis.source(B));
+    let range_bytes = location.span().range();
+    assert_eq!(
+        &text[range_bytes.start() as usize..range_bytes.end() as usize],
+        "External"
+    );
+    for (encoding, mut client) in clients {
+        // Reopen the same text to trigger fresh analysis in the running server.
+        client.notify("textDocument/didClose", json!({"textDocument":{"uri":B}}));
+        let Message::Notification(closed) = client.receive() else {
+            panic!("close diagnostic")
+        };
+        assert_eq!(closed.method, "textDocument/publishDiagnostics");
+        assert_eq!(closed.params, json!({"uri":B,"diagnostics":[]}));
+        client.open(B, &text);
+        let col = token_column(encoding, line, "External");
+        client.diagnostics(B, 1, json!([{
+            "range": range(1, col, col + "External".len()), "severity": 1,
+            "source": "dotty", "code": "typer.type_name_not_found", "message": "Unknown type name"
+        }]));
         client.shutdown();
     }
 }

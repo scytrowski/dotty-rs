@@ -2,9 +2,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
+use dotty::classloader::{ClasspathSymbolResolver, CompositeClassPath, LoadingSession};
 use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
-    SymbolId, Typed,
+    SymbolId, SymbolResolver, Typed,
 };
 use dotty::{
     CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
@@ -136,6 +137,13 @@ fn report_blockages(report: SignatureBlockageReport, results: &mut HashMap<Sourc
 }
 
 pub fn analyze(docs: &Documents) -> Analysis {
+    analyze_with_classpath(docs, None)
+}
+
+pub fn analyze_with_classpath(
+    docs: &Documents,
+    classpath: Option<&CompositeClassPath>,
+) -> Analysis {
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
@@ -157,7 +165,27 @@ pub fn analyze(docs: &Documents) -> Analysis {
         }
     }
     let members = match NamedClassSources::new(&units, &store) {
-        Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &mut results),
+        Ok(sources) => {
+            let mut external = classpath.map(|path| {
+                ClasspathSymbolResolver::new(
+                    path,
+                    defs,
+                    LoadingSession::with_packages(packages.snapshot()),
+                )
+            });
+            let resolver: &mut dyn SymbolResolver = match &mut external {
+                Some(resolver) => resolver,
+                None => &mut NoResolver,
+            };
+            analyze_sources(
+                &sources,
+                &mut store,
+                defs,
+                &packages,
+                &mut results,
+                resolver,
+            )
+        }
         Err(error) => {
             for result in results.values_mut() {
                 result.problems.push(Problem::Sources(error));
@@ -182,11 +210,19 @@ fn analyze_sources(
     defs: Definitions,
     packages: &Packages,
     results: &mut HashMap<SourceId, FileResult>,
+    resolver: &mut dyn SymbolResolver,
 ) -> ResolvedMemberIndex {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
-    let mut phase =
-        ClassHeaderPhase::prepare(sources, store, defs, packages, &mut arena, &mut bindings);
+    let mut phase = ClassHeaderPhase::prepare_with_constructor_resolver(
+        sources,
+        store,
+        defs,
+        packages,
+        &mut arena,
+        &mut bindings,
+        &mut *resolver,
+    );
     let mut queue: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
     while let Some(symbol) = queue.pop_front() {
         if let Ok(attempt) = phase.attempt(symbol) {
@@ -205,7 +241,7 @@ fn analyze_sources(
     let mut signatures = MemberSignaturePhase::new(&selection, store, defs, packages);
     queue.extend(selection.members().iter().copied());
     while let Some(member) = queue.pop_front() {
-        if let Ok(attempt) = signatures.attempt(member) {
+        if let Ok(attempt) = signatures.attempt_with_resolver(member, &mut *resolver) {
             queue.extend(attempt.retry);
         }
     }
@@ -217,7 +253,7 @@ fn analyze_sources(
     report_blockages(blocked, results);
     let mut bodies = CheckedClassBodies::default();
     for symbol in headers.ready {
-        let (body, report) = work.check(symbol, store, defs, packages, &mut arena, NoResolver);
+        let (body, report) = work.check(symbol, store, defs, packages, &mut arena, &mut *resolver);
         for diagnostic in report.into_semantic_diagnostics(sources) {
             record_semantic(results, diagnostic);
         }

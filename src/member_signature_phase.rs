@@ -136,13 +136,28 @@ impl<'s, 'file> MemberSignaturePhase<'s, 'file> {
     /// unresolved waiters to retry. A repeated direct rejection returns the
     /// original error without rerunning the typer or duplicating its report.
     pub fn attempt(&mut self, member: SymbolId) -> Result<SignatureAttempt, &MemberSignatureError> {
+        self.attempt_with_resolver(member, crate::core::NoResolver)
+    }
+
+    /// Attempts a selected signature using the caller's semantic resolver.
+    /// Reuse the same resolver, store, package identities and classpath for
+    /// retries and subsequent body checks in this revision. Failed attempts
+    /// keep their typed errors and roll back newly loaded semantic state.
+    pub fn attempt_with_resolver(
+        &mut self,
+        member: SymbolId,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> Result<SignatureAttempt, &MemberSignatureError> {
         if let Some(&index) = self.failure_indices.get(&member) {
             return Err(&self.failures[index]);
         }
-        match self
-            .selection
-            .try_complete(member, self.store, self.definitions, self.packages)
-        {
+        match self.selection.try_complete_with_resolver(
+            member,
+            self.store,
+            self.definitions,
+            self.packages,
+            resolver,
+        ) {
             Ok(completion) => Ok(self.observed.record(member, completion, self.store)),
             Err(error) => {
                 self.observed.graph.record_failure(member);

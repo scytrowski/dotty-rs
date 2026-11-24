@@ -54,12 +54,37 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
         arena: &'s mut AstArena<Typed>,
         bindings: &'s mut ClassHeaderBindings,
     ) -> Self {
+        Self::prepare_with_constructor_resolver(
+            sources,
+            store,
+            definitions,
+            packages,
+            arena,
+            bindings,
+            crate::core::NoResolver,
+        )
+    }
+
+    /// As [`Self::prepare`], consulting the supplied resolver while completing
+    /// constructor parameter types. Use one resolver with the naming session's
+    /// package identities. Its borrow ends after preparation. Independent
+    /// constructors continue after failure and retain their own typed reports.
+    pub fn prepare_with_constructor_resolver(
+        sources: &'s NamedClassSources<'file>,
+        store: &'s mut SemanticStore,
+        definitions: Definitions,
+        packages: &'s Packages,
+        arena: &'s mut AstArena<Typed>,
+        bindings: &'s mut ClassHeaderBindings,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> Self {
         let failures = sources
-            .prepare_class_constructors(
+            .constructors_with_resolver(
                 sources.classes().map(|(_, c)| c.symbol),
                 store,
                 definitions,
                 packages,
+                resolver,
             )
             .filter_map(Result::err)
             .collect::<Vec<_>>();
@@ -81,12 +106,36 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
         arena: &'s mut AstArena<Typed>,
         bindings: &'s mut ClassHeaderBindings,
     ) -> Result<Self, ClassHeaderFailure> {
+        Self::try_prepare_with_constructor_resolver(
+            sources,
+            store,
+            definitions,
+            packages,
+            arena,
+            bindings,
+            crate::core::NoResolver,
+        )
+    }
+
+    /// As [`Self::try_prepare`], using the session's resolver to complete
+    /// constructor parameter types. Returns the first typed failure after
+    /// rolling back that constructor, retaining earlier successful signatures.
+    pub fn try_prepare_with_constructor_resolver(
+        sources: &'s NamedClassSources<'file>,
+        store: &'s mut SemanticStore,
+        definitions: Definitions,
+        packages: &'s Packages,
+        arena: &'s mut AstArena<Typed>,
+        bindings: &'s mut ClassHeaderBindings,
+        resolver: impl crate::core::SymbolResolver,
+    ) -> Result<Self, ClassHeaderFailure> {
         sources
-            .prepare_class_constructors(
+            .constructors_with_resolver(
                 sources.classes().map(|(_, class)| class.symbol),
                 store,
                 definitions,
                 packages,
+                resolver,
             )
             .try_for_each(|result| result.map(|_| ()))?;
         Ok(Self::new(

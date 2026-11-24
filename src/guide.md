@@ -445,6 +445,58 @@ failures also identify its primary constructor. Use the report's location to
 find the failing expression when a parent is completed recursively.
 A lower-level typer caller can use [`ReportedTyperError::from_class`] directly.
 
+### Supply compiled dependencies during signature completion
+
+After naming all source files, create a [`classloader::ClasspathSymbolResolver`]
+using the same definitions and a snapshot of the source package registry.
+A client can borrow an already-open [`classloader::CompositeClassPath`] across
+revisions. Each new semantic store needs a fresh loading session and resolver.
+A successful binary lookup can then share canonical symbols between constructor
+parameters, method signatures and bodies in that revision.
+
+The example uses an empty classpath to inspect the typed failure without a
+JDK. A Java client classpath can contain a [`classloader::DirectoryClassPath`]
+for compiled dependencies and a [`classloader::JmodClassPath`] for
+`java.base.jmod`, which supplies `java/lang/Object` and its dependencies.
+
+```rust
+use dotty::{ClassHeaderError, ClassHeaderPhase, NamedClassSources, parse_source};
+use dotty::classloader::{ClasspathSymbolResolver, CompositeClassPath, LoadingSession};
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::TyperError;
+
+let text = "package demo\nclass Holder(x: External)";
+# let source = SourceId::from_index(0);
+# let mut store = SemanticStore::new();
+# let defs = Definitions::bootstrap(&mut store);
+# let mut packages = Packages::new();
+# let file = parse_source(source, text, Default::default())?.bind(&mut store.names)
+#     .name("Holder.scala", &mut store, &mut packages)?.into_classes(&store)?;
+let sources = NamedClassSources::new([&file], &store)?;
+let path = CompositeClassPath::new(vec![]);
+let mut resolver = ClasspathSymbolResolver::new(
+    &path, defs, LoadingSession::with_packages(packages.snapshot()),
+);
+let mut arena = Default::default();
+let mut bindings = Default::default();
+let failure = ClassHeaderPhase::try_prepare_with_constructor_resolver(
+    &sources, &mut store, defs, &packages, &mut arena, &mut bindings, &mut resolver,
+).expect_err("demo.External is missing");
+let ClassHeaderError::Typing(report) = failure.error else { panic!("expected a type error") };
+assert!(matches!(report.error(), TyperError::TypeNameNotFound { .. }));
+let range = report.location().ok_or("missing type location")?.span().range();
+assert_eq!(&text[range.start() as usize..range.end() as usize], "External");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+[`ClassHeaderPhase::prepare_with_constructor_resolver`] keeps constructor
+failures while processing independent siblings. Both preparation policies borrow
+the resolver for constructor signatures. When checking selected members, pass it
+again to [`MemberSignaturePhase::attempt_with_resolver`] and
+[`ClassBodyWork::check`]. [`ResolvedMemberIndex`] reports source targets in
+the selected files. A class loaded from bytecode has no defining source range
+there.
+
 ## Report a semantic diagnostic after analysis
 
 The compiler can stop at the first rejected constructor and inspect the same
