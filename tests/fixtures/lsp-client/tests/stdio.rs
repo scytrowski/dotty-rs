@@ -1444,3 +1444,44 @@ fn method_type_annotations_link_to_the_class_and_share_its_references() {
         client.shutdown();
     }
 }
+
+#[test]
+fn constructor_type_annotations_link_to_the_class_and_share_its_references() {
+    let model = ["/* 😀 */ class Base", "/* 😀 */ class Peer"];
+    let holder = "class Holder(/* 😀 */ seed: Base, val first: Base, var next: Peer)";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &model.join("\n"));
+        client.open(B, holder);
+        client.diagnostics(B, 1, json!([]));
+        let col = |text, token| token_column(encoding, text, token);
+        let positions = [
+            col(holder, "Base, val"),
+            col(holder, "Base, var"),
+            col(holder, "Peer)"),
+        ];
+        for (line, class, offsets) in [(0, "Base", &positions[..2]), (1, "Peer", &positions[2..])] {
+            let name = col(model[line], class);
+            let name_range = range(line, name, name + class.len());
+            let target_range = range(line, col(model[line], "class"), name + class.len());
+            let uses: Vec<_> = offsets
+                .iter()
+                .map(|&pos| json!({"uri":B,"range":range(0,pos,pos+class.len())}))
+                .collect();
+            assert_eq!(client.references(A, line, name, false), json!(uses));
+            let mut all = vec![json!({"uri":A,"range":name_range})];
+            all.extend_from_slice(&uses);
+            for &pos in offsets {
+                assert_eq!(client.references(B, 0, pos, true), json!(all));
+                assert_eq!(
+                    client.request(
+                        "textDocument/definition",
+                        json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+                    ),
+                    json!([{"targetUri":A,"targetRange":target_range,"targetSelectionRange":name_range,"originSelectionRange":range(0,pos,pos+class.len())}])
+                );
+            }
+        }
+        client.shutdown();
+    }
+}
