@@ -1801,7 +1801,6 @@ where
             requested,
             &template.stats,
             false,
-            package,
             &class_type_parameters,
             &parameter_addresses,
             &mut profiled_bare,
@@ -3247,11 +3246,11 @@ fn decode_members(
     owner: &BinaryName,
     stats: &[RawTree<'_>],
     retain_projected_result: bool,
-    package: &str,
     class_type_parameters: &HashMap<u32, u32>,
     parameter_addresses: &HashMap<(*const u8, usize), u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
+    let package = owner.package_path();
     let mut fields = Vec::new();
     let mut methods = Vec::new();
 

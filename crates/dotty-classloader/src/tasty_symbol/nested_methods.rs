@@ -115,7 +115,6 @@ pub(crate) fn nested_methods(
                 &binary,
                 &template.stats,
                 true,
-                owner.package_path(),
                 &class_parameters,
                 &addresses,
                 &mut |_, _| None,
