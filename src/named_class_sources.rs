@@ -681,8 +681,7 @@ mod tests {
         let defs = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
         let target_text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";
-        let text =
-            "class B { def yes(a: A): Int = a.take(false); def skipped(a: A): Int = a.take(1) }";
+        let text = "class B { def yes(a: A): Int = a.take(false); def number(a: A): Int = a.take(42); def skipped(a: A): Int = a.take(1) }";
         let target = named(42, target_text, &mut store, &mut packages);
         let caller = named(8, text, &mut store, &mut packages);
         let sources = NamedClassSources::new([&caller, &target], &store).unwrap();
@@ -704,7 +703,7 @@ mod tests {
             .unwrap();
         let mut phase = crate::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
         let owner = &caller.classes()[0];
-        for d in target.classes()[0].methods().chain(owner.methods().take(1)) {
+        for d in target.classes()[0].methods().chain(owner.methods().take(2)) {
             let _ = phase.attempt(d.symbol).unwrap();
         }
         let (_, work) = phase.finish_with_body_work();
@@ -726,6 +725,25 @@ mod tests {
                 .unwrap()
         };
         let byte = text.find("take").unwrap() as u32;
+        for (spelling, method) in [("take(false)", 1), ("take(42)", 0)] {
+            let start = text.find(spelling).unwrap() as u32;
+            let resolve = |offset| {
+                sources
+                    .resolved_call_at(caller.source(), offset, &bodies, &arena, &store)
+                    .unwrap()
+            };
+            let call = resolve(start + 1).unwrap();
+            assert_eq!(
+                call.method,
+                target.classes()[0].methods().nth(method).unwrap().symbol
+            );
+            assert_eq!(call.origin.source(), caller.source());
+            let origin = call.origin.span().range();
+            assert_eq!((origin.start(), origin.end()), (start, start + 4));
+            assert_eq!(Some(call.target), lookup(caller.source(), start));
+            assert!(resolve(start - 1).is_none());
+            assert!(resolve(start + 4).is_none());
+        }
         let hit = lookup(caller.source(), byte + 1).unwrap();
         assert_eq!(hit.source, target.source());
         let slice = |r: crate::core::TextRange| &target_text[r.start() as usize..r.end() as usize];

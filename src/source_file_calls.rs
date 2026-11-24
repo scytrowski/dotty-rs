@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
-    SymbolId, SymbolOrigin, TextRange, TreeKind, Typed, Untyped,
+    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceSpan,
+    SourceTypedIndex, Span, SymbolId, SymbolOrigin, TextRange, TreeId, TreeKind, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBodies;
 use crate::parser::{ParseResult, SourceCallNames};
@@ -17,6 +17,17 @@ pub struct SourceMethodTarget {
     pub declaration: TextRange,
     /// UTF-8 byte range of the written method name token.
     pub name: TextRange,
+}
+
+/// A written direct call resolved to a source method in the same revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedSourceCall {
+    /// Half-open UTF-8 byte range of the written callee token in the caller.
+    pub origin: SourceSpan,
+    /// Selected overload in the originating semantic store.
+    pub method: SymbolId,
+    /// Source ranges of that overload in its defining file.
+    pub target: SourceMethodTarget,
 }
 
 #[derive(Debug)]
@@ -179,11 +190,22 @@ impl SourceFileCalls {
         store: &SemanticStore,
         bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
     ) -> Option<SymbolId> {
-        let call = self.call_names().call_at(offset)?;
+        let entry = self.call_names().call_name_at(offset)?;
+        self.method_for_call(entry, ast, typed_ast, store, bindings)
+    }
+
+    fn method_for_call<'a>(
+        &self,
+        (name, call): (TextRange, TreeId<Untyped>),
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
+    ) -> Option<SymbolId> {
         if ast.try_get(call)?.position?.source() != self.call_names().source() {
             return None;
         }
-        let bindings = bindings(self.class_at(offset)?)?;
+        let bindings = bindings(self.class_at(name.start())?)?;
         crate::jvm_class_plan::selected_method(bindings, call, ast, typed_ast, store)
     }
 
@@ -279,22 +301,60 @@ impl crate::NamedClassSources<'_> {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
     ) -> Result<Option<SourceMethodTarget>, DeclarationError> {
+        Ok(self
+            .resolved_call_at(source, offset, bodies, typed_ast, store)?
+            .map(|call| call.target))
+    }
+
+    /// Resolves a byte inside the written name of a direct parenthesized source
+    /// call using this session's committed body mappings, including partial bodies.
+    /// Returns the caller token, exact overload and target ranges together. Missing
+    /// bindings, source declarations or tokens yield `Ok(None)`; indexing either
+    /// file can return its original declaration error.
+    pub fn resolved_call_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+        bodies: &crate::CheckedClassBodies,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Result<Option<ResolvedSourceCall>, DeclarationError> {
         let Some(caller) = self.file(source) else {
             return Ok(None);
         };
-        let Some((source, method)) = caller.navigation()?.source_method_at(
-            offset,
-            caller.ast(),
-            typed_ast,
-            store,
-            |owner| bodies.bindings(owner),
-        ) else {
+        let calls = caller.navigation()?;
+        let Some(entry) = calls.call_names().call_name_at(offset) else {
+            return Ok(None);
+        };
+        let Some(method) = calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
+            bodies.bindings(owner)
+        }) else {
+            return Ok(None);
+        };
+        self.resolved_target(source, entry.0, method, store)
+    }
+
+    fn resolved_target(
+        &self,
+        caller: SourceId,
+        name: TextRange,
+        method: SymbolId,
+        store: &SemanticStore,
+    ) -> Result<Option<ResolvedSourceCall>, DeclarationError> {
+        let SymbolOrigin::Source(source) = store.symbols.get(method).origin else {
             return Ok(None);
         };
         let Some(provider) = self.file(source) else {
             return Ok(None);
         };
-        Ok(provider.navigation()?.target(source, method))
+        Ok(provider
+            .navigation()?
+            .target(source, method)
+            .map(|target| ResolvedSourceCall {
+                origin: SourceSpan::new(caller, Span::without_point(name)),
+                method,
+                target,
+            }))
     }
 }
 
