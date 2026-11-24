@@ -69,3 +69,50 @@ fn bare_public_access_uses_the_committed_symbol_and_assignment() {
         }
     });
 }
+
+#[test]
+fn own_private_body_fields_require_the_declaring_receiver_and_canonical_definition() {
+    let text = "class A(start: Int) { private val seed: Int = start; private var count: Int = seed; def read(): Int = count; def set(count: Int): Unit = this.count = count; def other(a: A): Int = a.count }";
+    with_checked(text, |sources, bodies, arena, store| {
+        let (file, class) = sources.classes().next().unwrap();
+        let fields: Vec<_> = class.fields().map(|f| f.symbol).collect();
+        let at = |offset: usize| {
+            sources
+                .resolved_field_at(file.source(), offset as u32, bodies, arena, store)
+                .unwrap()
+        };
+        for (offset, field, kind, name) in [
+            (
+                text.rfind("seed").unwrap(),
+                fields[0],
+                FieldAccessKind::Read,
+                "seed",
+            ),
+            (
+                text.find("= count;").unwrap() + 2,
+                fields[1],
+                FieldAccessKind::Read,
+                "count",
+            ),
+            (
+                text.find("this.count").unwrap() + 5,
+                fields[1],
+                FieldAccessKind::Write,
+                "count",
+            ),
+        ] {
+            let access = at(offset).unwrap();
+            assert_eq!(
+                (access.field, access.kind, access.target.name.start()),
+                (field, kind, text.find(name).unwrap() as u32)
+            );
+        }
+        for offset in [
+            text.rfind("start").unwrap(),
+            text.find("this.count = count").unwrap() + 13,
+            text.rfind("a.count").unwrap() + 2,
+        ] {
+            assert!(at(offset).is_none(), "unexpected field at {offset}");
+        }
+    });
+}

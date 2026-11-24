@@ -170,13 +170,15 @@ fn retained_member_index_preserves_order_kinds_and_unused_field_declarations() {
     );
     assert_eq!(index.references_to(b).len(), 1);
     let provider = SourceId::from_index(9);
-    for name in ["plain", "hidden"] {
-        assert!(
-            index
-                .member_at(provider, PROVIDERS.find(name).unwrap() as u32)
-                .is_none()
-        );
-    }
+    assert!(
+        index
+            .member_at(provider, PROVIDERS.find("plain").unwrap() as u32)
+            .is_none()
+    );
+    let (hidden, _) = index
+        .member_at(provider, PROVIDERS.find("hidden").unwrap() as u32)
+        .unwrap();
+    assert!(index.references_to(hidden).is_empty());
     let offset = PROVIDERS.find("unused").unwrap() as u32;
     let (unused, target) = index.member_at(provider, offset).unwrap();
     assert_eq!(target.name.start(), offset);
