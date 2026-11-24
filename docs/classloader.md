@@ -1079,3 +1079,17 @@ companion can therefore supply both a polymorphic conditional given and the
 evidence needed to apply it. The typer regression uses `Evidence.scala` and
 its two Scala 3.9 TASTy files in
 `crates/dotty-typer/tests/fixtures/contextual-arguments`.
+
+
+### Effects on the pinned ordinary-method cohorts
+
+Two fresh runs of the 25 main and 25 analysis roots type 22 and 19 methods,
+respectively. Loading the IndexedSeq hierarchy lets `ArrayBufferView.apply`
+return its owning class's type parameter. Widening the parameterless
+`underlying.size` selection lets `VectorMap.knownSize` return `Int`.
+Resolving the Function1 parent of SetOps takes `Enumeration.ValueSet.knownSize`
+past the BitSet load to a stable-prefix diagnostic on `nnIds.size`.
+`SortedMap.unsorted` still reports the same unavailable class at the same tree
+with different arena slots for the operands. The focused gate checks both
+passes against the [four observed transitions](classloader-ordinary-cohort-3.9.0.tsv)
+and retains the historical 25 + 25 receipt.

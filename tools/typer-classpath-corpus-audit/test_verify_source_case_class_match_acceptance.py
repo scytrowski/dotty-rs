@@ -261,7 +261,12 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
                 gate.validate_recorded_cohort_receipt(root)
 
     def cohort_reports(self, receipt_rows, directory: Path, overrides=None):
-        overrides = overrides or {}
+        repository = Path(__file__).resolve().parents[2]
+        measured = gate.read_tsv(repository / gate.CLASSLOADER_COHORT)[1]
+        overrides = {
+            **{r["identity"]: (r["current_status"], r["current_result"]) for r in measured},
+            **(overrides or {}),
+        }
         header = "method\towner_path\tmethod_name\tline\trange\tmodifiers\tstatus\tactual_result\tsource_tree"
         reports = []
         for cohort in ("main", "analysis"):
@@ -322,7 +327,16 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(receipt_rows, root)
             output = root / "live.tsv"
             gate.validate_cohorts(repository, reports, output, baseline)
-            self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
+            live = gate.read_tsv(output)[1]
+            changed = [r for r, historical in zip(live, receipt_rows, strict=True) if r != historical]
+            self.assertEqual(len(changed), 4)
+            for r in changed:
+                original = next(row for row in receipt_rows if row["identity"] == r["identity"])
+                reports = self.cohort_reports(receipt_rows, root, {
+                    r["identity"]: (original["first_status"], original["actual_result"]),
+                })
+                with self.assertRaisesRegex(gate.ReceiptError, r["identity"]):
+                    gate.validate_cohorts(repository, reports, output, baseline)
 
     def test_sorted_map_unsorted_preserves_its_blocker_across_arena_renumbering(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -330,7 +344,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         rows = gate.read_tsv(baseline)[1]
         identity = gate.SORTED_MAP_UNSORTED_IDENTITY
         historical = next(row["first_status"] for row in rows if row["identity"] == identity)
-        live = historical.replace("TypeId(1714)", "TypeId(1718)").replace("TypeId(1713)", "TypeId(1717)")
+        live = historical.replace("TypeId(1714)", "TypeId(1735)").replace("TypeId(1713)", "TypeId(1734)")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "live.tsv"
@@ -338,7 +352,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             gate.validate_cohorts(repository, reports, output, baseline)
             observed = next(row for row in gate.read_tsv(output)[1] if row["identity"] == identity)
             self.assertEqual(observed["first_status"], live)
-            for wrong in (live.replace("1718", "1719"), live.replace("SymbolId(43)", "SymbolId(44)")):
+            for wrong in (live.replace("1735", "1736"), live.replace("SymbolId(43)", "SymbolId(44)")):
                 reports = self.cohort_reports(rows, root, {identity: (wrong, "not_available")})
                 with self.subTest(status=wrong), self.assertRaisesRegex(gate.ReceiptError, identity):
                     gate.validate_cohorts(repository, reports, output, baseline)
@@ -424,8 +438,8 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         overrides = {
             gate.PREDEF_CHAR_AT_IDENTITY: ("typed", gate.PREDEF_CHAR_AT_LIVE_RESULT),
             gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY: (
-                gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER,
-                "not_available",
+                "typed",
+                "scala.collection.mutable.ArrayBufferView.A",
             ),
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -448,9 +462,9 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             array_buffer = by_identity[gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY]
             self.assertEqual(array_buffer["cohort"], "analysis")
             self.assertEqual(array_buffer["source_tree"], "1537")
-            self.assertEqual(array_buffer["first_status"], gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER)
-            self.assertEqual(array_buffer["second_status"], gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER)
-            self.assertEqual(array_buffer["actual_result"], "not_available")
+            self.assertEqual(array_buffer["first_status"], "typed")
+            self.assertEqual(array_buffer["second_status"], "typed")
+            self.assertEqual(array_buffer["actual_result"], "scala.collection.mutable.ArrayBufferView.A")
             self.assertEqual(array_buffer["protected_success"], "false")
             self.assertEqual(array_buffer["two_pass_equal"], "true")
             self.assertEqual(baseline.read_bytes(), baseline_bytes)
