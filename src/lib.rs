@@ -139,10 +139,12 @@ mod resolved_call_index;
 pub use resolved_call_index::ResolvedCallIndex;
 
 mod source_field_access;
-pub use source_field_access::{FieldAccessKind, selected_field_access};
+pub use source_field_access::{FieldAccessKind, ResolvedFieldAccess, selected_field_access};
 
 mod source_file_calls;
-pub use source_file_calls::{ResolvedSourceCall, SourceFileCalls, SourceMethodTarget};
+pub use source_file_calls::{
+    ResolvedSourceCall, SourceFileCalls, SourceMemberTarget, SourceMethodTarget,
+};
 
 mod typer_error_span;
 pub use typer_error_span::{typer_error_span, typer_error_span_with};

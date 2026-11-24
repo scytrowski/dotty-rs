@@ -10,14 +10,17 @@ use crate::source_declarations::{DeclarationError, SourceClass};
 
 /// A source definition and the written token to select inside it, in UTF-8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SourceMethodTarget {
+pub struct SourceMemberTarget {
     /// Identity of the original source file in this session.
     pub source: SourceId,
-    /// UTF-8 byte range of the complete source method definition.
+    /// UTF-8 byte range of the complete source member declaration.
     pub declaration: TextRange,
-    /// UTF-8 byte range of the written method name token.
+    /// UTF-8 byte range of the written member name token.
     pub name: TextRange,
 }
+
+/// Source ranges for a method selected by one of the direct-call queries.
+pub type SourceMethodTarget = SourceMemberTarget;
 
 /// A written direct call resolved to a source method in the same revision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +162,7 @@ impl SourceFileCalls {
         self.names.tokens()
     }
 
-    fn class_at(&self, offset: u32) -> Option<SymbolId> {
+    pub(crate) fn class_at(&self, offset: u32) -> Option<SymbolId> {
         let i = self
             .classes
             .partition_point(|(range, _)| range.end() <= offset);

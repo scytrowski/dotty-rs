@@ -3,7 +3,12 @@ use crate::core::{
     AstArena, SemanticStore, SourceTypedIndex, SymbolId, SymbolKind, SymbolOrigin, TermRefTarget,
     TreeKind, Type, Typed, Untyped, Visibility,
 };
+use crate::core::{SourceDefinition, SourceId, SourceSpan, Span};
 use crate::parser::SourceSelection;
+use crate::source_declarations::DeclarationError;
+use crate::{
+    CheckedClassBodies, NamedClassSource, NamedClassSources, SourceFileCalls, SourceMemberTarget,
+};
 
 /// Operation performed on a selected source field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,4 +75,113 @@ pub fn selected_field_access(
         FieldAccessKind::Read
     };
     Some((*field, kind))
+}
+
+/// A committed selection of a public field declared in the selected sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedFieldAccess {
+    /// Written name at the usage site, in UTF-8 bytes.
+    pub origin: SourceSpan,
+    /// Canonical field of the defining class, including constructor accessors.
+    pub field: SymbolId,
+    /// Read or direct assignment seen by the typer.
+    pub kind: FieldAccessKind,
+    /// Declaration and name token in the defining source.
+    pub target: SourceMemberTarget,
+}
+
+impl NamedClassSources<'_> {
+    /// Resolves a byte within an explicit selection of a public body or constructor
+    /// field. Use committed bodies, typed arena and store from the same revision.
+    /// Missing files, uncommitted uses and unsupported targets yield `Ok(None)`.
+    /// Caller or provider navigation failures preserve their typed error.
+    pub fn resolved_field_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+        bodies: &CheckedClassBodies,
+        typed: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Result<Option<ResolvedFieldAccess>, DeclarationError> {
+        let Some(file) = self.file(source) else {
+            return Ok(None);
+        };
+        let navigation = file.navigation()?;
+        let Some(selection) = file.named().syntax().member_names.selection_at(offset) else {
+            return Ok(None);
+        };
+        self.resolve_field(file, navigation, selection, bodies, typed, store)
+    }
+
+    pub(crate) fn resolve_field(
+        &self,
+        caller: &NamedClassSource,
+        navigation: &SourceFileCalls,
+        selection: SourceSelection,
+        bodies: &CheckedClassBodies,
+        typed: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Result<Option<ResolvedFieldAccess>, DeclarationError> {
+        let Some(bindings) = navigation
+            .class_at(selection.name.start())
+            .and_then(|owner| bodies.bindings(owner))
+        else {
+            return Ok(None);
+        };
+        let Some((field, kind)) =
+            selected_field_access(selection, caller.ast(), bindings, typed, store)
+        else {
+            return Ok(None);
+        };
+        let Some((provider, decl)) = self.declaration(field) else {
+            return Ok(None);
+        };
+        let target = field_target(provider, provider.navigation()?, decl.class, field, store)?;
+        Ok(target.map(|target| ResolvedFieldAccess {
+            origin: SourceSpan::new(caller.source(), Span::without_point(selection.name)),
+            field,
+            kind,
+            target,
+        }))
+    }
+}
+
+pub(crate) fn field_target(
+    file: &NamedClassSource,
+    navigation: &SourceFileCalls,
+    owner: SymbolId,
+    field: SymbolId,
+    store: &SemanticStore,
+) -> Result<Option<SourceMemberTarget>, DeclarationError> {
+    if store.symbols.get(field).visibility != Visibility::Public {
+        return Ok(None);
+    }
+    let Some(SourceDefinition::Canonical { source, tree }) = file.index().definition_of(field)
+    else {
+        return Ok(None);
+    };
+    let Some(name) = file.named().syntax().member_names.value_name(tree) else {
+        return Ok(None);
+    };
+    let invalid = DeclarationError::InvalidBinding { source, tree };
+    let node = file.ast().try_get(tree).ok_or(invalid)?;
+    let declaration = node
+        .position
+        .filter(|p| p.source() == file.source())
+        .ok_or(invalid)?
+        .span()
+        .range();
+    if source != file.source()
+        || !matches!(node.kind, TreeKind::ValDef(_))
+        || name.start() < declaration.start()
+        || name.end() > declaration.end()
+        || navigation.class_at(name.start()) != Some(owner)
+    {
+        return Err(invalid);
+    }
+    Ok(Some(SourceMemberTarget {
+        source,
+        declaration,
+        name,
+    }))
 }
