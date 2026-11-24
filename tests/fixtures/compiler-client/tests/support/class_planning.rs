@@ -2089,6 +2089,93 @@ fn checked_parent_emission(
 }
 
 #[test]
+fn source_construction_matches_the_emitted_allocation_and_constructor_in_both_orders() {
+    use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
+    let base = (
+        SourceId::from_index(9),
+        "Base.scala",
+        "package demo\nclass Base(seed: Int) { private val saved: Int = seed; def read(): Int = saved }",
+    );
+    let caller = (
+        SourceId::from_index(3),
+        "Factory.scala",
+        "package demo\nclass Factory { def build(start: Int): Int = new Base(start).read() }",
+    );
+    for files in [[base, caller], [caller, base]] {
+        let artifacts = super::with_plan(&files, |unit, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                unit.typed_ast,
+                unit.store,
+            );
+            let site = index
+                .construction_at(caller.0, caller.2.find("Base(start)").unwrap() as u32)
+                .unwrap();
+            assert_eq!(site.target.source, base.0);
+            let metadata = unit.metadata(defs).unwrap();
+            let class = metadata
+                .iter()
+                .find(|c| c.identity().symbol() == site.class)
+                .unwrap();
+            let ctor = class.constructor().unwrap();
+            assert_eq!(ctor.symbol(), site.constructor);
+            assert_eq!(
+                (ctor.owner_internal_name(), ctor.descriptor().as_str()),
+                ("demo/Base", "(I)V")
+            );
+            let artifacts = super::checked_emission(unit, defs);
+            let factory = artifacts
+                .iter()
+                .find(|c| c.internal_name() == "demo/Factory")
+                .unwrap();
+            let decoded = ClassFile::decode(&mut Reader::new(factory.bytes())).unwrap();
+            let pool = &decoded.constant_pool;
+            let build = decoded
+                .methods
+                .iter()
+                .find(|m| pool.utf8(m.name_index) == Ok("build"))
+                .unwrap();
+            let [Attribute::Code(code)] = build.attributes.as_slice() else {
+                panic!("expected build code")
+            };
+            // new, dup, iload_1, invokespecial, invokevirtual, ireturn
+            let [0xbb, ch, cl, 0x59, 0x1b, 0xb7, mh, ml, 0xb6, _, _, 0xac] = &code.code[..] else {
+                panic!("unexpected build code: {:?}", code.code)
+            };
+            let cp = |hi, lo| ConstantPoolIndex(u16::from_be_bytes([hi, lo]));
+            assert_eq!(
+                pool.class_name(cp(*ch, *cl)),
+                Ok(class.identity().internal_name())
+            );
+            let Some(ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            }) = pool.get(cp(*mh, *ml))
+            else {
+                panic!("expected a constructor method reference")
+            };
+            assert_eq!(
+                pool.class_name(*class_index),
+                Ok(ctor.owner_internal_name())
+            );
+            assert_eq!(
+                pool.name_and_type(*name_and_type_index),
+                Ok(("<init>", ctor.descriptor().as_str()))
+            );
+            artifacts
+        });
+        assert_eq!(
+            super::run_java_client("source-construction", "ConstructionClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["40", "7"]
+        );
+    }
+}
+
+#[test]
 fn forwarded_parent_argument_reaches_base_state_in_both_file_orders() {
     let base = (
         SourceId::from_index(0),

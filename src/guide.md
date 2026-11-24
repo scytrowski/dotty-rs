@@ -783,8 +783,8 @@ Explicit constructor `val` and `var` declarations use field navigation.
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The
 [`ResolvedSourceParent`] gives the child, superclass and both source locations.
-Class references cover these single, unqualified written parents in the
-selected sources. Annotations and `new` expressions are outside this subset.
+Class references include these single, unqualified written parents and simple
+construction sites in committed bodies. Type annotations are outside this subset.
 
 The example indexes a header before checking any class bodies. Changing
 `Base(left)` to `Peer(left)` redirects the superclass reference. Changing the
@@ -834,6 +834,52 @@ for (text, base, selected, unused) in [
     assert_eq!(index.references_to(p.parameter), &[site.usage.unwrap()]);
     let other = index.constructor_parameter_at(source, text.find(unused).unwrap() as u32).unwrap();
     assert!(index.references_to(other.parameter).is_empty());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### Navigate from a construction to the class and its constructor
+
+Use [`ResolvedMemberIndex::construction_at`] on the class token of a
+simple explicit `new`. Its [`ResolvedSourceConstruction`] identifies the
+constructed class and the selected primary constructor separately. Use the
+class symbol for references. A neighboring argument or method selection has
+its own target. Rebuild the index against the new revision after editing.
+
+```rust
+use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, ResolvedMemberIndex, parse_source};
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, NoResolver};
+# use dotty::typer::SignatureCompletion;
+
+let original = "class Base(n: Int) { def read(): Int = n }; class Peer(n: Int) { def read(): Int = n }; class Factory { def build(start: Int): Int = new Base(start).read() }";
+let edited = original.replace("new Base", "new Peer");
+let offset = original.find("new Base").unwrap() as u32 + 4;
+for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
+    let id = SourceId::from_index(0);
+#   let mut store = SemanticStore::new();
+#   let defs = Definitions::bootstrap(&mut store);
+#   let mut packages = Packages::new();
+#   let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
+#       .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
+#   let sources = NamedClassSources::new([&file], &store)?;
+#   let mut arena = AstArena::new();
+#   let mut headers = ClassHeaderBindings::default();
+#   for (_,class) in sources.classes() {
+#       sources.complete_constructor_signature(class.symbol,&mut store,defs,&packages)?;
+#       assert!(matches!(sources.try_complete_class_header_reported(class.symbol,&mut store,defs,&packages,&mut arena,&mut headers)?, SignatureCompletion::Complete(_)));
+#       for method in class.methods() {
+#           assert!(matches!(sources.try_complete_member_signature(method.symbol,&mut store,defs,&packages)?, SignatureCompletion::Complete(_)));
+#       }
+#   }
+#   let (body,report) = sources.check_class_body(file.classes()[2].symbol,&mut store,defs,&packages,&mut arena,NoResolver).into_parts();
+#   assert!(report.errors.is_empty());
+#   let mut bodies = CheckedClassBodies::default();
+#   bodies.record(body)?;
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let site = index.construction_at(id, offset).ok_or("missing construction")?;
+    let expected = &file.classes()[selected];
+    assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));
+    assert_eq!(index.references_to(site.class), &[site.origin]);
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```

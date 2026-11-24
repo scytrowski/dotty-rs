@@ -486,6 +486,7 @@ mod tests {
         assert!(sources.class(other.classes()[0].symbol).is_none());
     }
 
+    mod constructions;
     mod constructor_parameters;
     mod field_access;
     mod headers;
