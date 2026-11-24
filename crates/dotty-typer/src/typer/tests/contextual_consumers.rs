@@ -2530,3 +2530,53 @@ fn nested_extension_infers_the_method_type_from_the_ordinary_box() {
         assert_outside_extension_bound(text, "nestedOutside");
     }
 }
+
+#[test]
+fn infix_conversion_on_an_abstract_receiver_requires_a_visible_provider() {
+    let text = "
+        class Ops[A] { def /(right: A): A = right }
+        object Views { implicit def wrap[A](left: A): Ops[A] = ??? }
+        object Calls {
+          def visible[A](x: A, y: A): A = { import Views.*; x / y }
+          def hidden[A](x: A, y: A): A = x / y
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let wrap = method_symbol(&parsed, &store, &index, source, "wrap");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["hidden", "visible"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!("method declaration")
+        };
+        if name == "hidden" {
+            let checkpoint = typer.store().checkpoint();
+            let error = typer.type_method_definition(tree).unwrap_err();
+            assert!(
+                matches!(error, TyperError::MemberLookup(ref cause) if matches!(**cause, MemberLookupError::ReceiverNotClassLike { .. })),
+                "{error:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            continue;
+        }
+        typer.type_method_definition(tree).unwrap();
+        let ast = typer.typed_ast();
+        let root = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Block(block) = &ast.get(root).kind else {
+            panic!("import block")
+        };
+        let TreeKind::Apply(call) = &ast.get(block.expr).kind else {
+            panic!("division")
+        };
+        let TreeKind::Select(op) = &ast.get(call.function).kind else {
+            panic!("operator")
+        };
+        let TreeKind::Apply(view) = &ast.get(op.qualifier).kind else {
+            panic!("converted receiver")
+        };
+        let TreeKind::TypeApply(poly) = &ast.get(view.function).kind else {
+            panic!("inferred conversion")
+        };
+        assert_eq!(typed_reference(&typer, poly.function), wrap);
+    }
+}

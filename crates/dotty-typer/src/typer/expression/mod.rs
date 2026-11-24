@@ -270,16 +270,17 @@ impl SourceTyper<'_> {
         let left =
             self.type_value_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
+        let request = |qualifier, receiver_type| InfixApplicationRequest {
+            operator: infix.op,
+            qualifier,
+            receiver_type,
+            argument_tree: infix.right,
+            context,
+            tree_index: tree.index(),
+            position,
+        };
         let resolved = match self.resolve_infix_application_function(
-            InfixApplicationRequest {
-                operator: infix.op,
-                qualifier: left,
-                receiver_type,
-                argument_tree: infix.right,
-                context,
-                tree_index: tree.index(),
-                position,
-            },
+            request(left, receiver_type),
             info_journal,
             new_mappings,
         ) {
@@ -299,6 +300,38 @@ impl SourceTyper<'_> {
                 }
                 return Err(error);
             }
+            Err(TyperError::MemberLookup(error)) => {
+                let super::lookup::MemberLookupError::ReceiverNotClassLike { ty } = *error else {
+                    return Err(TyperError::MemberLookup(error));
+                };
+                // Only adapt the receiver whose lookup failed. A failure in the
+                // right operand or a member on a nontrivial bound has priority.
+                if !self.unbounded_infix_parameter(ty)
+                    || self.any_equality_operator_name(infix.op)
+                    || self.widen_expression_type_journaled(receiver_type, info_journal, 0)? != ty
+                {
+                    return Err(TyperError::MemberLookup(error));
+                }
+                let Some(qualifier) = self.try_conversion(
+                    infix.left,
+                    left,
+                    ty,
+                    super::contextual::ConversionUse::Member {
+                        name: infix.op,
+                        site: tree.index(),
+                    },
+                    context,
+                    info_journal,
+                )?
+                else {
+                    return Err(TyperError::MemberLookup(error));
+                };
+                self.resolve_infix_application_function(
+                    request(qualifier, self.typed_arena.get(qualifier).ty),
+                    info_journal,
+                    new_mappings,
+                )?
+            }
             Err(error) => return Err(error),
         };
         self.type_resolved_application(
@@ -316,6 +349,27 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )
+    }
+
+    fn unbounded_infix_parameter(&self, ty: TypeId) -> bool {
+        let Some(symbol) = self
+            .store
+            .types
+            .try_get(ty)
+            .and_then(Type::reference_symbol)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(symbol)
+            || self.store.symbols.get(symbol).kind != SymbolKind::TypeParameter
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(bounds) = *self.store.symbols.info(symbol) else {
+            return false;
+        };
+        matches!(self.store.types.try_get(bounds), Some(Type::Bounds { high, .. })
+            if self.is_canonical_any_receiver(*high))
     }
 
     #[allow(clippy::too_many_arguments)]

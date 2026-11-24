@@ -1585,7 +1585,21 @@ impl SourceTyper<'_> {
                 ..
             }) = self.store.types.try_get(tycon)
             {
-                for scope in self.scopes_of(*class) {
+                // A stable field may point to an unloaded binary class. Its scope
+                // must be complete before we enumerate inherited implicits.
+                let class = *class;
+                let entry = self.store.symbols.get(class);
+                if matches!(entry.origin, SymbolOrigin::Classfile(_))
+                    && matches!(
+                        entry.kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+                    && entry.info == SymbolInfo::Missing
+                {
+                    self.class_info(class, journal)
+                        .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                }
+                for scope in self.scopes_of(class) {
                     if !scopes.contains(&scope) {
                         scopes.push(scope);
                     }

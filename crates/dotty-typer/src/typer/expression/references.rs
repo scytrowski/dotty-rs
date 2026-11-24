@@ -356,9 +356,10 @@ impl SourceTyper<'_> {
             .typed_arena
             .try_get(qualifier)
             .is_some_and(|tree| matches!(tree.kind, TreeKind::Apply(_)))
-            && self.is_direct_scala_class_result(qualifier_type)
+            && (self.is_direct_scala_class_result(qualifier_type)
+                || self.is_applied_owner_class_result(qualifier_type))
         {
-            // A value-producing call with an exact top-level Scala class can
+            // A value-producing call with an exact class result can
             // be a member receiver. Its tree still represents an evaluation,
             // and is not a stable path for dependent type selections.
             Ok(())
@@ -521,6 +522,27 @@ impl SourceTyper<'_> {
         let declaration = self.store.symbols.get(*symbol);
         matches!(declaration.kind, SymbolKind::Local | SymbolKind::Variable)
             && declaration.flags.contains(SymbolFlags::MUTABLE)
+    }
+
+    fn is_applied_owner_class_result(&self, ty: TypeId) -> bool {
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(member),
+        }) = self.store.types.try_get(ty)
+        else {
+            return false;
+        };
+        let Some(Type::Applied { tycon, .. }) = self.store.types.try_get(*prefix) else {
+            return false;
+        };
+        self.store.symbols.contains(*member)
+            && self.store.symbols.get(*member).kind == SymbolKind::Class
+            && self
+                .store
+                .types
+                .try_get(*tycon)
+                .and_then(Type::reference_symbol)
+                .is_some_and(|outer| self.store.symbols.owner(*member) == Some(outer))
     }
 
     fn is_direct_scala_class_result(&self, qualifier_type: TypeId) -> bool {

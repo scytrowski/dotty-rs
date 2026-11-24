@@ -13,6 +13,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
 SUPPLEMENTAL_CONTROLS = (
+    MODULE + "fractional_conversion::explicit",
+    MODULE + "fractional_conversion::omitted",
+    MODULE + "fractional_conversion::imported_operator",
+    MODULE + "fractional_conversion::missing_and_ambiguous",
     MODULE + "lookup::binary_fractional_companion_search",
     MODULE + "inherited_nested::fractional_numeric_ops_uses_the_subclass_prefix",
     "typer::tests::contextual_arguments::envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses",
@@ -63,6 +67,17 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("FractionalConversion.scala", 0, [
+            "def " + name + "[T >: Nothing <: Any](x: T, y: T)(using f: scala.math.Fractional[T]): T = " + body
+            for name, body in [
+                ("explicit", "scala.math.Fractional.Implicits.infixFractionalOps[T](x)(using f) / y"),
+                ("searched", "scala.math.Fractional.Implicits.infixFractionalOps[T](x)(f) / y"),
+                ("inferred", "scala.math.Fractional.Implicits.infixFractionalOps[T](x)(f) / y"),
+                ("syntax", "{ import scala.math.Fractional.Implicits.* scala.math.Fractional.Implicits.infixFractionalOps[T](x)(f) / y }"),
+            ]
+        ]),
+        ("FractionalConversionErrors.scala", 1, ["[E172]", "No given instance of type Fractional[T] was found for parameter num",
+          "both parameter b and parameter a match type Fractional[T] of parameter num", "2 errors found"]),
         ("FractionalStandard.scala", 0, ["def standard: scala.math.Fractional[Double] = scala.math.Numeric.DoubleIsFractional",
           "def single: scala.math.Fractional[Float] = scala.math.Numeric.FloatIsFractional"]),
         ("FractionalInherited.scala", 0, ["def inherited(v: Slice.this.NumericOps): Slice.this.NumericOps = v"]),
