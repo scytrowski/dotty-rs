@@ -8290,6 +8290,74 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.store.types.alloc(Type::Error(ErrorType { message }))
     }
 
+    // A Scala primitive used as a generic argument is emitted as Object in
+    // Signature. Recover it only with an exact static InnerClasses self-entry
+    // and the corresponding trait declaration in the same classpath origin.
+    fn nested_primitive_parent_argument(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+        origin: &ClassOrigin,
+        parent: &BinaryName,
+        sig: &ClassTypeSignature,
+    ) -> Result<Option<TypeId>, ClassLoadError> {
+        let [TypeArgument::Exact(ReferenceTypeSignature::Class(arg))] =
+            sig.type_arguments.as_slice()
+        else {
+            return Ok(None);
+        };
+        if !sig.suffix.is_empty()
+            || !arg.type_arguments.is_empty()
+            || class_type_signature_binary_name(arg).as_internal() != "java/lang/Object"
+        {
+            return Ok(None);
+        }
+        let Some(entry) = class_file.attributes.iter().find_map(|attr| match attr {
+            Attribute::InnerClasses(entries) => entries.iter().find(|entry| {
+                entry.inner_class_access_flags & ACC_STATIC != 0
+                    && self
+                        .resolve_name(name, class_file, entry.inner_class_info_index)
+                        .is_ok_and(|inner| inner == *name)
+            }),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        let (Some(outer), Some(inner)) = (entry.outer_class_info_index, entry.inner_name_index)
+        else {
+            return Ok(None);
+        };
+        let owner = self.resolve_name(name, class_file, outer)?;
+        let member = self.resolve_member_name(name, &class_file.constant_pool, inner)?;
+        if name.as_internal() != format!("{}${member}", owner.as_internal()) {
+            return Ok(None);
+        }
+        let Some(resource) = self
+            .class_path
+            .find_class(&owner)
+            .map_err(|error| ClassLoadError::Io(owner.clone(), Rc::new(error)))?
+        else {
+            return Ok(None);
+        };
+        if resource.origin() != origin || resource.format() != ClassFormat::Tasty {
+            return Ok(None);
+        }
+        let argument =
+            tasty_symbol::nested_trait_parent_argument(resource.bytes(), &owner, &member, parent)
+                .map_err(|error| ClassLoadError::InvalidTastyFile(owner, error))?;
+        Ok(argument.and_then(|arg| match arg.as_internal() {
+            "scala/Boolean" => Some(self.definitions.boolean),
+            "scala/Byte" => Some(self.definitions.byte),
+            "scala/Short" => Some(self.definitions.short),
+            "scala/Char" => Some(self.definitions.char),
+            "scala/Int" => Some(self.definitions.int),
+            "scala/Long" => Some(self.definitions.long),
+            "scala/Float" => Some(self.definitions.float),
+            "scala/Double" => Some(self.definitions.double),
+            _ => None,
+        }))
+    }
+
     fn load_uncached_class(
         &mut self,
         name: &BinaryName,
@@ -8361,7 +8429,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             jvm_visibility(access.0, package),
             origin,
         )?;
-        self.session.record_origin(class_symbol, resource_origin);
+        self.session
+            .record_origin(class_symbol, resource_origin.clone());
         self.repository.mark_loading(name.clone(), class_symbol);
 
         // Patches `Symbol::owner` from the package (set by `enter_class`,
@@ -8415,45 +8484,53 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let parents = if let Some(signature) = &signature {
             let env = self.class_type_var_env(declarations, None);
             let parent_indices = class_file.super_class.iter().chain(&class_file.interfaces);
-            let parent_signatures =
-                std::iter::once(&signature.superclass).chain(&signature.superinterfaces);
-            // Scala 3 appends Serializable to the JVM interfaces of module
-            // classes after computing the generic signature.
-            let mut runtime_parent = None;
-            if class_file.interfaces.len() == signature.superinterfaces.len() + 1
-                && name.as_internal().ends_with('$')
-                && has_scala_marker(&class_file)
-                && let Some(last) = class_file.interfaces.last()
-                && self.resolve_name(name, &class_file, *last)?.as_internal()
-                    == "java/io/Serializable"
-            {
-                runtime_parent = interfaces.last().copied();
-            }
-            if parent_indices.clone().count()
-                != parent_signatures.clone().count() + usize::from(runtime_parent.is_some())
-            {
-                return Err(ClassLoadError::IdentityConflict {
-                    name: name.clone(),
-                    reason: "generic and erased parent counts disagree".into(),
-                });
+            // Scala may add erased JVM interfaces (e.g. Comparator or Serializable)
+            // before or after its declared generic parents. Match the signature
+            // as an ordered subsequence, keeping each JVM-only interface raw.
+            let scala_interfaces = has_scala_marker(&class_file);
+            let mut signatures = std::iter::once(&signature.superclass)
+                .chain(&signature.superinterfaces)
+                .map(|sig| (class_type_signature_binary_name(sig), sig))
+                .peekable();
+            let mismatch = || ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "generic and erased parent identities disagree".into(),
+            };
+            if super_class.is_none() {
+                return Err(mismatch());
             }
             let mut parents = Vec::with_capacity(parent_indices.clone().count());
-            for ((index, parent), symbol) in parent_indices
-                .zip(parent_signatures)
+            for (ordinal, (index, symbol)) in parent_indices
                 .zip(super_class.into_iter().chain(interfaces))
+                .enumerate()
             {
-                if self.resolve_name(name, &class_file, *index)?
-                    != class_type_signature_binary_name(parent)
-                {
-                    return Err(ClassLoadError::IdentityConflict {
-                        name: name.clone(),
-                        reason: "generic and erased parent identities disagree".into(),
-                    });
+                let erased = self.resolve_name(name, &class_file, *index)?;
+                if let Some((_, sig)) = signatures.next_if(|(expected, _)| *expected == erased) {
+                    let parent = if scala_interfaces
+                        && let Some(arg) = self.nested_primitive_parent_argument(
+                            name,
+                            &class_file,
+                            &resource_origin,
+                            &erased,
+                            sig,
+                        )? {
+                        let tycon = self.type_ref(symbol);
+                        self.store.types.alloc(Type::Applied {
+                            tycon,
+                            args: vec![arg],
+                        })
+                    } else {
+                        self.apply_class_signature_arguments(name, &env, symbol, sig)?
+                    };
+                    parents.push(parent);
+                } else if scala_interfaces && ordinal > 0 {
+                    parents.push(self.type_ref(symbol));
+                } else {
+                    return Err(mismatch());
                 }
-                parents.push(self.apply_class_signature_arguments(name, &env, symbol, parent)?);
             }
-            if let Some(symbol) = runtime_parent {
-                parents.push(self.type_ref(symbol));
+            if signatures.next().is_some() {
+                return Err(mismatch());
             }
             parents
         } else {
@@ -15685,6 +15762,7 @@ mod tests {
 
     /// Small abstract class with independently configurable JVM descriptors/signatures.
     fn signature_class(
+        scala_marker: bool,
         name: &str,
         parent: Option<&str>,
         interfaces: &[&str],
@@ -15728,10 +15806,16 @@ mod tests {
                     .collect(),
             })
             .collect();
-        let attributes = signature
+        let mut attributes: Vec<_> = signature
             .iter()
             .map(|sig| Attribute::Signature(pool.utf8(sig).unwrap()))
             .collect();
+        if scala_marker {
+            attributes.push(Attribute::Other(dotty_classfile::attribute::RawAttribute {
+                name_index: pool.utf8("Scala").unwrap(),
+                bytes: &[],
+            }));
+        }
         ClassFile {
             version: ClassFileVersion {
                 major: 65,
@@ -18158,6 +18242,7 @@ mod tests {
                 (
                     name.clone(),
                     signature_class(
+                        false,
                         "Child",
                         Some("java/lang/Object"),
                         &["Base"],
@@ -18197,6 +18282,61 @@ mod tests {
             );
             assert_eq!(args.len(), 1);
             assert_eq!(parent_symbol(loader.store, args[0]), parameter);
+        }
+    }
+
+    #[test]
+    fn scala_signature_can_omit_erased_interfaces_around_a_generic_parent() {
+        let name = BinaryName::from_internal("Child");
+        for (signature, valid) in [
+            ("<T:Ljava/lang/Object;>Ljava/lang/Object;LBase<TT;>;", true),
+            ("Ljava/lang/Object;LMissing;", false),
+            ("Ljava/lang/Object;LAfter;LBefore;", false),
+            ("LBase;LAfter;", false),
+        ] {
+            let mut classes = HashMap::from([(
+                name.clone(),
+                signature_class(
+                    true,
+                    "Child",
+                    Some("java/lang/Object"),
+                    &["Before", "Base", "After"],
+                    Some(signature),
+                    &[],
+                    &[],
+                ),
+            )]);
+            for dep in ["java/lang/Object", "Before", "Base", "After"] {
+                classes.insert(BinaryName::from_internal(dep), synthetic_class(dep, None));
+            }
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+            let loaded = loader.load_class(&name);
+            if !valid {
+                assert!(matches!(
+                    loaded,
+                    Err(ClassLoadError::IdentityConflict { .. })
+                ));
+                continue;
+            }
+            let class = loaded.unwrap();
+            let parameter = type_parameter_symbol(loader.store, class, "T");
+            let parents = &class_info(loader.store, class).parents;
+            assert_eq!(parents.len(), 4);
+            let Type::Applied { tycon, args } = loader.store.types.get(parents[2]) else {
+                panic!("Base[T]")
+            };
+            assert_eq!(parent_symbol(loader.store, args[0]), parameter);
+            for (ty, expected) in [
+                (parents[1], "Before"),
+                (*tycon, "Base"),
+                (parents[3], "After"),
+            ] {
+                assert_eq!(
+                    symbol_name(loader.store, parent_symbol(loader.store, ty)),
+                    expected
+                );
+            }
         }
     }
 
@@ -19989,6 +20129,7 @@ mod tests {
                 (
                     BinaryName::from_internal("A"),
                     signature_class(
+                        false,
                         "A",
                         None,
                         &[],
@@ -20046,6 +20187,7 @@ mod tests {
             (
                 BinaryName::from_internal("A"),
                 signature_class(
+                    false,
                     "A",
                     Some("java/lang/Object"),
                     &[],
@@ -20190,7 +20332,7 @@ mod tests {
         let mut classes = HashMap::from([
             (
                 BinaryName::from_internal("Child"),
-                signature_class("Child", Some("Parent"), &["I"], None, &[], &[]),
+                signature_class(false, "Child", Some("Parent"), &["I"], None, &[], &[]),
             ),
             (
                 BinaryName::from_internal("Parent"),
@@ -20252,7 +20394,15 @@ mod tests {
             HashMap::from([
                 (
                     child_name.clone(),
-                    signature_class("sample/Child", Some("sample/Parent"), &[], None, &[], &[]),
+                    signature_class(
+                        false,
+                        "sample/Child",
+                        Some("sample/Parent"),
+                        &[],
+                        None,
+                        &[],
+                        &[],
+                    ),
                 ),
                 (parent_name.clone(), synthetic_class("sample/Parent", None)),
             ])
@@ -22813,6 +22963,7 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("UsesInner"),
             signature_class(
+                false,
                 "UsesInner",
                 Some("java/lang/Object"),
                 &[],

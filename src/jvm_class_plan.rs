@@ -32,6 +32,11 @@ pub struct TypedClassBody {
 }
 
 impl TypedClassBody {
+    /// Class symbol recorded when the body was split from its session's typed output.
+    pub fn class(&self) -> SymbolId {
+        self.class
+    }
+
     /// Resolves a byte offset on the name of a direct parenthesized call in this body.
     /// Use the call names and source arena from the same parse, and the typed arena
     /// and store from its typing session. Positions outside the token, including

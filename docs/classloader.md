@@ -712,9 +712,11 @@ and `ThisType`. `MemberSpace::Explicit(owner)` completes and searches only the
 explicit owner, regardless of the displayed prefix, and never falls back.
 Returned symbols are declarations; receiver/generic adaptation stays with the
 caller. The declaration scope contains decoded fields/methods/constructors and
-supported type parameters. `InnerClasses` metadata does not manufacture nested
-class declarations; nested classes absent from an owner's semantic scope can
-be loaded via `ClassLoader::load_class` with their exact JVM binary name.
+supported type parameters. A unique type lookup on a package-owned Scala class
+or trait also exposes a public nested instance class when the enclosing TASTy
+declares it and a classfile from the same origin confirms the non-static
+`InnerClasses` entry, outer, and simple name. Other nested classes absent
+from the declaration scope can be loaded via `ClassLoader::load_class` with their exact JVM binary name.
 The existing package/type policy is preserved, including its refusal to
 replace a pre-existing incomplete package entry.
 
@@ -775,8 +777,17 @@ evidence retain their contracts.
    its annotations (`.class` only, §3).
 9. Complete the class: build its `Type::ClassInfo` (parents + the
    declarations `Scope`) and set `SymbolInfo::Complete` on it. A classfile
-   generic parent signature must match the identities and order in the erased
-   hierarchy. Its arguments refer to the class's entered type parameters.
+   generic parent signature must match the superclass and preserve the order
+   and identities of its declared interfaces. Scala class files carrying the
+   empty `Scala` marker may also contain erased-only JVM interfaces between
+   the declared parents. The loader retains those interfaces as raw type
+   references in class-file order. Each signed parent's arguments refer to
+   the class's entered type parameters. For a static nested Scala trait the
+   loader can recover a primitive argument of a unary parent erased to
+   `Object`. This requires a matching JVM `InnerClasses` self-entry and the
+   same parent's applied type in the enclosing object's TASTy from the same
+   classpath origin. For example, this retains `Fractional[Double]` on
+   `Numeric.DoubleIsFractional`.
    This preserves parents such as `TC[Box[A]]` for separately compiled Scala
    structural given implementations.
 10. Mark `Loaded`, return the symbol.

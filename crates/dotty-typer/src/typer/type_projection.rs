@@ -38,16 +38,16 @@ impl SourceNameResolver<'_, '_> {
         name: dotty_core::Name,
         context: SourceContextId,
         location: SourceTreeLocation,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
-        let target =
-            self.typer
-                .lookup_type_symbol(name, context, location.tree_index, location.position)?;
-        if let Some(target) = target {
-            let prefix = self.typer.type_symbol_prefix(target);
-            return Ok(self.typer.store.types.alloc(Type::TypeRef {
-                prefix,
-                target: TypeRefTarget::Symbol(target),
-            }));
+        if let Some(ty) = self.typer.lookup_type_name(
+            name,
+            context,
+            location.tree_index,
+            location.position,
+            journal,
+        )? {
+            return Ok(ty);
         }
         if let Some(builtin) = self
             .typer
@@ -358,6 +358,7 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                     position: source_tree.position,
                 },
+                info_journal,
             )?;
             let ty = self.store.types.alloc(Type::Applied {
                 tycon,
@@ -507,6 +508,7 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
                 position,
             },
+            info_journal,
         )?;
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {

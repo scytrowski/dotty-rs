@@ -101,6 +101,14 @@ checks the argument order at direct construction and generated `apply` and
 from the copy site. Twelve negative sites cover missing and ambiguous
 `TC[Int]` and `Trace` independently at each of the three entry points.
 
+Three control files use the released `scala.math` binaries.
+Scala and the Rust typer select `Numeric.DoubleIsFractional` and
+`Numeric.FloatIsFractional` for their respective `Fractional` goals. Both
+diagnose missing evidence for an unconstrained `T`. A subclass of
+`Numeric[T]` can also use the inherited class name `NumericOps` in a
+method parameter and result. The Rust assertion checks the declaring
+`Numeric` symbol and the subclass's `this` prefix for both types.
+
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,
 nested context functions, conversions, extensions, extractors, and binary

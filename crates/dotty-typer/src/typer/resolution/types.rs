@@ -3,13 +3,14 @@
 use super::super::*;
 
 impl SourceTyper<'_> {
-    pub(in crate::typer) fn lookup_type_symbol(
+    pub(in crate::typer) fn lookup_type_name(
         &mut self,
         name: dotty_core::Name,
         context: SourceContextId,
         tree_index: u32,
         position: Option<SourceSpan>,
-    ) -> Result<Option<SymbolId>, TyperError> {
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TypeId>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
         let mut local_type_candidates = Vec::new();
         for active_scope in self.active_local_type_scopes.iter().rev() {
@@ -77,16 +78,21 @@ impl SourceTyper<'_> {
                         }
                         visible.extend(candidates);
                         self.deduplicate_import_candidates(&mut visible, true);
-                        return self.unique_type_candidate(&visible, name, tree_index, position);
+                        return Ok(self
+                            .unique_type_candidate(&visible, name, tree_index, position)?
+                            .map(|s| self.unqualified_type_reference(s)));
                     }
                 }
                 local_scopes = parent;
             }
         }
         if !local_type_candidates.is_empty() {
-            return self.unique_type_candidate(&local_type_candidates, name, tree_index, position);
+            return Ok(self
+                .unique_type_candidate(&local_type_candidates, name, tree_index, position)?
+                .map(|s| self.unqualified_type_reference(s)));
         }
         let mut package_candidates = Vec::new();
+        let mut searched_owners = HashSet::new();
         for context_id in &contexts {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -102,13 +108,25 @@ impl SourceTyper<'_> {
                 if let Some(symbol) =
                     self.unique_type_candidate(&current_unit, name, tree_index, position)?
                 {
-                    return Ok(Some(symbol));
+                    return Ok(Some(self.unqualified_type_reference(symbol)));
                 }
                 package_candidates.extend(other_units);
             } else if let Some(symbol) =
                 self.unique_type_candidate(candidates, name, tree_index, position)?
             {
-                return Ok(Some(symbol));
+                return Ok(Some(self.unqualified_type_reference(symbol)));
+            } else if searched_owners.insert(source_context.owner)
+                && let Some(ty) = self.inherited_nested_class_type(
+                    source_context.owner,
+                    name,
+                    SourceTreeLocation {
+                        tree_index,
+                        position,
+                    },
+                    journal,
+                )?
+            {
+                return Ok(Some(ty));
             }
         }
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
@@ -122,7 +140,7 @@ impl SourceTyper<'_> {
                     position,
                 },
             )? {
-                return Ok(Some(symbol));
+                return Ok(Some(self.unqualified_type_reference(symbol)));
             }
         }
         let (source_package_candidates, external_package_candidates): (Vec<_>, Vec<_>) =
@@ -135,7 +153,7 @@ impl SourceTyper<'_> {
         if let Some(symbol) =
             self.unique_type_candidate(&source_package_candidates, name, tree_index, position)?
         {
-            return Ok(Some(symbol));
+            return Ok(Some(self.unqualified_type_reference(symbol)));
         }
         // A nested Scala package can refer to declarations in its package or
         // an enclosing package without an import. The lexical package scopes
@@ -209,7 +227,7 @@ impl SourceTyper<'_> {
                 // packages and continue the normal import/builtin fallback.
                 continue;
             }
-            return Ok(Some(symbol));
+            return Ok(Some(self.unqualified_type_reference(symbol)));
         }
         let is_builtin = self
             .definitions
@@ -230,7 +248,7 @@ impl SourceTyper<'_> {
         if let Some(symbol) =
             self.unique_type_candidate(&external_package_candidates, name, tree_index, position)?
         {
-            return Ok(Some(symbol));
+            return Ok(Some(self.unqualified_type_reference(symbol)));
         }
         if self
             .definitions
@@ -239,7 +257,154 @@ impl SourceTyper<'_> {
         {
             return Ok(None);
         }
-        self.lookup_default_type_import(name, tree_index, position)
+        Ok(self
+            .lookup_default_type_import(name, tree_index, position)?
+            .map(|s| self.unqualified_type_reference(s)))
+    }
+
+    fn unqualified_type_reference(&mut self, target: SymbolId) -> TypeId {
+        let prefix = self.type_symbol_prefix(target);
+        self.store.types.alloc(Type::type_ref(prefix, target))
+    }
+
+    fn inherited_nested_class_type(
+        &mut self,
+        owner: SymbolId,
+        name: Name,
+        location: SourceTreeLocation,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TypeId>, TyperError> {
+        if !matches!(
+            self.store.symbols.get(owner).kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            return Ok(None);
+        }
+        let Some(position) = location.position else {
+            return Ok(None);
+        };
+        let Some((source, tree)) = self.source_tree_for_symbol(owner) else {
+            return Ok(None);
+        };
+        if source != self.source {
+            return Ok(None);
+        }
+        let template = match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::TypeDef(def)) => def.rhs,
+            Some(TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def))) => def.template,
+            _ => return Ok(None),
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(template).map(|node| &node.kind)
+        else {
+            return Ok(None);
+        };
+        // A single explicitly applied parent exposes its own nested class names.
+        // Project only its type constructor: the type arguments affect the
+        // receiver, but cannot add declarations. An `extends` clause itself
+        // uses the enclosing environment, outside this template's body.
+        let [parent] = template.parents.as_slice() else {
+            return Ok(None);
+        };
+        let constructor = match self.arena.try_get(*parent).map(|node| &node.kind) {
+            Some(TreeKind::AppliedTypeTree(applied)) => applied.tpt,
+            Some(TreeKind::TypeApply(applied)) => applied.function,
+            _ => return Ok(None),
+        };
+        if !template.body.iter().any(|tree| {
+            self.arena
+                .try_get(*tree)
+                .and_then(|member| member.position)
+                .is_some_and(|member| {
+                    member
+                        .span()
+                        .range()
+                        .contains(position.span().range().start())
+                })
+        }) {
+            return Ok(None);
+        }
+        let parent_type = if let Some(cached) = self.type_index.type_at(self.source, constructor) {
+            cached
+        } else {
+            let Some(TreeKind::DefDef(primary)) = self
+                .arena
+                .try_get(template.constructor)
+                .map(|node| &node.kind)
+            else {
+                return Ok(None);
+            };
+            // Use the header context, including its class type parameters,
+            // regardless of which method first asks for this declaration.
+            let parent_context = primary
+                .type_params
+                .iter()
+                .rev()
+                .find_map(|parameter| {
+                    self.index
+                        .symbol_at(source, *parameter)
+                        .and_then(|symbol| self.index.declaration_context_of(symbol))
+                })
+                .or_else(|| self.index.declaration_context_of(owner))
+                .ok_or(TyperError::DeclarationContextMissing { symbol: owner })?;
+            match self.semantic_attempt(Some(journal), |typer, attempt| {
+                typer.type_of_tpt_inner_journaled(constructor, parent_context, attempt)
+            }) {
+                Ok(ty) => ty,
+                // An independently unresolvable parent contributes no proven
+                // nested names. Preserve the original name lookup in that case.
+                Err(TyperError::TypeNameNotFound { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        };
+        let Some(parent) = self.store.types.get(parent_type).reference_symbol() else {
+            return Ok(None);
+        };
+        if !matches!(
+            self.store.symbols.get(parent).kind,
+            SymbolKind::Class | SymbolKind::Trait
+        ) {
+            return Ok(None);
+        }
+        let member = if let Some(scope) = self.index.scope_of(parent) {
+            let candidates = self.store.scopes.get(scope).lookup_all(&name);
+            self.unique_type_candidate(candidates, name, location.tree_index, location.position)?
+        } else if matches!(
+            self.store.symbols.get(parent).origin,
+            SymbolOrigin::Tasty(_)
+        ) {
+            let request = MemberRequest {
+                prefix: parent_type,
+                name,
+                space: MemberSpace::Prefix,
+                selector: MemberSelector::Unique,
+            };
+            self.resolver
+                .resolve_member(self.store, &request)
+                .map_err(|error| TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index: location.tree_index,
+                    error,
+                })?
+        } else {
+            None
+        };
+        if let Some(member) = member {
+            if !self.store.symbols.contains(member) {
+                return Err(TyperError::UnknownSymbol { symbol: member });
+            }
+            let entry = self.store.symbols.get(member);
+            if entry.owner == Some(parent)
+                && matches!(entry.kind, SymbolKind::Class | SymbolKind::Trait)
+                && entry.visibility == dotty_core::symbols::Visibility::Public
+            {
+                let receiver = self.store.types.alloc(Type::ThisType { class: owner });
+                return Ok(Some(
+                    self.store.types.alloc(Type::type_ref(receiver, member)),
+                ));
+            }
+        }
+        Ok(None)
     }
 
     pub(in crate::typer) fn lookup_default_type_import(

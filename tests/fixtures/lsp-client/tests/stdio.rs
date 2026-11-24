@@ -707,13 +707,14 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
     let caller = "  def read(m: Middle) = m.take()";
     let bad = "  def bad(): Int = only(1)";
     let only = "  def only(): Int = 7";
-    let good = "  def good(): Int = only()";
-    let origin = good.find("only").unwrap();
+    let good = "  def good(): Int = pick(true)";
+    let overload = "  def pick(b: Boolean): Int = 7";
+    let origin = good.find("pick").unwrap();
     let sibling_lookup =
         json!({"textDocument":{"uri":B}, "position":{"line":4,"character":origin+1}});
     let sibling_link = json!([{
         "originSelectionRange":range(4,origin,origin+4), "targetUri":B,
-        "targetSelectionRange":range(2,6,10), "targetRange":range(2,2,only.len())
+        "targetSelectionRange":range(6,6,10), "targetRange":range(6,2,overload.len())
     }]);
     let call = caller.find("take").unwrap();
     let lookup = json!({"textDocument":{"uri":B}, "position":{"line":1,"character":call+1}});
@@ -741,7 +742,7 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         );
         client.open(
             B,
-            &format!("class Consumer {{\n{caller}\n{only}\n{bad}\n{good}\n}}"),
+            &format!("class Consumer {{\n{caller}\n{only}\n{bad}\n{good}\n  def pick(n: Int): Int = n\n{overload}\n}}"),
         );
         client.diagnostics(B, 1, independent.clone());
         assert_eq!(

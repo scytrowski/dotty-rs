@@ -91,13 +91,16 @@ pub use source_diagnostic::SourceDiagnostic as TypingDiagnostic;
 /// Diagnostic returned by class body checking.
 pub use source_diagnostic::SourceDiagnostic as ClassBodyDiagnostic;
 
+mod checked_class_bodies;
+pub use checked_class_bodies::{CheckedBodyError, CheckedClassBodies};
+
 mod class_body_work;
 pub use class_body_work::{BodySkipReason, ClassBodyWork};
 
 mod class_body;
 pub use class_body::{
-    CheckedClassBody, ClassBodyCheck, ClassBodyError, ClassBodyReport, check_class_body,
-    type_class_body, type_class_body_with_resolver,
+    CheckedClassBody, ClassBodyCheck, ClassBodyError, ClassBodyReport, PartialClassBody,
+    check_class_body, type_class_body, type_class_body_with_resolver,
 };
 
 /// JVM class plans for simple source classes with methods and private instance fields.

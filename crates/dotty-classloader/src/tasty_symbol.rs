@@ -983,6 +983,82 @@ fn select_type_definition<'i, 'a>(
     Ok(node)
 }
 
+/// Recovers the argument of a unary applied parent of a direct trait in a
+/// top-level object. The classfile supplies the enclosing and parent names.
+pub(crate) fn nested_trait_parent_argument(
+    bytes: &[u8],
+    owner: &BinaryName,
+    member: &str,
+    parent: &BinaryName,
+) -> Result<Option<BinaryName>, TastyDecodeError> {
+    let file = parse_classloader_tasty(bytes)?;
+    let index = file.ast_address_index()?;
+    let package = owner.package_path();
+    let module_name = format!("{}$", owner.simple_name());
+    let mut argument = None;
+    for node in index.iter().filter(|node| {
+        node.tag == TYPEDEF_TAG
+            && is_in_requested_top_level_package(&file, &index, node.offset, package)
+    }) {
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template: RawTree::LengthNode(template),
+            tail,
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if template.tag != TEMPLATE_TAG
+            || !has_modifier(&tail, OBJECT_TAG)
+            || module_class_wire_name(&file, name).as_deref() != Some(module_name.as_str())
+        {
+            continue;
+        }
+        for stat in template.decode_template_structure()?.stats {
+            let RawTree::LengthNode(def) = stat else {
+                continue;
+            };
+            if def.tag != TYPEDEF_TAG {
+                continue;
+            }
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                name,
+                type_or_template: RawTree::LengthNode(body),
+                tail,
+            }) = def.decode_structured()?
+            else {
+                continue;
+            };
+            if body.tag != TEMPLATE_TAG
+                || !has_modifier(&tail, TRAIT_TAG)
+                || wire_name(&file, name).as_deref() != Some(member)
+            {
+                continue;
+            }
+            for tree in &body.decode_template_structure()?.parents {
+                let name = resolve_parent_name_in_package(&file, tree, package, Some(package));
+                if name.as_ref() != Some(parent) {
+                    continue;
+                }
+                if let Some(DecodedTastyType::Applied { arguments, .. }) = decode_tasty_parent_type(
+                    &file,
+                    tree,
+                    parent,
+                    package,
+                    &HashMap::new(),
+                    &mut |_, _| None,
+                    0,
+                )? && let [DecodedTastyType::Named(arg)] = arguments.as_slice()
+                    && argument.replace(arg.clone()).is_some()
+                {
+                    return Err(TastyDecodeError::AmbiguousTypeDef);
+                }
+            }
+        }
+    }
+    Ok(argument)
+}
+
 pub(crate) fn decode_identity(
     bytes: &[u8],
     requested: &BinaryName,
@@ -1017,6 +1093,65 @@ pub(crate) fn decode_identity(
         flags: decode_flags(&tail),
         visibility: decode_visibility(&file, &tail),
     })
+}
+
+/// Proves that this exact package class or trait declares a public nested
+/// class. JVM InnerClasses flags may widen Scala visibility, so neither a
+/// matching binary name nor those flags prove this source-level member.
+pub(crate) fn declares_public_nested_class(
+    bytes: &[u8],
+    owner: &BinaryName,
+    member: &str,
+) -> Result<bool, TastyDecodeError> {
+    let file = parse_classloader_tasty(bytes)?;
+    let index = file.ast_address_index()?;
+    let mut public = None;
+    for node in index.iter().filter(|node| node.tag == TYPEDEF_TAG) {
+        if !is_in_requested_top_level_package(&file, &index, node.offset, owner.package_path()) {
+            continue;
+        }
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template: RawTree::LengthNode(template),
+            tail,
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if template.tag != TEMPLATE_TAG
+            || has_modifier(&tail, OBJECT_TAG)
+            || wire_name(&file, name).as_deref() != Some(owner.simple_name())
+        {
+            continue;
+        }
+        for stat in template.decode_template_structure()?.stats {
+            let RawTree::LengthNode(nested) = stat else {
+                continue;
+            };
+            if nested.tag != TYPEDEF_TAG {
+                continue;
+            }
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                name,
+                type_or_template: RawTree::LengthNode(body),
+                tail,
+            }) = nested.decode_structured()?
+            else {
+                continue;
+            };
+            if body.tag != TEMPLATE_TAG
+                || has_modifier(&tail, OBJECT_TAG)
+                || wire_name(&file, name).as_deref() != Some(member)
+            {
+                continue;
+            }
+            if public.is_some() {
+                return Err(TastyDecodeError::AmbiguousTypeDef);
+            }
+            public = Some(decode_visibility(&file, &tail).is_none());
+        }
+    }
+    Ok(public == Some(true))
 }
 
 /// Finds a Scala object and its module class only when both exact definitions
