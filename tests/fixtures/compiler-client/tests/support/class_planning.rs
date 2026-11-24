@@ -869,8 +869,8 @@ class UseCounter:
   def update(c: Counter, next: Int): Unit = c.count = next
 "#,
     );
-    let artifacts = super::compile([counter, use_counter]);
-    let reversed = super::compile([use_counter, counter]);
+    let artifacts = compile_counter([counter, use_counter]);
+    let reversed = compile_counter([use_counter, counter]);
     assert!(artifacts.iter().eq(reversed.iter().rev()));
     assert_counter_abi(&artifacts, "id", "(II)V");
     assert_eq!(
@@ -879,6 +879,55 @@ class UseCounter:
             .collect::<Vec<_>>(),
         ["9", "4", "7", "2"]
     );
+}
+
+fn compile_counter(files: [(SourceId, &str, &str); 2]) -> Vec<dotty::jvm::GeneratedClass> {
+    let &(counter, _, declaration) = files.iter().find(|f| f.1 == "Counter.scala").unwrap();
+    let &(client, _, text) = files.iter().find(|f| f.1 == "UseCounter.scala").unwrap();
+    super::with_plan(&files, |plan, definitions, sources, bodies| {
+        let class = &sources.file(counter).unwrap().classes()[0];
+        let field = class
+            .constructor_fields
+            .iter()
+            .copied()
+            .chain(class.fields().map(|f| f.symbol))
+            .find(|&id| {
+                plan.store
+                    .names
+                    .resolve(plan.store.symbols.get(id).name.text())
+                    == "count"
+            })
+            .unwrap();
+        let start = declaration.find("var count").unwrap() as u32 + 4;
+        let sites: Vec<_> = text.match_indices("c.count").collect();
+        assert_eq!(sites.len(), 2);
+        for ((offset, _), kind) in sites
+            .into_iter()
+            .zip([dotty::FieldAccessKind::Read, dotty::FieldAccessKind::Write])
+        {
+            let access = sources
+                .resolved_field_at(
+                    client,
+                    offset as u32 + 2,
+                    bodies,
+                    plan.typed_ast,
+                    plan.store,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!((access.field, access.kind), (field, kind));
+            assert_eq!(access.origin.source(), client);
+            assert_eq!(
+                (
+                    access.target.source,
+                    access.target.name.start(),
+                    access.target.name.end()
+                ),
+                (counter, start, start + 5)
+            );
+        }
+        super::checked_emission(plan, definitions)
+    })
 }
 
 fn assert_counter_abi(
@@ -1154,7 +1203,7 @@ fn initializer_parameter_call_checks_arity_and_result_type() {
             (SourceId::from_index(0), "Provider.scala", provider.as_str()),
             (SourceId::from_index(1), "Consumer.scala", consumer.as_str()),
         ];
-        super::with_plan(&files, |unit, defs| {
+        super::with_plan(&files, |unit, defs, _, _| {
             let consumer = &unit.classes[1];
             let answer = &consumer.fields[0];
             let error = dotty::jvm::emit_class(unit, consumer.class, defs).unwrap_err();
@@ -1623,8 +1672,8 @@ class UseCounter:
   def update(c: Counter, next: Int): Unit = c.count = next
 ",
     );
-    let first = super::compile([counter, use_counter]);
-    let second = super::compile([use_counter, counter]);
+    let first = compile_counter([counter, use_counter]);
+    let second = compile_counter([use_counter, counter]);
     assert!(first.iter().eq(second.iter().rev()));
     for artifacts in [first, second] {
         assert_counter_abi(&artifacts, "initial", "(I)V");
@@ -1863,7 +1912,7 @@ fn bare_parent_requires_an_available_no_arg_constructor_before_emission() {
         "Classes.scala",
         "class Base(x: Int)\nclass Derived extends Base",
     )];
-    super::with_plan(&files, |unit, definitions| {
+    super::with_plan(&files, |unit, definitions, _, _| {
         let [base, derived] = unit.classes.as_slice() else {
             panic!("expected two classes")
         };

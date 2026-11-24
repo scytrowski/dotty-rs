@@ -547,7 +547,12 @@ fn complete_member_paths<'s, 'file>(
 
 fn with_plan<R>(
     files: &[(SourceId, &str, &str)],
-    run: impl FnOnce(&JvmCompilationUnit<'_>, &Definitions) -> R,
+    run: impl FnOnce(
+        &JvmCompilationUnit<'_>,
+        &Definitions,
+        &NamedClassSources<'_>,
+        &CheckedClassBodies,
+    ) -> R,
 ) -> R {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -576,7 +581,7 @@ fn with_plan<R>(
         typed_ast: &output.arena,
         classes,
     };
-    run(&plan, &definitions)
+    run(&plan, &definitions, &sources, &typed_classes)
 }
 
 fn named_classes(
@@ -685,17 +690,24 @@ fn emit_batch(
 }
 
 fn compile<const N: usize>(files: [(SourceId, &str, &str); N]) -> Vec<GeneratedClass> {
-    with_plan(&files, |plan, definitions| {
-        let prepared = plan.prepare_emission(definitions).unwrap();
-        let (concurrent, _) = emit_batch(&prepared, &plan.classes, 2);
-        for (class, artifact) in plan.classes.iter().zip(&concurrent) {
-            assert_eq!(
-                &emit_class(plan, class.class, definitions).unwrap(),
-                artifact
-            );
-        }
-        concurrent
+    with_plan(&files, |plan, definitions, _, _| {
+        checked_emission(plan, definitions)
     })
+}
+
+fn checked_emission(
+    plan: &JvmCompilationUnit<'_>,
+    definitions: &Definitions,
+) -> Vec<GeneratedClass> {
+    let prepared = plan.prepare_emission(definitions).unwrap();
+    let (concurrent, _) = emit_batch(&prepared, &plan.classes, 2);
+    for (class, artifact) in plan.classes.iter().zip(&concurrent) {
+        assert_eq!(
+            &emit_class(plan, class.class, definitions).unwrap(),
+            artifact
+        );
+    }
+    concurrent
 }
 
 const OVERLOADS: &str = "class A {
@@ -1190,7 +1202,7 @@ fn measure_jvm_batch() {
             .enumerate()
             .map(|(i, text)| (SourceId::from_index(i as u32), "Batch.scala", text.as_str()))
             .collect();
-        with_plan(&files, |plan, defs| {
+        with_plan(&files, |plan, defs, _, _| {
             for _ in 0..5 {
                 let start = Instant::now();
                 plan.validate().unwrap();
