@@ -48,9 +48,11 @@ The fixture uses `MemberSignaturePhase` for members selected from ready classes.
 A protocol test breaks the initializer of `seed`, checks the original diagnostic
 and an independent sibling error, then repairs the initializer and verifies the
 cross-file definition link in both UTF-8 and UTF-16. Completion wakes
-direct waiters, and diagnostics for a cycle point to each participating
-declaration. A stdio regression repairs a cross-file inheritance cycle and
-keeps an independent call error in the same document through the edit.
+direct waiters. Both phases produce a `SignatureBlockageReport` with the
+source positions of the cycle participants. A stdio regression creates and
+repairs a cross-file inheritance cycle. Only its two participants receive
+cycle markers. A third document containing a downstream class keeps its
+independent call error through both edits.
 
 The field-declaration scenario opens `private[Missing] val hidden: Int 1`.
 It checks for one parser report at the literal. Inserting `=` exposes the
