@@ -697,8 +697,9 @@ usage and declaration name tokens, including fields without usages.
 [`ResolvedCallIndex`] remains available for existing direct-call clients.
 
 A complete check contains [`CheckedClassBody::Complete`] with its planning
-body. [`CheckedClassBody::Partial`] holds only committed source-to-typed
-mappings, accessible through [`PartialClassBody::bindings`].
+body. [`CheckedClassBody::Partial`] holds committed source-to-typed
+mappings and ordinary local declarations from successful members.
+[`CheckedClassBody::local_bindings`] borrows those declarations in typed order.
 [`CheckedClassBody::Invalid`] carries the requested symbol when validation
 rejects it before typing. [`CheckedClassBody::class`] returns the symbol
 for each outcome. [`ClassBodyReport`] owns member errors and committed warnings.

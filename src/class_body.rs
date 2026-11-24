@@ -9,7 +9,7 @@ use crate::core::{
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
-use crate::typer::{SourceTyper, TyperDiagnostic, TyperError};
+use crate::typer::{SourceTyper, TypedLocalBinding, TyperDiagnostic, TyperError};
 
 /// Failure to type a named class or one of its declared members.
 #[derive(Debug)]
@@ -211,7 +211,7 @@ pub struct ClassBodyCheck {
     /// the payload or use [`crate::SourceDiagnostic::from_typer_warning`] for presentation.
     pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
     class: SymbolId,
-    partial_bindings: Option<SourceTypedIndex>,
+    partial: Option<PartialClassBody>,
 }
 
 /// Owned diagnostics from one check, independent of the retained semantic data.
@@ -256,6 +256,7 @@ impl ClassBodyReport {
 /// Committed mappings from a partially checked class, identified by its original symbol.
 #[derive(Debug)]
 pub struct PartialClassBody {
+    locals: Vec<TypedLocalBinding>,
     class: SymbolId,
     index: SourceTypedIndex,
 }
@@ -272,8 +273,8 @@ impl PartialClassBody {
 pub enum CheckedClassBody {
     /// All members succeeded. Move this body into planning or borrow its navigation bindings.
     Complete(TypedClassBody),
-    /// A valid class had rejected or skipped members. Only committed source-to-typed
-    /// mappings survive, including when all attempted members succeeded.
+    /// A valid class had rejected or skipped members. Retains committed tree
+    /// mappings and ordinary local bindings from successful members.
     Partial(PartialClassBody),
     /// Class validation failed before typing began for the requested symbol.
     Invalid(SymbolId),
@@ -286,6 +287,17 @@ impl CheckedClassBody {
             Self::Complete(body) => body.class(),
             Self::Partial(body) => body.class,
             Self::Invalid(class) => *class,
+        }
+    }
+
+    /// Ordinary locals in committed members, in typed declaration order.
+    /// Source and typed trees, symbols and scopes belong to this session.
+    /// A rejected class or a class without committed locals yields an empty slice.
+    pub fn local_bindings(&self) -> &[TypedLocalBinding] {
+        match self {
+            Self::Complete(body) => body.local_bindings(),
+            Self::Partial(body) => &body.locals,
+            Self::Invalid(_) => &[],
         }
     }
 
@@ -308,13 +320,10 @@ impl ClassBodyCheck {
         let (body, errors) = match self.body {
             Ok(body) => (CheckedClassBody::Complete(body), Vec::new()),
             Err(errors) => (
-                self.partial_bindings
-                    .map_or(CheckedClassBody::Invalid(self.class), |index| {
-                        CheckedClassBody::Partial(PartialClassBody {
-                            class: self.class,
-                            index,
-                        })
-                    }),
+                self.partial.map_or(
+                    CheckedClassBody::Invalid(self.class),
+                    CheckedClassBody::Partial,
+                ),
                 errors,
             ),
         };
@@ -333,7 +342,7 @@ impl ClassBodyCheck {
             class,
             body: Err(vec![ClassBodyError::InvalidClass(class)]),
             diagnostics: Vec::new(),
-            partial_bindings: None,
+            partial: None,
         }
     }
 
@@ -343,7 +352,7 @@ impl ClassBodyCheck {
             .as_ref()
             .ok()
             .map(TypedClassBody::bindings)
-            .or(self.partial_bindings.as_ref())
+            .or_else(|| self.partial.as_ref().map(PartialClassBody::bindings))
     }
 }
 
@@ -444,12 +453,18 @@ pub(crate) fn visit_class_body(
             .map(|d| (source, d))
             .collect()
     };
-    let mut partial_bindings = None;
+    let mut partial = None;
     let body = if incomplete || !errors.is_empty() {
-        let (extended, index) = typer.into_typed_ast_and_index();
-        *arena = extended;
-        if !matches!(visit, BodyVisit::FirstError) {
-            partial_bindings = Some(index);
+        if matches!(visit, BodyVisit::FirstError) {
+            *arena = typer.into_typed_ast_and_index().0;
+        } else {
+            let output = typer.into_typed_output();
+            *arena = output.typed_ast;
+            partial = Some(PartialClassBody {
+                class: class.symbol,
+                index: output.source_typed_index,
+                locals: output.local_bindings,
+            });
         }
         Err(errors)
     } else {
@@ -461,7 +476,7 @@ pub(crate) fn visit_class_body(
         class: class.symbol,
         body,
         diagnostics,
-        partial_bindings,
+        partial,
     }
 }
 
