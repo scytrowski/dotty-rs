@@ -8,10 +8,10 @@ use dotty::core::{
 };
 use dotty::typer::TyperDiagnostic;
 use dotty::{
-    ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase, MemberSignatureError,
-    MemberSignatureFailure, MemberSignaturePhase, NamedClassSource, NamedClassSources,
-    NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError, SignatureBlockage,
-    SignatureCycle, SourceDeclarationIndex,
+    CheckedClassBodies, ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase,
+    MemberSignatureError, MemberSignatureFailure, MemberSignaturePhase, NamedClassSource,
+    NamedClassSources, NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError,
+    SignatureBlockage, SignatureCycle, SourceDeclarationIndex,
 };
 
 #[derive(Clone)]
@@ -230,7 +230,7 @@ fn analyze_sources(
         results.get_mut(&file).unwrap().problems.push(problem);
     }
     report_blockages(signatures.blockages, sources.declarations(), store, results);
-    let mut bodies = HashMap::new();
+    let mut bodies = CheckedClassBodies::default();
     for symbol in headers.ready {
         let source = sources.class(symbol).unwrap().0.source();
         let (body, report) = work.check(symbol, store, defs, packages, &mut arena, NoResolver);
@@ -248,7 +248,7 @@ fn analyze_sources(
             };
             results.get_mut(&file).unwrap().problems.push(problem);
         }
-        bodies.insert(symbol, body);
+        bodies.record(body).expect("one check per ready class");
     }
     for u in sources.files() {
         let source = u.source();
@@ -266,14 +266,10 @@ fn analyze_sources(
             }
         };
         for (origin, _) in calls.call_names().iter() {
-            if let Some(t) = calls.definition_at_with_bindings(
-                origin.start(),
-                u.ast(),
-                &arena,
-                store,
-                |s| bodies.get(&s)?.bindings(),
-                |id| sources.file(id).and_then(|x| x.navigation().ok()),
-            ) {
+            // Each file reports its own index error once in the navigation() match above.
+            if let Ok(Some(t)) =
+                sources.definition_at(source, origin.start(), &bodies, &arena, store)
+            {
                 results.get_mut(&source).unwrap().links.push(Link {
                     origin,
                     uri: uris[&t.source].to_owned(),
