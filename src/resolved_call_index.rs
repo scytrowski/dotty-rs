@@ -29,7 +29,7 @@ struct IndexedFile {
 pub struct SourceSymbolSite {
     /// Canonical identity to pass to [`ResolvedMemberIndex::references_to`].
     pub symbol: SymbolId,
-    /// Semantic category: method, field, method parameter, or local.
+    /// Semantic category: method, field, parameter, or local.
     pub kind: SymbolKind,
     /// Declaration range and exact written name token.
     pub target: SourceMemberTarget,
@@ -55,7 +55,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
         .filter(|(span, _)| span.span().range().contains(offset))
 }
 
-/// Index of source methods, fields, named method parameters and ordinary method locals in one session.
+/// Index of source methods, fields, named method and constructor parameters, and ordinary method locals in one session.
 /// Usage sites require committed body bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
@@ -136,12 +136,17 @@ impl ResolvedMemberIndex {
             }
             let locals = crate::source_locals::declarations(file, navigation, bodies, store);
             let mut local_uses = Vec::new();
-            let slots: HashMap<_, _> = parameters
+            let mut slots: HashMap<_, _> = parameters
                 .iter()
                 .enumerate()
                 .map(|(i, p)| (p.symbol(), i))
                 .chain(locals.iter().enumerate().map(|(i, (id, _))| (*id, i)))
                 .collect();
+            for (slot, declaration) in parameters.iter().enumerate() {
+                if let ParameterDeclaration::Constructor(p) = declaration {
+                    slots.insert(p.formal, slot);
+                }
+            }
             let mut fields = Vec::new();
             let mut parameter_uses = Vec::new();
             for name in file.named().syntax().member_names.term_names() {
@@ -157,7 +162,7 @@ impl ResolvedMemberIndex {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        id
+                        parameters[slot].symbol()
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
@@ -239,7 +244,7 @@ impl ResolvedMemberIndex {
         }
     }
 
-    /// Looks up a plain primary constructor parameter by its declaration name.
+    /// Looks up a plain primary constructor parameter at its declaration or a committed body read.
     /// Includes unused parameters. Explicit constructor fields, contextual and
     /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
     pub fn constructor_parameter_at(
@@ -247,7 +252,7 @@ impl ResolvedMemberIndex {
         source: SourceId,
         offset: u32,
     ) -> Option<crate::SourceConstructorParameter> {
-        match self.parameter_declaration_at(source, offset)? {
+        match self.parameter_site_at(source, offset)?.1 {
             ParameterDeclaration::Constructor(p) => Some(p),
             ParameterDeclaration::Method(_) => None,
         }
@@ -298,7 +303,7 @@ impl ResolvedMemberIndex {
             .filter(|f| f.origin.span().range().contains(offset))
     }
 
-    /// Classifies a committed use of a field, ordinary local, or method parameter
+    /// Classifies a committed use of a field, ordinary local, or parameter
     /// at its written name. Direct assignment targets are writes; other supported
     /// value uses are reads. Declarations and method calls yield `None`.
     pub fn value_access_at(&self, source: SourceId, offset: u32) -> Option<crate::ValueAccessKind> {

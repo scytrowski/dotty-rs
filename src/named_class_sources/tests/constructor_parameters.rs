@@ -81,3 +81,69 @@ fn unsupported_constructor_forms_do_not_publish_plain_parameters() {
         );
     }
 }
+
+#[test]
+fn initializer_and_method_reads_share_the_source_parameter_and_respect_shadowing() {
+    let text = "class A(start: Int, unused: Int) { private val initial: Int = start; def read(): Int = start; def shadow(start: Int): Int = start; def local(): Int = { val start = 2; start } }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(9, text, &mut store, &mut packages);
+    let source = file.source();
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let (body, report) = sources
+        .check_class_body(
+            file.classes()[0].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let tokens: Vec<_> = text.match_indices("start").map(|(i, _)| i as u32).collect();
+    let [decl, initializer, read, method, param_use, local, local_use] = tokens[..] else {
+        panic!("fixture names")
+    };
+    let p = index.constructor_parameter_at(source, decl).unwrap();
+    for pos in [initializer, read] {
+        assert_eq!(index.constructor_parameter_at(source, pos), Some(p));
+        let site = index.symbol_at(source, pos).unwrap();
+        assert_eq!(
+            (site.symbol, site.kind, site.target),
+            (p.parameter, SymbolKind::Parameter, p.target)
+        );
+        assert_eq!(
+            index.value_access_at(source, pos),
+            Some(crate::ValueAccessKind::Read)
+        );
+    }
+    let sites = |id| {
+        index
+            .references_to(id)
+            .iter()
+            .map(|span| span.span().range().start())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sites(p.parameter), [initializer, read]);
+    assert!(sites(p.formal).is_empty());
+    for (decl, usage, kind) in [
+        (method, param_use, SymbolKind::Parameter),
+        (local, local_use, SymbolKind::Local),
+    ] {
+        let other = index.symbol_at(source, decl).unwrap();
+        assert_ne!(other.symbol, p.parameter);
+        assert_eq!(other.kind, kind);
+        assert_eq!(sites(other.symbol), [usage]);
+        assert!(index.constructor_parameter_at(source, usage).is_none());
+    }
+    let unused = index
+        .constructor_parameter_at(source, text.find("unused").unwrap() as u32)
+        .unwrap();
+    assert!(sites(unused.parameter).is_empty());
+}
