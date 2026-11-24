@@ -930,6 +930,12 @@ Ordinary left-associative term infix calls lower through selected-member
 application, including overload selection and generic argument inference. Their
 typed shape is a `Select` followed by an `Apply`; the Scala 3.9.0 oracle fixture
 is `crates/dotty-typer/tests/fixtures/infix-expressions/InfixExpressions.scala`.
+For an unbounded type parameter, a left-associative call can select a member
+through an implicit conversion. With the pinned Scala library,
+`import Fractional.Implicits.*` makes `x / y` select `infixFractionalOps[T]`,
+pass `x` and the in-scope `Fractional[T]` in separate clauses, and call
+`FractionalOps./(y)` with result type `T`. The contextual v1 controls compare
+this elaboration with explicit conversion calls and with Scala 3.9.0.
 For the real `InlineInfoAttribute.read` corpus path, the source typer also
 registers the exact canonical `Int.&(Int): Int` method. This bounded increment
 does not add the other bitwise overloads, and it does not extend the JVM

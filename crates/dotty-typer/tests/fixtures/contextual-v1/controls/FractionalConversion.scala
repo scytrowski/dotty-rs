@@ -8,3 +8,6 @@ object FractionalConversion:
     Fractional.Implicits.infixFractionalOps[T](x)./(y)
   def inferred[T](x: T, y: T)(using f: Fractional[T]): T =
     Fractional.Implicits.infixFractionalOps(x)./(y)
+  def syntax[T](x: T, y: T)(using f: Fractional[T]): T =
+    import Fractional.Implicits.*
+    x / y

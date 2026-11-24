@@ -23,6 +23,10 @@ fn assert_fractional_division(method: &str) {
     typer.type_method_definition(tree).unwrap();
     let body = typer.source_typed_index().get(source, rhs).unwrap();
     let arena = typer.typed_ast();
+    let body = match &arena.get(body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => body,
+    };
     let TreeKind::Apply(div) = &arena.get(body).kind else {
         panic!("division application")
     };
@@ -152,4 +156,10 @@ fn missing_and_ambiguous() {
             assert!(expected.iter().all(|p| candidates.contains(p)));
         }
     }
+}
+
+#[test]
+#[ignore = "requires the pinned Scala 3.9 runtime jars"]
+fn imported_operator() {
+    assert_fractional_division("syntax");
 }
