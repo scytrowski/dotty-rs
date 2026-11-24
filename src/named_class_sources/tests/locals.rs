@@ -58,3 +58,53 @@ fn complete_and_partial_results_retain_only_committed_local_bindings() {
         });
     }
 }
+
+fn retained(text: &str, errors: usize) -> crate::ResolvedMemberIndex {
+    with_checked(text, |sources, body, report, arena, store| {
+        assert_eq!(report.errors.len(), errors, "{report:?}");
+        let mut bodies = crate::CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let index = crate::ResolvedMemberIndex::build(sources, &bodies, arena, store);
+        assert!(index.diagnostics().is_empty());
+        index
+    })
+}
+
+#[test]
+fn shadowed_local_reads_keep_their_exact_declarations_after_arena_release() {
+    let text = "class A { def good(): Int = { val `x` = 1; val unused = `x`; { val `x` = 2; `x` }; `x` }; def bad(): Int = { val lost = 1; lost + false } }";
+    let index = retained(text, 1);
+    let id = SourceId::from_index(7);
+    let names: Vec<_> = text.match_indices("`x`").map(|(i, _)| i as u32).collect();
+    let [outer, before, inner, within, after] = names[..] else {
+        panic!("local names")
+    };
+    let at = |pos| index.symbol_at(id, pos).unwrap();
+    for (decl, reads) in [(outer, vec![before, after]), (inner, vec![within])] {
+        let target = at(decl);
+        assert!(target.usage.is_none());
+        assert_eq!(target.kind, crate::core::SymbolKind::Local);
+        assert_eq!(
+            (target.target.name.start(), target.target.name.end()),
+            (decl, decl + 3)
+        );
+        let refs = index.references_to(target.symbol);
+        assert_eq!(refs.len(), reads.len());
+        for (&span, pos) in refs.iter().zip(reads) {
+            let site = at(pos + 1);
+            assert_eq!(site.symbol, target.symbol);
+            assert_eq!(site.target, target.target);
+            assert_eq!(site.usage, Some(span));
+            assert!(index.symbol_at(id, pos + 3).is_none());
+        }
+    }
+    assert_ne!(at(outer).symbol, at(inner).symbol);
+    assert!(
+        index
+            .references_to(at(text.find("unused").unwrap() as u32).symbol)
+            .is_empty()
+    );
+    for (i, _) in text.match_indices("lost") {
+        assert!(index.symbol_at(id, i as u32).is_none());
+    }
+}

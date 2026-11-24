@@ -33,13 +33,14 @@ pub fn selected_field_access(
 ) -> Option<(SymbolId, FieldAccessKind)> {
     match term_access(selection, None, ast, bindings, typed, store)? {
         TermAccess::Field(field, kind) => Some((field, kind)),
-        TermAccess::Parameter(_) => None,
+        TermAccess::Parameter(_) | TermAccess::Local(_) => None,
     }
 }
 
 pub(crate) enum TermAccess {
     Field(SymbolId, FieldAccessKind),
     Parameter(SymbolId),
+    Local(SymbolId),
 }
 
 fn term_access(
@@ -79,6 +80,12 @@ fn term_access(
         && selection.assignment.is_none()
     {
         return Some(TermAccess::Parameter(*target));
+    }
+    if symbol.kind == SymbolKind::Local
+        && matches!(written.kind, TreeKind::Ident(_))
+        && selection.assignment.is_none()
+    {
+        return Some(TermAccess::Local(*target));
     }
     let own_field = own_receiver && enclosing_class.is_some() && symbol.owner == enclosing_class;
     if symbol.kind != SymbolKind::Field

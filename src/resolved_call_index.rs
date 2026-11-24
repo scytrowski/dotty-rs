@@ -13,6 +13,8 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    locals: Vec<(SymbolId, SourceMemberTarget)>,
+    local_uses: Vec<(SourceSpan, usize)>,
     parameters: Vec<SourceMethodParameter>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
@@ -26,7 +28,7 @@ struct IndexedFile {
 pub struct SourceSymbolSite {
     /// Canonical identity to pass to [`ResolvedMemberIndex::references_to`].
     pub symbol: SymbolId,
-    /// Semantic category: method, field, or method parameter.
+    /// Semantic category: method, field, method parameter, or local.
     pub kind: SymbolKind,
     /// Declaration range and exact written name token.
     pub target: SourceMemberTarget,
@@ -45,7 +47,14 @@ fn declaration_at(
         .filter(|(_, target)| target.name.contains(offset))
 }
 
-/// Index of source methods, fields and named method parameters in one session.
+fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan, T)> {
+    let i = uses.partition_point(|(span, _)| span.span().range().end() <= offset);
+    uses.get(i)
+        .copied()
+        .filter(|(span, _)| span.span().range().contains(offset))
+}
+
+/// Index of source methods, fields, named method parameters and ordinary method locals in one session.
 /// Usage sites require committed body bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
@@ -124,10 +133,13 @@ impl ResolvedMemberIndex {
                     .push(call.origin);
                 calls.push(call);
             }
-            let parameter_slots: HashMap<_, _> = parameters
+            let locals = crate::source_locals::declarations(file, navigation, bodies, store);
+            let mut local_uses = Vec::new();
+            let slots: HashMap<_, _> = parameters
                 .iter()
                 .enumerate()
                 .map(|(i, p)| (p.parameter, i))
+                .chain(locals.iter().enumerate().map(|(i, (id, _))| (*id, i)))
                 .collect();
             let mut fields = Vec::new();
             let mut parameter_uses = Vec::new();
@@ -140,10 +152,17 @@ impl ResolvedMemberIndex {
                 let origin = SourceSpan::new(file.source(), Span::without_point(name.name));
                 let symbol = match access {
                     TermAccess::Parameter(id) => {
-                        let Some(&slot) = parameter_slots.get(&id) else {
+                        let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
+                        id
+                    }
+                    TermAccess::Local(id) => {
+                        let Some(&slot) = slots.get(&id) else {
+                            continue;
+                        };
+                        local_uses.push((origin, slot));
                         id
                     }
                     TermAccess::Field(field, kind) => {
@@ -164,6 +183,8 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    locals,
+                    local_uses,
                     parameters,
                     parameter_uses,
                     calls,
@@ -236,15 +257,8 @@ impl ResolvedMemberIndex {
         offset: u32,
     ) -> Option<(SourceSpan, SourceMethodParameter)> {
         let file = self.files.get(&source)?;
-        let i = file
-            .parameter_uses
-            .partition_point(|(s, _)| s.span().range().end() <= offset);
-        let &(origin, slot) = file.parameter_uses.get(i)?;
-        origin
-            .span()
-            .range()
-            .contains(offset)
-            .then(|| (origin, file.parameters[slot]))
+        let (origin, slot) = use_at(&file.parameter_uses, offset)?;
+        Some((origin, file.parameters[slot]))
     }
 
     /// Gets the committed read or write at a written field name. The
@@ -284,16 +298,21 @@ impl ResolvedMemberIndex {
         declaration_at(&self.files.get(&source)?.field_declarations, offset)
     }
 
-    /// Looks up a written method, field, or ordinary method parameter by half-open
-    /// UTF-8 byte offset. A declaration can be queried before its body is checked.
-    /// Uses require committed bindings in this revision. Locals and unsupported
-    /// declarations yield `None`. The result can be retained with the index.
+    /// Looks up a written method, field, ordinary parameter or method local by half-open
+    /// UTF-8 byte offset. Local declarations and all usage sites require committed body
+    /// bindings. Other supported declarations are available before body checking.
+    /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
         let file = self.files.get(&source)?;
         let (symbol, kind, target, usage) = if let Some(c) = self.call_at(source, offset) {
             (c.method, SymbolKind::Method, c.target, Some(c.origin))
         } else if let Some(f) = self.field_at(source, offset) {
             (f.field, SymbolKind::Field, f.target, Some(f.origin))
+        } else if let Some((origin, slot)) = use_at(&file.local_uses, offset) {
+            let (id, target) = file.locals[slot];
+            (id, SymbolKind::Local, target, Some(origin))
+        } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
+            (id, SymbolKind::Local, target, None)
         } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
             (p.parameter, SymbolKind::Parameter, p.target, Some(origin))
         } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
