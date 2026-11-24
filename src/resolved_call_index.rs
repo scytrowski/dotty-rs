@@ -71,7 +71,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
 }
 
 /// Index of ordinary source classes, methods, fields, named method and constructor parameters, and ordinary method locals in one session.
-/// Usage sites require committed body or header bindings.
+/// A parent name requires completed class information. Other uses require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -183,7 +183,7 @@ impl ResolvedMemberIndex {
             ));
         }
         for (file, navigation, class_declarations, field_declarations, parameters) in valid_files {
-            let parents = file
+            let parents: Vec<_> = file
                 .classes()
                 .iter()
                 .filter_map(|class| {
@@ -201,6 +201,13 @@ impl ResolvedMemberIndex {
                     })
                 })
                 .collect();
+            for parent in &parents {
+                index
+                    .references
+                    .entry(parent.parent)
+                    .or_default()
+                    .push(parent.origin);
+            }
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -438,14 +445,21 @@ impl ResolvedMemberIndex {
     }
 
     /// Looks up an ordinary class, method, field, parameter or method local by half-open
-    /// UTF-8 byte offset. Local declarations and all usage sites require committed
-    /// bindings from their phase. Other supported declarations are available before body checking.
+    /// UTF-8 byte offset. Parent names require completed class information. Local declarations
+    /// and term uses require committed bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
         let file = self.files.get(&source)?;
         let (symbol, kind, target, usage) =
             if let Some((id, target)) = declaration_at(&file.class_declarations, offset) {
                 (id, SymbolKind::Class, target, None)
+            } else if let Some(parent) = self.parent_at(source, offset) {
+                (
+                    parent.parent,
+                    SymbolKind::Class,
+                    parent.target,
+                    Some(parent.origin),
+                )
             } else if let Some(c) = self.call_at(source, offset) {
                 (c.method, SymbolKind::Method, c.target, Some(c.origin))
             } else if let Some(f) = self.field_at(source, offset) {
@@ -474,7 +488,8 @@ impl ResolvedMemberIndex {
     }
 
     /// Committed uses of this exact symbol, in input file order then
-    /// token order. Omits the definition. Unknown and unused symbols yield an
+    /// token order. For classes, covers single unqualified explicit parents of indexed ordinary
+    /// classes. Type annotations and construction expressions are outside this query. Omits the definition. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)

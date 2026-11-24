@@ -109,3 +109,82 @@ fn bare_and_applied_parent_names_select_the_completed_class_in_the_right_package
         }
     }
 }
+
+#[test]
+fn only_completed_headers_contribute_references_in_file_and_token_order() {
+    let texts = [
+        "class First(x: Int) extends Base(x); class Second(x: Int) extends Base(x)",
+        "class Bad(x: Boolean) extends Base(x)",
+        "class A(x: Int) extends B(x)",
+        "class B(x: Int) extends A(x)",
+        "class Base(x: Int)",
+        "class Third(x: Int) extends Base(x)",
+    ];
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let files: Vec<_> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| named(i as u32, text, &mut store, &mut packages))
+        .collect();
+    let sources = NamedClassSources::new(
+        [
+            &files[5], &files[0], &files[1], &files[2], &files[3], &files[4],
+        ],
+        &store,
+    )
+    .unwrap();
+    prepare_constructors(&sources, &mut store, defs, &packages);
+    let mut arena = AstArena::new();
+    let mut headers = ClassHeaderBindings::default();
+    let id = |i: usize| files[i].classes()[0].symbol;
+    let attempt = |class,
+                   store: &mut SemanticStore,
+                   arena: &mut AstArena<Typed>,
+                   headers: &mut ClassHeaderBindings| {
+        sources.try_complete_class_header(class, store, defs, &packages, arena, headers)
+    };
+    for (child, parent) in [(0, 4), (2, 3), (3, 2)] {
+        assert!(
+            matches!(attempt(id(child),&mut store,&mut arena,&mut headers),Ok(SignatureCompletion::BlockedOn(p)) if p==id(parent))
+        );
+    }
+    let build = |store: &SemanticStore, arena: &AstArena<Typed>, headers: &ClassHeaderBindings| {
+        ResolvedMemberIndex::build_with_headers(
+            &sources,
+            &CheckedClassBodies::default(),
+            headers,
+            arena,
+            store,
+        )
+    };
+    let pending = build(&store, &arena, &headers);
+    assert!(pending.references_to(id(4)).is_empty());
+    for class in [id(4), id(0), id(5), files[0].classes()[1].symbol, id(0)] {
+        assert!(matches!(
+            attempt(class, &mut store, &mut arena, &mut headers),
+            Ok(SignatureCompletion::Complete(_))
+        ));
+    }
+    assert!(matches!(
+        attempt(id(1), &mut store, &mut arena, &mut headers),
+        Err(TyperError::ApplicationArgumentTypeMismatch { .. })
+    ));
+    let index = build(&store, &arena, &headers);
+    let mut expected = Vec::new();
+    for i in [5, 0] {
+        for (at, _) in texts[i].match_indices("Base") {
+            let site = index.symbol_at(files[i].source(), at as u32).unwrap();
+            assert_eq!((site.symbol, site.kind), (id(4), SymbolKind::Class));
+            assert_eq!(site.target.source, files[4].source());
+            expected.push(site.usage.unwrap());
+        }
+    }
+    assert_eq!(index.references_to(id(4)), expected);
+    for i in [1, 2, 3] {
+        let pos = texts[i].find("extends ").unwrap() as u32 + 8;
+        assert!(index.symbol_at(files[i].source(), pos).is_none());
+        assert!(index.references_to(id(i)).is_empty());
+    }
+}
