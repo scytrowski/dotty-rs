@@ -3127,3 +3127,80 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
         "value(1)"
     );
 }
+
+#[test]
+fn constructor_type_sites_match_the_emitted_descriptor_in_both_file_orders() {
+    use dotty::classfile::{ClassFile, Reader};
+    let model = (
+        SourceId::from_index(9),
+        "Types.scala",
+        "package demo\nclass Base; class Peer",
+    );
+    let holder = (
+        SourceId::from_index(3),
+        "Holder.scala",
+        "package demo\nclass Holder(seed: Base, val first: Base, var next: Peer)",
+    );
+    for files in [[model, holder], [holder, model]] {
+        let artifacts = super::with_plan(&files, |unit, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                unit.typed_ast,
+                unit.store,
+            );
+            let metadata = unit.metadata(defs).unwrap();
+            let owner = metadata
+                .iter()
+                .find(|c| c.identity().internal_name() == "demo/Holder")
+                .unwrap();
+            let constructor = owner.constructor().unwrap();
+            let mut descriptor = String::from("(");
+            assert_eq!(constructor.parameters().len(), 3);
+            for (slot, token) in
+                constructor
+                    .parameters()
+                    .iter()
+                    .zip(["Base, val", "Base, var", "Peer)"])
+            {
+                let offset = holder.2.find(token).unwrap() as u32;
+                let site = index.constructor_type_at(holder.0, offset).unwrap();
+                assert_eq!(
+                    (site.constructor, site.formal, site.target.source),
+                    (constructor.symbol(), slot.symbol(), model.0)
+                );
+                let class = metadata
+                    .iter()
+                    .find(|c| c.identity().symbol() == site.class)
+                    .unwrap();
+                descriptor.push_str(&format!("L{};", class.identity().internal_name()));
+            }
+            descriptor.push_str(")V");
+            assert_eq!(descriptor, "(Ldemo/Base;Ldemo/Base;Ldemo/Peer;)V");
+            let artifacts = super::checked_emission(unit, defs);
+            let holder = artifacts
+                .iter()
+                .find(|c| c.internal_name() == owner.identity().internal_name())
+                .unwrap();
+            let class = ClassFile::decode(&mut Reader::new(holder.bytes())).unwrap();
+            let pool = &class.constant_pool;
+            let init = class
+                .methods
+                .iter()
+                .find(|m| pool.utf8(m.name_index) == Ok("<init>"))
+                .unwrap();
+            assert_eq!(pool.utf8(init.descriptor_index), Ok(descriptor.as_str()));
+            artifacts
+        });
+        assert_eq!(
+            super::run_java_client(
+                "constructor-annotation",
+                "ConstructorAnnotationClient",
+                &artifacts
+            )
+            .trim(),
+            "true"
+        );
+    }
+}
