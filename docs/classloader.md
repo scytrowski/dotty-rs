@@ -306,8 +306,10 @@ resource from the same origin. The supported shape is an unannotated
 `[A](x: A)(implicit ev: C[A]): C[A]#M` with unconstrained `A`.
 An annotation can change the method's JVM name.
 The source view keeps both clauses, the implicit flag, and the applied outer
-type of the result. An inherited JVM copy with the same signature remains in
-classfile metadata. Source lookup selects the declaring conversion.
+type of the result. For a nested object whose TASTy body contains only its
+constructor and optional synthetic serialization hook, source lookup selects
+the declaring conversion. The inherited JVM copy with the same signature
+remains in classfile metadata.
 For an instance class nested in `C[A]`, a unique unannotated `/(A): A`
 declaration can be selected under its Scala name. Its JVM `$div` must have
 the matching generic signature and erased descriptor. Bridge and synthetic

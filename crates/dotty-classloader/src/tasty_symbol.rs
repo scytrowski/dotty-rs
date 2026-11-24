@@ -6363,6 +6363,39 @@ mod tests {
     }
 
     #[test]
+    fn inherited_conversion_forwarder_requires_an_empty_source_module() {
+        let fractional = fixture_bytes("scala3-library/scala/math/Fractional.tasty");
+        let outer = BinaryName::from_internal("scala/math/Fractional");
+        let module = nested_methods(&fractional, &outer, "Implicits$", true)
+            .unwrap()
+            .unwrap();
+        assert!(module.inherited_only_module);
+        let parent = nested_methods(&fractional, &outer, "ExtraImplicits", true)
+            .unwrap()
+            .unwrap();
+        assert!(!parent.inherited_only_module);
+
+        // The candidate need not share its Scala name with a physically
+        // declared method: @targetName can rename such a member.
+        let duration = fixture_bytes("scala3-library/scala/concurrent/duration/Duration.tasty");
+        let declared = nested_methods(
+            &duration,
+            &BinaryName::from_internal("scala/concurrent/duration/Duration"),
+            "DurationIsOrdered$",
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            declared
+                .methods
+                .iter()
+                .any(|method| method.name == "compare")
+        );
+        assert!(!declared.inherited_only_module);
+    }
+
+    #[test]
     fn nested_division_requires_the_declared_outer_parameter_and_a_real_method() {
         use dotty_classfile::{
             access_flags::{ACC_BRIDGE, ACC_SYNTHETIC},

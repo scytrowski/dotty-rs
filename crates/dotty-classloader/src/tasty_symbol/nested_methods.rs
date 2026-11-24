@@ -2,6 +2,9 @@ use super::*;
 
 pub(crate) struct NestedMethods {
     pub(crate) methods: Vec<DecodedTastyMethod>,
+    // Verified against every raw template stat, including declarations whose
+    // signatures are unsupported by decode_members.
+    pub(crate) inherited_only_module: bool,
     // The unshadowed enclosing parameter in the source declaration /(A): A.
     division_parameter: Option<String>,
 }
@@ -88,7 +91,7 @@ pub(crate) fn nested_methods(
             let StructuredNode::TypeDef(DefinitionBody::TypeDef {
                 name,
                 type_or_template: RawTree::LengthNode(body),
-                ..
+                tail: inner_tail,
             }) = def.decode_structured()?
             else {
                 continue;
@@ -125,13 +128,55 @@ pub(crate) fn nested_methods(
                 }
                 _ => None,
             };
+            let inherited_only_module = is_static
+                && has_modifier(&inner_tail, OBJECT_TAG)
+                && template.type_params.is_empty()
+                && template.term_params.is_empty()
+                && has_only_module_boilerplate(&file, &template.stats)?;
             methods = Some(NestedMethods {
+                inherited_only_module,
                 methods: decoded,
                 division_parameter,
             });
         }
     }
     Ok(methods)
+}
+
+// Only the constructor and the compiler's private serialization hook are
+// known to belong to an otherwise empty nested module.
+fn has_only_module_boilerplate(
+    file: &TastyFile<'_>,
+    stats: &[RawTree<'_>],
+) -> Result<bool, TastyDecodeError> {
+    let mut found_constructor = false;
+    for stat in stats {
+        let RawTree::LengthNode(node) = stat else {
+            return Ok(false);
+        };
+        if node.tag != DEFDEF_TAG {
+            return Ok(false);
+        }
+        let StructuredNode::DefDef(method) = node.decode_structured()? else {
+            return Ok(false);
+        };
+        if method.parameters().next().is_some()
+            || method
+                .tail
+                .iter()
+                .any(|part| matches!(part, DefinitionTail::Annotation(_)))
+        {
+            return Ok(false);
+        }
+        match wire_name(file, method.name).as_deref() {
+            Some("<init>") if !found_constructor => found_constructor = true,
+            Some("writeReplace")
+                if has_modifier(&method.tail, SYNTHETIC_TAG)
+                    && has_modifier(&method.tail, PRIVATE_TAG) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(found_constructor)
 }
 
 // Inspect the original definitions: unsupported overloads can be absent

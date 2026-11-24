@@ -8670,17 +8670,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     matching.next().is_none().then_some(method)
                 })
             };
+            let source_instance_method = !method.access_flags.is_static()
+                && !method.access_flags.is_bridge()
+                && !method.access_flags.is_synthetic()
+                && !method.access_flags.is_varargs();
             let contextual = named(&method_name).filter(|m| {
-                !method.access_flags.is_static()
-                    && !method.access_flags.is_bridge()
-                    && !method.access_flags.is_synthetic()
-                    && !method.access_flags.is_varargs()
+                source_instance_method
                     && signature.as_ref().is_some_and(|sig| {
                         tasty_symbol::matches_contextual_projection(m, sig, &descriptor)
                     })
             });
-            let inherited = returns_inner
-                && decoded.is_some_and(|methods| methods.iter().all(|m| m.name != method_name))
+            let inherited = source_instance_method
+                && returns_inner
+                && nested.is_some_and(|nested| nested.inherited_only_module)
                 && parents
                     .iter()
                     .filter_map(|p| self.store.types.get(*p).reference_symbol())
