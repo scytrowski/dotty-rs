@@ -2442,6 +2442,13 @@ to the client. `NamedClassSources::definition_at` uses those bindings and
 the original files' navigation indices. For JVM planning, `complete`
 distinguishes a missing body, a partial body and a rejected class.
 
+Direct constructor, class-header, member-signature and body diagnostics can
+be retained as `SemanticDiagnostic`. The report carries its phase and
+declaring context separately from the original typer issue and source
+location. Structural rejections preserve the requested symbol. Body warnings
+carry their class and source range. Consumers choose wording and position
+encoding and can keep the report after the original arenas are dropped.
+
 After signature completion, `dotty::check_class_body` uses the same resolver
 to check every member in declaration order. Each failed method or field
 initializer contributes its first error and rolls back its own typing attempt.
