@@ -216,6 +216,14 @@ impl SignatureDependencies {
         self.failed.insert(symbol);
     }
 
+    /// Classifies the observed wait for one symbol without changing the graph
+    /// or releasing retries. A symbol without an outgoing wait yields `None`.
+    /// Use [`Self::blockages`] to share traversal when querying several roots.
+    pub fn blockage(&self, symbol: SymbolId) -> Option<SignatureBlockage> {
+        self.waiting_on(symbol)?;
+        Some(self.trace(symbol, &mut HashMap::new()))
+    }
+
     /// Classifies still-blocked roots in input order, omitting roots without a wait.
     /// Paths shared by several roots are visited once per query. All references
     /// to the same cycle share its path, starting at the first participant reached.
@@ -352,6 +360,26 @@ mod tests {
             assert_eq!(cycle.path(), [a, a]);
         }
     }
+    #[test]
+    fn point_queries_distinguish_the_cycle_and_preserve_retry_order() {
+        let d = Definitions::bootstrap(&mut SemanticStore::new());
+        let (leaf, a, b, other) = (d.any_class, d.object_class, d.null_class, d.nothing_class);
+        let mut graph = SignatureDependencies::new(SignaturePhase::Headers);
+        for (id, provider) in [(leaf, a), (a, b), (b, a)] {
+            graph.record(id, BlockedOn(provider));
+        }
+        assert!(
+            matches!(graph.blockage(leaf),Some(SignatureBlockage::DependsOnCycle(c)) if c.path()==[a,b,a])
+        );
+        for (id, path) in [(a, [a, b, a]), (b, [b, a, b])] {
+            assert!(
+                matches!(graph.blockage(id),Some(SignatureBlockage::CycleMember(c)) if c.path()==path)
+            );
+        }
+        assert_eq!(graph.blockage(other), None);
+        assert_eq!(graph.record(a, Complete(d.int)), [leaf, b]);
+    }
+
     #[test]
     fn wakes_only_current_waiters_once_in_registration_order() {
         let d = Definitions::bootstrap(&mut SemanticStore::new());
