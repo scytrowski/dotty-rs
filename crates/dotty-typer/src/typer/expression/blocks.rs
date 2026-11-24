@@ -1719,6 +1719,14 @@ impl SourceTyper<'_> {
         // The public signature abstracts term parameters to ParamRefs. Inside
         // its own body those paths still denote the entered parameter symbols.
         let mut body_result = result;
+        // In a projection such as Factory[B]#Ops, the outer argument in the
+        // signature is bound by the method's PolyType. A witness used inside
+        // the body still carries the source symbol B in its declared type.
+        if matches!(self.arena.get(definition.tpt).kind, TreeKind::Select(ref sel) if sel.is_type_projection)
+            && !definition.type_params.is_empty()
+        {
+            method_binders.push(signature);
+        }
         for binder in method_binders {
             if self.type_contains_param_ref(result, binder)? {
                 if let Some(declared) = self.type_index.type_at(self.source, definition.tpt) {

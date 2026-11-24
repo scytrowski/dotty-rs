@@ -5,11 +5,45 @@ pub(crate) struct NestedMethods {
     // Verified against every raw template stat, including declarations whose
     // signatures are unsupported by decode_members.
     pub(crate) inherited_only_module: bool,
+    // Non-static unary outer and its unshadowed type parameter.
+    outer_parameter: Option<(BinaryName, String)>,
     // The unshadowed enclosing parameter in the source declaration /(A): A.
     division_parameter: Option<String>,
 }
 
 impl NestedMethods {
+    /// Confirms the source parameter against both the generic signature and the
+    /// erased descriptor. The caller authenticates the hidden JVM parameter.
+    pub(crate) fn constructor_parameter<'a>(
+        &'a self,
+        method: &DecodedTastyMethod,
+        sig: &dotty_classfile::signature::MethodSignature,
+        descriptor: &dotty_classfile::descriptor::MethodDescriptor,
+        names: &[Option<String>],
+    ) -> Option<&'a str> {
+        use dotty_classfile::descriptor::FieldType;
+        use dotty_classfile::signature::{
+            ReferenceTypeSignature::TypeVariable, TypeSignature::Reference,
+        };
+        let (outer, variable) = self.outer_parameter.as_ref()?;
+        let [value] = method.parameters.as_slice() else {
+            return None;
+        };
+        (method.name == "<init>"
+            && method.has_term_clause
+            && method.term_clauses.is_none()
+            && method.type_parameters.is_empty()
+            && !value.erased
+            && value.declared_type == Some(DecodedTastyType::ClassParamRef(0))
+            && matches!(names, [Some(hidden), Some(user)] if hidden == "$outer" && user == &value.name)
+            && sig.type_parameters.is_empty()
+            && sig.result.is_none()
+            && matches!(sig.parameters.as_slice(), [Reference(TypeVariable(v))] if v == variable)
+            && descriptor.return_type.is_none()
+            && matches!(descriptor.parameters.as_slice(), [FieldType::Object(first), FieldType::Object(second)] if first == outer.as_internal() && second == "java/lang/Object"))
+            .then_some(variable.as_str())
+    }
+
     pub(crate) fn matches_division(
         &self,
         flags: MethodAccessFlags,
@@ -135,6 +169,7 @@ pub(crate) fn nested_methods(
                 && has_only_module_boilerplate(&file, &template.stats)?;
             methods = Some(NestedMethods {
                 inherited_only_module,
+                outer_parameter: parameter.map(|(_, name)| (owner.clone(), name.clone())),
                 methods: decoded,
                 division_parameter,
             });

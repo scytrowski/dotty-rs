@@ -78,7 +78,7 @@ impl SourceTyper<'_> {
             let ancestors = self.contextual_ancestors(owner, journal)?;
             let mut ineligible_named = Vec::new();
             let mut eligible_named = HashSet::new();
-            for target in self.contextual_members(members, journal)? {
+            for ContextualRef { symbol: target, .. } in self.contextual_members(members, journal)? {
                 let entry = self.store.symbols.get(target);
                 if !entry
                     .owner

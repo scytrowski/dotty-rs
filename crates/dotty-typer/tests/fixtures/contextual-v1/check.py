@@ -29,6 +29,7 @@ SUPPLEMENTAL_CONTROLS = (
     "typer::tests::contextual_arguments::case_class_bound_reports_missing_and_ambiguous_evidence_at_apply",
     "typer::tests::contextual_arguments::case_class_copy_defaults_the_field_and_forwards_the_call_site_witness",
     "typer::tests::contextual_arguments::case_class_copy_reports_missing_and_ambiguous_call_site_evidence",
+    MODULE + "numeric_ops_parent::inherited_constructor_checks_the_argument_against_the_outer_base_view",
 )
 
 
@@ -205,7 +206,10 @@ def main():
     checkout = Path(os.environ["SCALA39_ROOT"]).resolve()
     print(f"{tc.compiler_version}; JDK {tc.jdk_release['JAVA_VERSION']}", flush=True)
     rows = cases()
+    by_source = {}
     for source, code, needles in rows.values():
+        by_source.setdefault((source, code), []).extend(needles)
+    for (source, code), needles in by_source.items():
         with tempfile.TemporaryDirectory() as out:
             scala_observation(tc, checkout, source, code, needles, out)
     check_controls(tc, checkout)

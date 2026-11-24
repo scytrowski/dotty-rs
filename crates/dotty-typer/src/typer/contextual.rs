@@ -25,6 +25,7 @@ struct ContextualRef {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextualReceiver {
+    Enclosing(SymbolId),
     Companion(SymbolId),
     Path(TypeId),
     Import(TreeId<Typed>),
@@ -471,6 +472,10 @@ impl SourceTyper<'_> {
         let name = self.store.symbols.get(evidence.symbol).name;
         if let Some(receiver) = evidence.receiver {
             let qualifier = match receiver {
+                ContextualReceiver::Enclosing(class) => {
+                    let name = self.store.symbols.get(class).name;
+                    self.type_resolved_this(class, Some(name), context.owner, tree_index, position)?
+                }
                 ContextualReceiver::Import(tree) => tree,
                 ContextualReceiver::Path(path) => {
                     self.contextual_path_tree(path, position, tree_index)?
@@ -667,14 +672,7 @@ impl SourceTyper<'_> {
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<ContextualRef>, TyperError> {
         let ContextualScope { scope, imports } = level;
-        let mut refs: Vec<_> = self
-            .contextual_members(scope, journal)?
-            .into_iter()
-            .map(|symbol| ContextualRef {
-                symbol,
-                receiver: None,
-            })
-            .collect();
+        let mut refs = self.contextual_members(scope, journal)?;
         for (import, lexical) in imports {
             self.contextual_import_refs(import, lexical, tree_index, journal, &mut refs)?;
         }
@@ -691,6 +689,9 @@ impl SourceTyper<'_> {
         let symbol = evidence.symbol;
         let reference = if let Some(receiver) = evidence.receiver {
             let prefix = match receiver {
+                ContextualReceiver::Enclosing(class) => {
+                    self.store.types.alloc(Type::ThisType { class })
+                }
                 ContextualReceiver::Import(tree) => self.typed_arena.get(tree).ty,
                 ContextualReceiver::Path(path) => path,
                 ContextualReceiver::Companion(object) => {
@@ -1629,7 +1630,7 @@ impl SourceTyper<'_> {
             named.entry(selector.imported.text()).or_insert(visible);
         }
         for scope in scopes {
-            for symbol in self.contextual_members(scope, journal)? {
+            for ContextualRef { symbol, .. } in self.contextual_members(scope, journal)? {
                 let entry = self.store.symbols.get(symbol);
                 if entry.visibility != Visibility::Public {
                     continue;
@@ -1698,7 +1699,7 @@ impl SourceTyper<'_> {
         &mut self,
         scope: ScopeId,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Vec<SymbolId>, TyperError> {
+    ) -> Result<Vec<ContextualRef>, TyperError> {
         let Some(class) = self.store.scopes.get(scope).owner.filter(|&owner| {
             matches!(
                 self.store.symbols.get(owner).kind,
@@ -1716,7 +1717,7 @@ impl SourceTyper<'_> {
         // Use ordinary lookup for each inherited name so a non-given override
         // can still hide the inherited declaration.
         for (_, scope) in ancestors {
-            for symbol in self.contextual_symbols(scope) {
+            for ContextualRef { symbol, .. } in self.contextual_symbols(scope) {
                 names.insert(self.store.symbols.get(symbol).name);
             }
         }
@@ -1732,9 +1733,14 @@ impl SourceTyper<'_> {
                     && entry.visibility == Visibility::Public
                     && (entry.flags.contains(SymbolFlags::GIVEN)
                         || entry.flags.contains(SymbolFlags::IMPLICIT))
-                    && !symbols.contains(&candidate.symbol)
+                    && !symbols.iter().any(|entry| entry.symbol == candidate.symbol)
                 {
-                    symbols.push(candidate.symbol);
+                    // Keep the lexical subclass as the receiver when search begins
+                    // in a nested class. It supplies the inherited type arguments.
+                    symbols.push(ContextualRef {
+                        symbol: candidate.symbol,
+                        receiver: Some(ContextualReceiver::Enclosing(class)),
+                    });
                 }
             }
         }
@@ -1776,7 +1782,7 @@ impl SourceTyper<'_> {
         .then_some(owner)
     }
 
-    fn contextual_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
+    fn contextual_symbols(&self, scope: ScopeId) -> Vec<ContextualRef> {
         let mut symbols: Vec<_> = self
             .store
             .scopes
@@ -1798,6 +1804,12 @@ impl SourceTyper<'_> {
         });
         symbols.dedup();
         symbols
+            .into_iter()
+            .map(|symbol| ContextualRef {
+                symbol,
+                receiver: None,
+            })
+            .collect()
     }
 
     pub(super) fn expected_value_at(&self, tree_index: u32) -> Option<TypeId> {

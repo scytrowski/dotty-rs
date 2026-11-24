@@ -266,7 +266,9 @@ impl SourceTyper<'_> {
             };
         let candidate_set =
             self.constructor_application_candidates_for_class(class, info_journal)?;
-        let candidates = candidate_set.applicable_signatures;
+        let mut candidates = candidate_set.applicable_signatures;
+        self.adapt_inherited_outer_constructor(instance_type, &mut candidates, info_journal)?;
+        self.adapt_source_member_constructor(instance_type, &mut candidates, info_journal)?;
         let candidate = match candidates.as_slice() {
             [] if candidate_set.rejected_incomplete.is_empty() => {
                 return Err(TyperError::ConstructorApplicationUnavailable { class });
@@ -488,6 +490,144 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, function_tree));
         Ok(Some((typed, callable, inferred_arguments)))
+    }
+
+    // An unqualified inherited inner class keeps the source subclass's
+    // `this` prefix. Its constructor is declared in the binary base, whose
+    // enclosing parameters must be read in that subclass's applied base view.
+    fn adapt_inherited_outer_constructor(
+        &mut self,
+        instance: TypeId,
+        candidates: &mut [ConstructorCandidate],
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(inner),
+        } = *self.store.types.get(instance)
+        else {
+            return Ok(());
+        };
+        let Type::ThisType { class: enclosing } = *self.store.types.get(prefix) else {
+            return Ok(());
+        };
+        let declaration = self.store.symbols.get(inner);
+        let Some(base) = declaration.owner else {
+            return Ok(());
+        };
+        if !matches!(declaration.origin, SymbolOrigin::Classfile(_))
+            || !self.is_current_source_symbol(enclosing)
+            || !matches!(
+                self.store.symbols.get(base).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return Ok(());
+        }
+        let info = self
+            .class_info(enclosing, journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let mut views = info.parents.iter().copied().filter(|parent| {
+            matches!(self.store.types.get(*parent), Type::Applied { tycon, .. }
+                if self.store.types.get(*tycon).reference_symbol() == Some(base))
+        });
+        let Some(base_view) = views.next() else {
+            return Ok(());
+        };
+        if views.next().is_some() {
+            return Err(TyperError::ExternalGenericInstantiationDeferred { class: base });
+        }
+        let receiver_view = self.store.types.alloc(Type::type_ref(base_view, inner));
+        for candidate in candidates {
+            candidate.callable = self.member_type_on_journaled(
+                &crate::MemberCandidate {
+                    symbol: candidate.symbol,
+                    declaring_class: inner,
+                    receiver_view,
+                    inheritance_depth: 0,
+                },
+                journal,
+            )?;
+        }
+        Ok(())
+    }
+
+    // For new p.Inner(...), both Outer.this and the formal parameters of
+    // Outer in the constructor signature are interpreted from p.
+    fn adapt_source_member_constructor(
+        &mut self,
+        instance: TypeId,
+        candidates: &mut [ConstructorCandidate],
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(inner),
+        } = *self.store.types.get(instance)
+        else {
+            return Ok(());
+        };
+        let Some(outer) = self.store.symbols.owner(inner) else {
+            return Ok(());
+        };
+        if !self.is_current_source_symbol(inner)
+            || !matches!(
+                self.store.symbols.get(outer).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return Ok(());
+        }
+        let substitutions = match self.store.types.get(prefix) {
+            Type::ThisType { class } if *class == outer => Vec::new(),
+            Type::TermRef { .. } => {
+                let actual = self.widen_expression_type_journaled(prefix, journal, 0)?;
+                let (tycon, args) = match self.store.types.get(actual) {
+                    Type::Applied { tycon, args } => (*tycon, args.as_slice()),
+                    _ => (actual, &[][..]),
+                };
+                if self.store.types.get(tycon).reference_symbol() != Some(outer) {
+                    return Ok(());
+                }
+                let parameters = self.source_class_type_parameters(outer)?;
+                if parameters.len() != args.len() {
+                    return Err(TyperError::ReceiverGenericArityMismatch {
+                        class: outer,
+                        expected: parameters.len(),
+                        actual: args.len(),
+                    });
+                }
+                parameters.into_iter().zip(args.iter().copied()).collect()
+            }
+            _ => return Ok(()),
+        };
+        for candidate in candidates {
+            let Type::Method(method) = self.store.types.get(candidate.callable) else {
+                continue;
+            };
+            if !matches!(self.store.types.get(method.result), Type::TypeRef { prefix: p, target: TypeRefTarget::Symbol(result) } if *p == self.definitions.no_prefix && *result == inner)
+                || self.type_contains_param_ref(candidate.callable, candidate.callable)?
+            {
+                continue;
+            }
+            // The declaration keeps its prefix-free result. A direct, single-clause
+            // constructor yields the precise class selected by this new expression.
+            let mut method = method.clone();
+            method.result = instance;
+            for param in &mut method.params {
+                let signature =
+                    dotty_core::types::substitute_this_type(self.store, param.ty, outer, prefix)
+                        .map_err(TyperError::TypeSubstitution)?;
+                param.ty = dotty_core::types::substitute_type_symbols(
+                    self.store,
+                    signature,
+                    &substitutions,
+                )
+                .map_err(TyperError::TypeSubstitution)?;
+            }
+            candidate.callable = self.store.types.alloc(Type::Method(method));
+        }
+        Ok(())
     }
 
     pub(in crate::typer) fn constructor_instance_type_arguments(

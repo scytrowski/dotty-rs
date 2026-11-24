@@ -1,0 +1,4 @@
+ops_division	library/src/scala/math/Fractional.scala	0	class FractionalOps(lhs: Fractional.this.T) extends Fractional.this.NumericOps(FractionalOps.this.lhs) ~~ def /(rhs: Fractional.this.T): T = Fractional.this.div(FractionalOps.this.lhs, rhs)
+member_factory	library/src/scala/math/Fractional.scala	0	override implicit def mkNumericOps(lhs: Fractional.this.T): Fractional.this.FractionalOps = new Fractional.this.FractionalOps(lhs)
+contextual_factory	library/src/scala/math/Fractional.scala	0	implicit def infixFractionalOps[T >: Nothing <: Any](x: T)( implicit num: scala.math.Fractional[T]): scala.math.Fractional[T]#FractionalOps = new num.FractionalOps(x)
+companion_apply	library/src/scala/math/Fractional.scala	0	def apply[T >: Nothing <: Any]( implicit frac: scala.math.Fractional[T]): scala.math.Fractional[T] = frac

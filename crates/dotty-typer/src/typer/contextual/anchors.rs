@@ -63,7 +63,7 @@ impl SourceTyper<'_> {
             .class_info(class, journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
             .declarations;
-        for symbol in self.contextual_members(scope, journal)? {
+        for ContextualRef { symbol, .. } in self.contextual_members(scope, journal)? {
             let reference = ContextualRef {
                 symbol,
                 receiver: Some(receiver),
