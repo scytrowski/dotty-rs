@@ -386,8 +386,7 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
     );
 }
 
-// Scheduling belongs to the consumer. The index identifies the owning source
-// even when different files reuse the same input tree slots.
+// The client selects roots and owns the header products used for JVM planning.
 #[derive(Debug, Default)]
 struct TypedHeaders {
     ready: Vec<SymbolId>,
@@ -423,7 +422,7 @@ fn complete_headers(
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
     let mut headers = TypedHeaders::default();
-    let mut phase = dotty::ClassHeaderPhase::try_prepare(
+    let phase = dotty::ClassHeaderPhase::try_prepare(
         sources,
         store,
         definitions,
@@ -431,29 +430,12 @@ fn complete_headers(
         &mut headers.arena,
         &mut headers.bindings,
     )
-    .map_err(SignatureError::Header)?;
-    for (_, root) in sources.classes() {
-        if phase.is_ready(root.symbol) {
-            continue;
-        }
-        let mut ready = vec![root.symbol];
-        while let Some(symbol) = ready.pop() {
-            let Ok(attempt) = phase.attempt(symbol) else {
-                let failure = phase.into_failure(symbol).expect("rejected header");
-                return Err(SignatureError::Header(failure));
-            };
-            observe(symbol, attempt.completion);
-            ready.extend(attempt.retry.into_iter().rev());
-            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
-                if let Some(dotty::SignatureBlockage::CycleMember(cycle)) =
-                    phase.dependencies().blockage(provider)
-                {
-                    return Err(SignatureError::Cycle(cycle));
-                }
-                ready.push(provider);
-            }
-        }
-    }
+    .map_err(SignatureError::Header)?
+    .try_complete_roots(sources.classes().map(|(_, class)| class.symbol), observe)
+    .map_err(|failure| match failure {
+        dotty::SignatureRunError::Rejected(error) => SignatureError::Header(error),
+        dotty::SignatureRunError::Cycle(cycle) => SignatureError::Cycle(cycle),
+    })?;
     headers.ready = phase.finish().ready;
     Ok(headers)
 }
@@ -517,32 +499,12 @@ fn complete_member_paths<'s, 'file>(
     packages: &'s Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<dotty::MemberSignaturePhase<'s, 'file>, SignatureError> {
-    let mut phase = dotty::MemberSignaturePhase::new(selection, store, definitions, packages);
-    let mut ready = Vec::new();
-    for root in roots {
-        if phase.is_ready(root) {
-            continue;
-        }
-        ready.push(root);
-        while let Some(symbol) = ready.pop() {
-            let Ok(attempt) = phase.attempt(symbol) else {
-                return Err(SignatureError::Member(
-                    phase.into_failure(symbol).expect("rejected member"),
-                ));
-            };
-            observe(symbol, attempt.completion);
-            ready.extend(attempt.retry.into_iter().rev());
-            if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
-                if let Some(dotty::SignatureBlockage::CycleMember(cycle)) =
-                    phase.dependencies().blockage(provider)
-                {
-                    return Err(SignatureError::Cycle(cycle));
-                }
-                ready.push(provider);
-            }
-        }
-    }
-    Ok(phase)
+    dotty::MemberSignaturePhase::new(selection, store, definitions, packages)
+        .try_complete_roots(roots, dotty::core::NoResolver, observe)
+        .map_err(|failure| match failure {
+            dotty::SignatureRunError::Rejected(error) => SignatureError::Member(error),
+            dotty::SignatureRunError::Cycle(cycle) => SignatureError::Cycle(cycle),
+        })
 }
 
 fn with_plan<R>(

@@ -224,6 +224,37 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
         }
     }
 
+    /// Completes roots in caller order, following each blocked provider immediately.
+    /// Roots already ready are skipped. Released waiters run in registration order
+    /// before the next root. The observer receives each successful or blocked
+    /// attempt, including retries. All symbols belong to the preparation session.
+    /// Returns the phase on success, or its first owned rejection or cycle.
+    /// Previously committed signatures and bindings survive an error.
+    pub fn try_complete_roots(
+        self,
+        roots: impl IntoIterator<Item = SymbolId>,
+        observe: impl FnMut(SymbolId, crate::typer::SignatureCompletion),
+    ) -> Result<Self, crate::SignatureRunError<ClassHeaderFailure>> {
+        crate::signature_schedule::try_complete_roots(
+            self,
+            roots,
+            Self::is_ready,
+            |phase, symbol| phase.attempt(symbol).ok(),
+            Self::dependencies,
+            Self::into_failure,
+            observe,
+        )
+    }
+
+    /// Visits all indexed classes in source order, then processes released retries
+    /// in FIFO order until the queue is empty. Continues independent classes
+    /// after direct rejections and leaves cycles in the graph for [`Self::finish`].
+    /// Uses this phase's store, arena and header bindings throughout.
+    pub fn complete_all(&mut self) {
+        let roots = self.sources.classes().map(|(_, class)| class.symbol);
+        crate::signature_schedule::complete_all(roots, |id| self.attempt(id).ok());
+    }
+
     /// Stops the phase and moves out the direct error for one class, if present.
     /// Use after a rejected attempt when stopping at the first error. This skips
     /// classification of the remaining graph. Use [`Self::finish`] to keep all errors.

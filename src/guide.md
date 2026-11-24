@@ -275,13 +275,15 @@ files. Preserve the same typed arena and header bindings for later planning.
 ## Check members of ready classes after header completion
 
 [`ClassHeaderPhase::prepare`] checks the constructors of the selected sources.
-An editor can then attempt all headers and queue the waiters released by each
-completion. A compiler can use [`ClassHeaderPhase::try_prepare`] to stop at the
-first rejected constructor, follow a blocked provider immediately and use
-[`ClassHeaderPhase::into_failure`] to take ownership of a rejected header.
+An editor can call [`ClassHeaderPhase::complete_all`] and
+[`MemberSignaturePhase::complete_all`] to process independent declarations and
+retain the original errors and cycle reports. A compiler can instead use
+[`ClassHeaderPhase::try_prepare`] and pass its ordered roots to
+[`ClassHeaderPhase::try_complete_roots`] or [`MemberSignaturePhase::try_complete_roots`].
+These operations follow dependencies immediately and return a [`SignatureRunError`]
+on the first rejection or cycle. The single-attempt API also supports custom scheduling.
 
 ```rust
-use std::collections::VecDeque;
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
 use dotty::typer::TyperError;
 use dotty::{MemberSignatureFailure, MemberSignaturePhase};
@@ -306,12 +308,7 @@ let sources = NamedClassSources::new(&files, &store)?;
 let mut arena = AstArena::new();
 let mut bindings = ClassHeaderBindings::default();
 let mut phase = ClassHeaderPhase::prepare(&sources, &mut store, defs, &packages, &mut arena, &mut bindings);
-let mut work: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
-while let Some(class) = work.pop_front() {
-    if let Ok(attempt) = phase.attempt(class) {
-        work.extend(attempt.retry);
-    }
-}
+phase.complete_all();
 let report = phase.finish();
 let good = &files[0].classes()[0];
 assert_eq!(report.ready, [good.symbol, files[1].classes()[0].symbol]);
@@ -323,12 +320,7 @@ assert!(matches!(&failure.error, ClassHeaderError::Typing(e)
 
 let selection = sources.member_signatures(report.ready, &store)?;
 let mut signatures = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
-work.extend(selection.members().iter().copied());
-while let Some(member) = work.pop_front() {
-    if let Ok(attempt) = signatures.attempt(member) {
-        work.extend(attempt.retry);
-    }
-}
+signatures.complete_all(dotty::core::NoResolver);
 let (signatures, bodies) = signatures.finish_with_body_work();
 let value = good.methods().next().unwrap();
 assert!(signatures.ready.contains(&value.symbol));
@@ -1066,14 +1058,16 @@ let report = {
     let sources = NamedClassSources::new(&units, &store)?;
 #     let mut arena = AstArena::new();
 #     let mut bindings = ClassHeaderBindings::default();
-    let mut phase = ClassHeaderPhase::try_prepare(
+    let phase = ClassHeaderPhase::try_prepare(
         &sources, &mut store, defs, &packages, &mut arena, &mut bindings,
     )?;
     let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);
 
-    assert_eq!(phase.attempt(leaf).unwrap().completion, SignatureCompletion::BlockedOn(base));
-    assert_eq!(phase.attempt(base).unwrap().retry, [leaf]);
-    assert!(matches!(phase.attempt(leaf).unwrap().completion, SignatureCompletion::Complete(_)));
+    let mut attempts = Vec::new();
+    let mut phase = phase.try_complete_roots([leaf], |id, result| attempts.push((id, result)))?;
+    assert!(matches!(attempts.as_slice(), [(l, SignatureCompletion::BlockedOn(p)),
+        (b, SignatureCompletion::Complete(_)), (retry, SignatureCompletion::Complete(_))]
+        if (*l, *p, *b, *retry) == (leaf, base, base, leaf)));
     phase.attempt(a).unwrap();
     phase.attempt(b).unwrap();
     let Some(SignatureBlockage::CycleMember(cycle)) = phase.dependencies().blockage(a) else {

@@ -148,15 +148,10 @@ fn a_method_can_be_the_first_use_of_the_external_type_in_a_session() {
         let selected = sources
             .member_signatures(headers.finish().ready, &store)
             .unwrap();
-        let mut phase = dotty::MemberSignaturePhase::new(&selected, &mut store, defs, &packages);
+        let result = dotty::MemberSignaturePhase::new(&selected, &mut store, defs, &packages)
+            .try_complete_roots([method], &mut resolver, |_, _| {});
         if present {
-            assert!(matches!(
-                phase
-                    .attempt_with_resolver(method, &mut resolver)
-                    .unwrap()
-                    .completion,
-                SignatureCompletion::Complete(_)
-            ));
+            let phase = result.unwrap();
             let (_, work) = phase.finish_with_body_work();
             let (_, report) = work.check(
                 owner.symbol,
@@ -194,7 +189,7 @@ fn a_method_can_be_the_first_use_of_the_external_type_in_a_session() {
             ));
         } else {
             assert!(
-                matches!(phase.attempt_with_resolver(method,&mut resolver),Err(dotty::MemberSignatureError::Typing {member,error:TyperError::TypeNameNotFound {source,..},..}) if *member==method && *source==id)
+                matches!(result, Err(dotty::SignatureRunError::Rejected(dotty::MemberSignatureError::Typing {member,error:TyperError::TypeNameNotFound {source,..},..})) if member == method && source == id)
             );
         }
     }

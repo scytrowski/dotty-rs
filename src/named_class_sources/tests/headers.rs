@@ -598,3 +598,76 @@ fn cycle_report_groups_disjoint_cycles_even_when_the_first_root_is_a_dependent()
         );
     }
 }
+
+#[test]
+fn header_root_order_controls_attempts_and_skips_repeated_ready_roots() {
+    for base_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let leaf = named(
+            8,
+            "class Leaf(x: Int) extends Mid(x)",
+            &mut store,
+            &mut packages,
+        );
+        let mid = named(
+            2,
+            "class Mid(x: Int) extends Base(x)",
+            &mut store,
+            &mut packages,
+        );
+        let base = named(6, "class Base(x: Int)", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&leaf, &mid, &base], &store).unwrap();
+        let [leaf, mid, base] = [&leaf, &mid, &base].map(|f| f.classes()[0].symbol);
+        let roots = if base_first {
+            [base, mid, leaf, leaf]
+        } else {
+            [leaf, mid, base, leaf]
+        };
+        let mut arena = Default::default();
+        let mut bindings = Default::default();
+        let phase = crate::ClassHeaderPhase::try_prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        let report = phase
+            .try_complete_roots(roots, |symbol, completion| {
+                seen.push((
+                    symbol,
+                    match completion {
+                        SignatureCompletion::Complete(_) => None,
+                        SignatureCompletion::BlockedOn(provider) => Some(provider),
+                    },
+                ))
+            })
+            .unwrap()
+            .finish();
+        if base_first {
+            assert_eq!(seen, [(base, None), (mid, None), (leaf, None)]);
+        } else {
+            assert_eq!(
+                seen,
+                [
+                    (leaf, Some(mid)),
+                    (mid, Some(base)),
+                    (base, None),
+                    (mid, None),
+                    (leaf, None)
+                ]
+            );
+        }
+        assert_eq!(report.ready, [leaf, mid, base]);
+        assert!(
+            report.failures.is_empty()
+                && report.remaining.is_empty()
+                && report.blockages.is_empty()
+        );
+    }
+}

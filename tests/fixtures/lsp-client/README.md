@@ -59,7 +59,7 @@ call between overloads preserves the other caller, even with a failing sibling. 
 publication. Two inferred fields with matching bad calls retain independent
 markers as each field is repaired.
 
-The fixture drives `ClassHeaderPhase` in queue order. Its final report supplies
+The fixture uses `ClassHeaderPhase::complete_all` to visit headers and retry released waiters. Its final report supplies
 the classes eligible for member checking, dependency blockages and the original
 constructor and header errors. A protocol test checks that the
 marker on the parent argument clears after an unsaved change to its type.
@@ -71,7 +71,7 @@ Its own call becomes navigable once the base class is repaired.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 
-The fixture uses `MemberSignaturePhase` for members selected from ready classes.
+The fixture passes its session resolver to `MemberSignaturePhase::complete_all` for members selected from ready classes.
 A protocol test breaks the initializer of `seed`, checks the original diagnostic
 and an independent sibling error, then repairs the initializer and verifies the
 cross-file definition link in both UTF-8 and UTF-16. Completion wakes

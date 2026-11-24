@@ -51,6 +51,9 @@ pub use class_field_signatures::{
 mod signature_blockage_report;
 pub use signature_blockage_report::SignatureBlockageReport;
 
+mod signature_schedule;
+pub use signature_schedule::SignatureRunError;
+
 mod signature_dependencies;
 pub use signature_dependencies::{
     SignatureAttempt, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
