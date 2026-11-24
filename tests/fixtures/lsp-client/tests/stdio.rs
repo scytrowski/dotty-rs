@@ -1049,3 +1049,59 @@ fn overloaded_method_parameters_navigate_by_symbol_in_both_encodings() {
         client.shutdown();
     }
 }
+
+#[test]
+fn nested_locals_keep_distinct_references_when_a_sibling_body_fails() {
+    let lines = [
+        "class A {",
+        "  def read(): Int = { /* 😀 */ val x = 1;",
+        "    val before = x;",
+        "    { /* 😀 */ val x = 2; x };",
+        "    before + x }",
+        "  def only(i: Int): Int = i",
+        "  def bad(): Int = { val lost = 4; only(lost) }",
+        "}",
+    ];
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &lines.join("\n"));
+        let col = |line: usize, token: &str| token_column(encoding, lines[line], token);
+        let location = |line, col| json!({"uri":A,"range":range(line,col,col+1)});
+        let lost = col(6, "lost =");
+        let arg = col(6, "only(") + 5;
+        assert_eq!(
+            client.references(A, 6, lost, false),
+            json!([{"uri":A,"range":range(6,arg,arg+4)}])
+        );
+        for version in [1, 2] {
+            if version == 2 {
+                client.edit(A, 2, range(6, arg, arg + 4), "false");
+                client.diagnostics(A,2,json!([{"range":range(6,arg,arg+5),"source":"dotty","severity":1,
+                    "code":"typer.application_argument_type_mismatch","message":"Expected Int, found Boolean"}]));
+                assert_eq!(client.references(A, 6, lost, true), Value::Null);
+            }
+            for (decl_line, read_sites) in [
+                (1, vec![(2, col(2, "x;")), (4, col(4, "x }"))]),
+                (3, vec![(3, col(3, "x }"))]),
+            ] {
+                let decl = col(decl_line, "x =");
+                let reads: Vec<_> = read_sites.iter().map(|&(l, c)| location(l, c)).collect();
+                let mut all = vec![location(decl_line, decl)];
+                all.extend_from_slice(&reads);
+                for (line, c) in read_sites {
+                    assert_eq!(client.references(A, line, c, false), json!(reads));
+                    assert_eq!(client.references(A, line, c, true), json!(all));
+                    assert_eq!(
+                        client.request(
+                            "textDocument/definition",
+                            json!({"textDocument":{"uri":A},"position":{"line":line,"character":c}})
+                        ),
+                        json!([{"originSelectionRange":range(line,c,c+1),"targetUri":A,
+                        "targetRange":range(decl_line,decl-4,decl+5),"targetSelectionRange":range(decl_line,decl,decl+1)}])
+                    );
+                }
+            }
+        }
+        client.shutdown();
+    }
+}
