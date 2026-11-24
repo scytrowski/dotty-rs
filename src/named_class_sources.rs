@@ -488,6 +488,7 @@ mod tests {
 
     mod constructions;
     mod constructor_parameters;
+    mod constructor_types;
     mod field_access;
     mod headers;
     mod locals;
