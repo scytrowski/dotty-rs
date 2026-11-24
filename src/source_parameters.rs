@@ -1,4 +1,4 @@
-//! Canonical declarations of named parameters on source class methods.
+//! Canonical source parameters of class methods and primary constructors.
 use crate::core::ast::Modifier;
 use crate::core::{SemanticStore, SourceDefinition, SymbolId, SymbolKind, TreeKind};
 use crate::source_declarations::{Declaration, DeclarationDiagnostic, DeclarationError};
@@ -16,37 +16,91 @@ pub struct SourceMethodParameter {
     pub target: SourceMemberTarget,
 }
 
+/// Two identities of a plain parameter in a single ordinary primary constructor
+/// list. All symbols and ranges are meaningful only in the original session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceConstructorParameter {
+    /// Class that owns the canonical source parameter.
+    pub class: SymbolId,
+    /// Primary constructor that owns the formal used for constructor execution.
+    pub constructor: SymbolId,
+    /// Class-owned source symbol. Use this ID with [`crate::ResolvedMemberIndex::references_to`].
+    pub parameter: SymbolId,
+    /// Derived constructor-owned formal for the same source declaration.
+    pub formal: SymbolId,
+    /// Complete declaration and exact written name in the defining file.
+    pub target: SourceMemberTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ParameterDeclaration {
+    Method(SourceMethodParameter),
+    Constructor(SourceConstructorParameter),
+}
+
+impl ParameterDeclaration {
+    pub(crate) fn symbol(self) -> SymbolId {
+        match self {
+            Self::Method(p) => p.parameter,
+            Self::Constructor(p) => p.parameter,
+        }
+    }
+    pub(crate) fn target(self) -> SourceMemberTarget {
+        match self {
+            Self::Method(p) => p.target,
+            Self::Constructor(p) => p.target,
+        }
+    }
+}
+
 pub(crate) fn declarations(
     file: &NamedClassSource,
     store: &SemanticStore,
     diagnostics: &mut Vec<DeclarationDiagnostic>,
-) -> Vec<SourceMethodParameter> {
+) -> Vec<ParameterDeclaration> {
     let mut result = Vec::new();
     for class in file.classes() {
+        if let Some(SourceDefinition::Canonical { source, tree }) =
+            file.index().definition_of(class.constructor)
+            && source == file.source()
+            && let Err(error) = collect_list(
+                file,
+                Declaration {
+                    symbol: class.constructor,
+                    tree,
+                },
+                Some(class.symbol),
+                store,
+                &mut result,
+            )
+        {
+            diagnostics.push(error.diagnostic(file.ast()));
+        }
         for method in class.methods() {
-            if let Err(error) = collect_method(file, method, store, &mut result) {
+            if let Err(error) = collect_list(file, method, None, store, &mut result) {
                 diagnostics.push(error.diagnostic(file.ast()));
             }
         }
     }
-    result.sort_unstable_by_key(|p| p.target.name.start());
+    result.sort_unstable_by_key(|p| p.target().name.start());
     result
 }
 
-fn collect_method(
+fn collect_list(
     file: &NamedClassSource,
-    method: Declaration,
+    callable: Declaration,
+    class: Option<SymbolId>,
     store: &SemanticStore,
-    result: &mut Vec<SourceMethodParameter>,
+    result: &mut Vec<ParameterDeclaration>,
 ) -> Result<(), DeclarationError> {
     let source = file.source();
     let invalid = |tree| DeclarationError::InvalidBinding { source, tree };
-    let method_node = file
+    let definition = file
         .ast()
-        .try_get(method.tree)
-        .ok_or_else(|| invalid(method.tree))?;
-    let TreeKind::DefDef(def) = &method_node.kind else {
-        return Err(invalid(method.tree));
+        .try_get(callable.tree)
+        .ok_or_else(|| invalid(callable.tree))?;
+    let TreeKind::DefDef(def) = &definition.kind else {
+        return Err(invalid(callable.tree));
     };
     let [clause] = def.value_param_clauses.as_slice() else {
         return Ok(());
@@ -60,7 +114,21 @@ fn collect_method(
         let TreeKind::ValDef(val) = &node.kind else {
             return Err(invalid(tree));
         };
-        if val.metadata.modifiers != [Modifier::Param] {
+        let supported = if class.is_some() {
+            val.metadata.modifiers == [Modifier::ParamAccessor, Modifier::PrivateLocal]
+                && val.rhs.is_none()
+                && !matches!(
+                    file.ast()
+                        .try_get(val.tpt)
+                        .ok_or_else(|| invalid(val.tpt))?
+                        .kind,
+                    TreeKind::ByNameTypeTree(_)
+                        | TreeKind::PhaseSpecific(crate::core::ast::UntypedNode::PostfixOp(_))
+                )
+        } else {
+            val.metadata.modifiers == [Modifier::Param]
+        };
+        if !supported {
             continue;
         }
         let parameter = file
@@ -81,21 +149,46 @@ fn collect_method(
             .span()
             .range();
         if symbol.kind != SymbolKind::Parameter
-            || symbol.owner != Some(method.symbol)
+            || symbol.owner != Some(class.unwrap_or(callable.symbol))
             || name.start() < declaration.start()
             || name.end() > declaration.end()
         {
             return Err(invalid(tree));
         }
-        result.push(SourceMethodParameter {
-            parameter,
-            method: method.symbol,
-            target: SourceMemberTarget {
-                source,
-                name,
-                declaration,
-            },
-        });
+        let target = SourceMemberTarget {
+            source,
+            name,
+            declaration,
+        };
+        let parameter = if let Some(class) = class {
+            let constructor = callable.symbol;
+            let formal = file
+                .index()
+                .derived_symbol_at(constructor, source, tree)
+                .ok_or_else(|| invalid(tree))?;
+            if !store.symbols.contains(formal)
+                || store.symbols.get(formal).kind != SymbolKind::Parameter
+                || store.symbols.get(formal).owner != Some(constructor)
+                || file.index().definition_of(formal)
+                    != Some(SourceDefinition::Derived { source, tree })
+            {
+                return Err(invalid(tree));
+            }
+            ParameterDeclaration::Constructor(SourceConstructorParameter {
+                class,
+                constructor,
+                parameter,
+                formal,
+                target,
+            })
+        } else {
+            ParameterDeclaration::Method(SourceMethodParameter {
+                parameter,
+                method: callable.symbol,
+                target,
+            })
+        };
+        result.push(parameter);
     }
     Ok(())
 }

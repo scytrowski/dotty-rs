@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::source_declarations::DeclarationDiagnostic;
 use crate::source_field_access::TermAccess;
+use crate::source_parameters::ParameterDeclaration;
 use crate::{
     CheckedClassBodies, NamedClassSources, ResolvedFieldAccess, ResolvedSourceCall,
     SourceMemberTarget, SourceMethodParameter, SourceMethodTarget,
@@ -15,7 +16,7 @@ use crate::{
 struct IndexedFile {
     locals: Vec<(SymbolId, SourceMemberTarget)>,
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
-    parameters: Vec<SourceMethodParameter>,
+    parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
     fields: Vec<ResolvedFieldAccess>,
@@ -138,7 +139,7 @@ impl ResolvedMemberIndex {
             let slots: HashMap<_, _> = parameters
                 .iter()
                 .enumerate()
-                .map(|(i, p)| (p.parameter, i))
+                .map(|(i, p)| (p.symbol(), i))
                 .chain(locals.iter().enumerate().map(|(i, (id, _))| (*id, i)))
                 .collect();
             let mut fields = Vec::new();
@@ -232,30 +233,56 @@ impl ResolvedMemberIndex {
     /// Only ordinary parameters of class methods with one value list are indexed.
     /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
     pub fn parameter_at(&self, source: SourceId, offset: u32) -> Option<SourceMethodParameter> {
-        if let Some((_, parameter)) = self.parameter_use_at(source, offset) {
-            return Some(parameter);
+        match self.parameter_site_at(source, offset)?.1 {
+            ParameterDeclaration::Method(p) => Some(p),
+            ParameterDeclaration::Constructor(_) => None,
         }
-        self.parameter_declaration_at(source, offset)
+    }
+
+    /// Looks up a plain primary constructor parameter by its declaration name.
+    /// Includes unused parameters. Explicit constructor fields, contextual and
+    /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
+    pub fn constructor_parameter_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<crate::SourceConstructorParameter> {
+        match self.parameter_declaration_at(source, offset)? {
+            ParameterDeclaration::Constructor(p) => Some(p),
+            ParameterDeclaration::Method(_) => None,
+        }
+    }
+
+    fn parameter_site_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<(Option<SourceSpan>, ParameterDeclaration)> {
+        if let Some((origin, p)) = self.parameter_use_at(source, offset) {
+            Some((Some(origin), p))
+        } else {
+            Some((None, self.parameter_declaration_at(source, offset)?))
+        }
     }
 
     fn parameter_declaration_at(
         &self,
         source: SourceId,
         offset: u32,
-    ) -> Option<SourceMethodParameter> {
+    ) -> Option<ParameterDeclaration> {
         let parameters = &self.files.get(&source)?.parameters;
-        let i = parameters.partition_point(|p| p.target.name.end() <= offset);
+        let i = parameters.partition_point(|p| p.target().name.end() <= offset);
         parameters
             .get(i)
             .copied()
-            .filter(|p| p.target.name.contains(offset))
+            .filter(|p| p.target().name.contains(offset))
     }
 
     fn parameter_use_at(
         &self,
         source: SourceId,
         offset: u32,
-    ) -> Option<(SourceSpan, SourceMethodParameter)> {
+    ) -> Option<(SourceSpan, ParameterDeclaration)> {
         let file = self.files.get(&source)?;
         let (origin, slot) = use_at(&file.parameter_uses, offset)?;
         Some((origin, file.parameters[slot]))
@@ -327,14 +354,14 @@ impl ResolvedMemberIndex {
         } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
             (id, SymbolKind::Local, target, None)
         } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
-            (p.parameter, SymbolKind::Parameter, p.target, Some(origin))
+            (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
         } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
             (id, SymbolKind::Method, target, None)
         } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
             (id, SymbolKind::Field, target, None)
         } else {
             let p = self.parameter_declaration_at(source, offset)?;
-            (p.parameter, SymbolKind::Parameter, p.target, None)
+            (p.symbol(), SymbolKind::Parameter, p.target(), None)
         };
         Some(SourceSymbolSite {
             symbol,
