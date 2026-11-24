@@ -202,14 +202,7 @@ impl ResolvedMemberIndex {
                     })
                 })
                 .collect();
-            for parent in &parents {
-                index
-                    .references
-                    .entry(parent.parent)
-                    .or_default()
-                    .push(parent.origin);
-            }
-            let constructions = file
+            let constructions: Vec<_> = file
                 .named()
                 .syntax()
                 .member_names
@@ -232,6 +225,20 @@ impl ResolvedMemberIndex {
                     )
                 })
                 .collect();
+            // Both lists are in token order, but a construction can precede a later class header.
+            let mut record = |class, span| index.references.entry(class).or_default().push(span);
+            let mut allocations = constructions.iter().peekable();
+            for parent in &parents {
+                while let Some(site) = allocations.next_if(|s| {
+                    s.origin.span().range().start() < parent.origin.span().range().start()
+                }) {
+                    record(site.class, site.origin);
+                }
+                record(parent.parent, parent.origin);
+            }
+            for site in allocations {
+                record(site.class, site.origin);
+            }
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -501,6 +508,13 @@ impl ResolvedMemberIndex {
                     parent.target,
                     Some(parent.origin),
                 )
+            } else if let Some(site) = self.construction_at(source, offset) {
+                (
+                    site.class,
+                    SymbolKind::Class,
+                    site.target,
+                    Some(site.origin),
+                )
             } else if let Some(c) = self.call_at(source, offset) {
                 (c.method, SymbolKind::Method, c.target, Some(c.origin))
             } else if let Some(f) = self.field_at(source, offset) {
@@ -529,8 +543,8 @@ impl ResolvedMemberIndex {
     }
 
     /// Committed uses of this exact symbol, in input file order then
-    /// token order. For classes, covers single unqualified explicit parents of indexed ordinary
-    /// classes. Type annotations and construction expressions are outside this query. Omits the definition. Unknown and unused symbols yield an
+    /// token order. For classes, covers single unqualified explicit parents and committed
+    /// simple `new` expressions. Omits type annotations and declarations. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)
