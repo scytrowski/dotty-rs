@@ -841,3 +841,53 @@ fn repairing_a_provider_restores_the_dependent_call_and_keeps_a_sibling_error() 
         client.shutdown();
     }
 }
+
+#[test]
+fn public_fields_navigate_from_reads_writes_and_declarations_in_both_encodings() {
+    let providers = "/* 😀 */ class A(var count: Int)\nclass B { var count: Int = 2 }";
+    let read = "  def read(a: A): Int = /* 😀 */ a.count";
+    let write = "  def set(b: A): Unit = /* 😀 */ b.count = 1";
+    for encoding in ["utf-8", "utf-16"] {
+        let column = |line: &str, token: &str| {
+            let prefix = &line[..line.find(token).unwrap()];
+            if encoding == "utf-8" {
+                prefix.len()
+            } else {
+                prefix.encode_utf16().count()
+            }
+        };
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, providers);
+        client.open(B, &format!("class Use {{\n{read}\n{write}\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        let target = column(providers, "count");
+        let name = range(0, target, target + 5);
+        let decl = json!({"uri":A,"range":name});
+        let r = column(read, "count");
+        let w = column(write, "count");
+        let read_site = json!({"uri":B,"range":range(1,r,r+5)});
+        let write_site = json!({"uri":B,"range":range(2,w,w+5)});
+        for (uri, line, col) in [(A, 0, target), (B, 1, r), (B, 2, w)] {
+            assert_eq!(
+                client.references(uri, line, col, true),
+                json!([decl, read_site, write_site])
+            );
+            assert_eq!(
+                client.references(uri, line, col, false),
+                json!([read_site, write_site])
+            );
+        }
+        for (line, col) in [(1, r), (2, w)] {
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":line,"character":col+1}})
+                ),
+                json!([{"originSelectionRange":range(line,col,col+5),"targetUri":A,"targetSelectionRange":name,"targetRange":range(0,target-4,target+10)}])
+            );
+        }
+        let other = column(providers.lines().nth(1).unwrap(), "count");
+        assert_eq!(client.references(A, 1, other, false), json!([]));
+        client.shutdown();
+    }
+}
