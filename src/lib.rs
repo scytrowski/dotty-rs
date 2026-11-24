@@ -141,8 +141,8 @@ pub use resolved_call_index::{
 };
 
 mod source_locals;
-mod source_method_types;
-pub use source_method_types::{MethodTypeRole, ResolvedMethodType};
+mod source_signature_types;
+pub use source_signature_types::{MethodTypeRole, ResolvedConstructorType, ResolvedMethodType};
 mod source_parameters;
 pub use source_parameters::{SourceConstructorParameter, SourceMethodParameter};
 

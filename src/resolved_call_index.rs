@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    constructor_types: Vec<crate::ResolvedConstructorType>,
     method_types: Vec<crate::ResolvedMethodType>,
     constructions: Vec<crate::ResolvedSourceConstruction>,
     parents: Vec<ResolvedSourceParent>,
@@ -244,7 +245,9 @@ impl ResolvedMemberIndex {
                     )
                 })
                 .collect();
-            let method_types = crate::source_method_types::method_types(file, &targets, store);
+            let constructor_types =
+                crate::source_signature_types::constructor_types(file, &targets, store);
+            let method_types = crate::source_signature_types::method_types(file, &targets, store);
             let parent_sites = parents.iter().map(|s| (s.parent, s.origin));
             let construction_sites = constructions.iter().map(|s| (s.class, s.origin));
             let signature_sites = method_types.iter().map(|s| (s.class, s.origin));
@@ -322,6 +325,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    constructor_types,
                     method_types,
                     constructions,
                     parents,
@@ -343,6 +347,23 @@ impl ResolvedMemberIndex {
     /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Resolves a UTF-8 byte inside a simple class name written on a primary
+    /// constructor parameter, including `val` and `var`. Requires a completed
+    /// non-generic constructor signature with one plain value list and a class
+    /// target in the selected files. Independent of class headers and bodies.
+    /// Other type shapes and the exclusive end of the token yield `None`.
+    pub fn constructor_type_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedConstructorType> {
+        let sites = &self.files.get(&source)?.constructor_types;
+        let i = sites.partition_point(|s| s.origin.span().range().end() <= offset);
+        sites
+            .get(i)
+            .filter(|s| s.origin.span().range().contains(offset))
     }
 
     /// Resolves a byte within a simple written class type in a method parameter
