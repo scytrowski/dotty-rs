@@ -66,5 +66,13 @@ let cursor = text.find(", 2").unwrap() as u32 + 1;
 let inner = parsed.call_arguments.at(cursor).unwrap();
 assert_eq!(inner.argument_index(cursor), Some(1));
 assert_eq!(inner.range.start(), text.find("(1").unwrap() as u32);
+
+let text = "ops.pick(1, true, ";
+let parsed = parse_expression_fragment(SourceText::new(text)?, SourceId::from_index(0),
+    ContextualScanner::new(text)?, &mut NameInterner::new());
+let cursor = text.len() as u32;
+let open = parsed.call_arguments.unfinished_at(cursor).unwrap();
+assert_eq!(open.slot_at(cursor), Some(2));
+assert_eq!(open.arguments.len(), 2);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```

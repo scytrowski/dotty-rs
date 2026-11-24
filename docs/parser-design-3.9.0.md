@@ -61,7 +61,10 @@ is bound to a session. `ParseResult::call_arguments` retains the parentheses,
 argument expression ranges and separator positions from the same parse. A
 cursor between the parentheses selects the innermost closed application.
 The parser records separators as it consumes them, including when adjacent
-arguments contain nested calls or comments with commas.
+arguments contain nested calls or comments with commas. At an unfinished call,
+`unfinished_at` returns the recovered application tree and the real argument
+prefix, including the slot after the last comma. Its cursor range ends at EOF
+or the parser's recovery boundary. The following declaration stays outside.
 
 `ParseResult::member_names` retains bare expression identifiers, selector tokens and names of simple
 value definitions and explicit constructor accessors. In `a.count = b.count`
