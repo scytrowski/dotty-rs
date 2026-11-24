@@ -667,6 +667,7 @@ fn identical_call_errors_clear_independently_across_edits_and_encodings() {
 
 #[test]
 fn repairing_a_cross_file_header_cycle_clears_only_its_participants() {
+    let leaf = "file:///fixture/Leaf.scala";
     let prefix = "/* 😀 */ ";
     let a = "class A(x: Int)";
     let b = "class B(x: Int)";
@@ -689,20 +690,27 @@ fn repairing_a_cross_file_header_cycle_clears_only_its_participants() {
                 "code":"signature.header_cycle","message":"Cyclic class header dependency"
             })
         };
-        client.open(A, &format!("{prefix}{a}\n{sibling}"));
-        client.diagnostics(A, 1, json!([independent]));
+        client.open(A, &format!("{prefix}{a}"));
+        client.diagnostics(A, 1, json!([]));
         client.open(B, &format!("{prefix}{b}{parent_a}"));
-        client.diagnostics(A, 1, json!([independent]));
+        client.diagnostics(A, 1, json!([]));
         client.diagnostics(B, 1, json!([]));
+
+        client.open(leaf, &format!("class Leaf(x: Int) extends A(x)\n{sibling}"));
+        client.diagnostics(A, 1, json!([]));
+        client.diagnostics(B, 1, json!([]));
+        client.diagnostics(leaf, 1, json!([independent]));
 
         let end = start + a.len();
         client.edit(A, 2, range(0, end, end), parent_b);
-        client.diagnostics(A, 2, json!([cycle(end + parent_b.len()), independent]));
+        client.diagnostics(A, 2, json!([cycle(end + parent_b.len())]));
         client.diagnostics(B, 1, json!([cycle(start + b.len() + parent_a.len())]));
+        client.diagnostics(leaf, 1, json!([independent]));
         let end = start + b.len();
         client.edit(B, 2, range(0, end, end + parent_a.len()), "");
-        client.diagnostics(A, 2, json!([independent]));
+        client.diagnostics(A, 2, json!([]));
         client.diagnostics(B, 2, json!([]));
+        client.diagnostics(leaf, 1, json!([independent]));
         client.shutdown();
     }
 }

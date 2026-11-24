@@ -254,8 +254,8 @@ fn terminal_member_causes_distinguish_cycle_dependents_failure_and_pending() {
         "class A(b: B) { val x = b.y }",
         "class B(a: A) { val y = a.x }",
         "class C(a: A) { val z = a.x }",
-        "class D { def value(): Int = 1; val bad = value(1); val later = 7 }",
-        "class E(d: D) { val bad = d.bad; val pending = d.later }",
+        "class D { def value(): Int = 1; val seed = value(1); val later = 7 }",
+        "class E(d: D) { val answer = d.seed; val pending = d.later }",
     ];
     let files: Vec<_> = texts
         .iter()
@@ -288,7 +288,40 @@ fn terminal_member_causes_distinguish_cycle_dependents_failure_and_pending() {
     assert!(phase.attempt(bad).is_err());
     let report = phase.finish();
     assert!(report.remaining.contains(&later));
-    let causes = report.blockages;
+    let retained = report.blockage_report(sources.declarations(), &store);
+    let mut diagnostics = report
+        .failures
+        .into_iter()
+        .map(|failure| failure.into_semantic_diagnostic(&sources));
+    let diagnostic = diagnostics.next().unwrap();
+    assert!(diagnostics.next().is_none());
+    assert_eq!(diagnostic.member(), Some(bad));
+    assert!(
+        matches!(&diagnostic.issue, crate::SemanticIssue::Typing(e) if matches!(e.error(),TyperError::ApplicationArityMismatch {expected:0,actual:1,..}))
+    );
+    let range = diagnostic.location().unwrap().span().range();
+    assert_eq!(
+        &texts[3][range.start() as usize..range.end() as usize],
+        "value(1)"
+    );
+    drop(store);
+    let causes: Vec<_> = retained
+        .waiters()
+        .map(|(d, cause)| (d.symbol, cause.clone()))
+        .collect();
+    assert_eq!(
+        retained.declaration(dependent).unwrap().name.as_deref(),
+        Some("answer")
+    );
+    assert_eq!(
+        retained.declaration(bad).unwrap().name.as_deref(),
+        Some("seed")
+    );
+    assert_eq!(
+        retained.declaration(later).unwrap().name.as_deref(),
+        Some("later")
+    );
+    assert!(retained.declaration(files[0].classes()[0].symbol).is_none());
     assert_eq!(
         causes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         [x, y, z, dependent, pending]

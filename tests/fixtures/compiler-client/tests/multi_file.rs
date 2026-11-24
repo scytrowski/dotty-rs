@@ -415,17 +415,6 @@ impl SignatureError {
     }
 }
 
-fn provider_cycle(
-    dependencies: &dotty::SignatureDependencies,
-    provider: SymbolId,
-) -> Option<std::sync::Arc<dotty::SignatureCycle>> {
-    dependencies.waiting_on(provider)?;
-    match dependencies.blockages([provider]).pop()? {
-        (_, dotty::SignatureBlockage::CycleMember(cycle)) => Some(cycle),
-        _ => None,
-    }
-}
-
 fn complete_headers(
     sources: &NamedClassSources,
     store: &mut SemanticStore,
@@ -456,7 +445,9 @@ fn complete_headers(
             observe(symbol, attempt.completion);
             ready.extend(attempt.retry.into_iter().rev());
             if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
-                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                if let Some(dotty::SignatureBlockage::CycleMember(cycle)) =
+                    phase.dependencies().blockage(provider)
+                {
                     return Err(SignatureError::Cycle(cycle));
                 }
                 ready.push(provider);
@@ -542,7 +533,9 @@ fn complete_member_paths<'s, 'file>(
             observe(symbol, attempt.completion);
             ready.extend(attempt.retry.into_iter().rev());
             if let SignatureCompletion::BlockedOn(provider) = attempt.completion {
-                if let Some(cycle) = provider_cycle(phase.dependencies(), provider) {
+                if let Some(dotty::SignatureBlockage::CycleMember(cycle)) =
+                    phase.dependencies().blockage(provider)
+                {
                     return Err(SignatureError::Cycle(cycle));
                 }
                 ready.push(provider);

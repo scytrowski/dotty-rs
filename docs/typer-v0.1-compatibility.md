@@ -2594,7 +2594,7 @@ argument counts or the index and types of a nonconforming argument.
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with
 one argument produces `ApplicationArityMismatch` at the call site after the
-dependency completes. The client detects cross-file cycles on its active
-stack and reports the reentered method. Both methods in the two-file cycle
+dependency completes. The client queries the phase's recorded
+dependency for the blocked provider and reports the closed cycle path. Both methods in the two-file cycle
 remain incomplete. The JVM client fixture also compares class bytes for both
 input orders and executes the inferred call on JDK 21.

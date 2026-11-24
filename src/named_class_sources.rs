@@ -427,6 +427,37 @@ mod tests {
         assert!(sources.declaration(omitted.classes()[0].symbol).is_none());
     }
     #[test]
+    fn captured_signature_declarations_keep_distinct_owners_and_only_matching_positions() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let text = "class A { val seed = 1 }";
+        let a = named(9, text, &mut store, &mut packages);
+        let b = named(2, "class B { val seed = 7 }", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&a, &b], &store).unwrap();
+        let capture = |file: &NamedClassSource, store: &SemanticStore| {
+            let class = &file.classes()[0];
+            let id = class.fields().next().unwrap().symbol;
+            let d = sources.declarations().signature_declaration(id, store);
+            assert_eq!(d.symbol, id);
+            assert_eq!(d.declaration.unwrap().class, class.symbol);
+            assert_eq!(d.declaration.unwrap().source, file.source());
+            d
+        };
+        let first = capture(&a, &store);
+        let id = b.classes()[0].fields().next().unwrap().symbol;
+        store.symbols.get_mut(id).position = first.location;
+        let foreign = capture(&b, &store);
+        store.symbols.get_mut(id).position = None;
+        assert_eq!(capture(&b, &store), foreign);
+        drop(store);
+        assert_ne!(first.symbol, foreign.symbol);
+        assert_eq!(foreign.name.as_deref(), Some("seed"));
+        assert!(foreign.location.is_none());
+        assert_eq!(first.name.as_deref(), Some("seed"));
+        let r = first.location.unwrap().span().range();
+        assert_eq!(&text[r.start() as usize..r.end() as usize], "val seed = 1");
+    }
+    #[test]
     fn class_lookup_returns_exact_borrowed_views_only_for_included_classes() {
         let mut store = SemanticStore::new();
         let mut packages = Packages::new();
