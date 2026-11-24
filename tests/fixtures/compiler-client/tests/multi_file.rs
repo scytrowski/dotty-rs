@@ -1082,7 +1082,39 @@ fn same_named_methods_in_one_source_execute_on_jdk21_in_either_file_order() {
         ("providers-first", [providers, consumer]),
         ("consumer-first", [consumer, providers]),
     ] {
-        let classes = compile(files);
+        let classes = with_plan(&files, |plan, defs, sources, bodies| {
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            assert!(index.diagnostics().is_empty());
+            let (source, _, text) = consumer;
+            let diff = index
+                .symbol_at(source, text.find("diff(").unwrap() as u32)
+                .unwrap();
+            let method = plan
+                .classes
+                .iter()
+                .flat_map(|class| &class.methods)
+                .find(|method| method.method == diff.symbol)
+                .unwrap();
+            assert_eq!(method.parameters.len(), 2);
+            for (name, &formal) in ["left", "right"].into_iter().zip(&method.parameters) {
+                let read = text.rfind(name).unwrap() as u32;
+                let site = index.symbol_at(source, read).unwrap();
+                let parameter = index.parameter_at(source, read).unwrap();
+                assert_eq!(
+                    (parameter.method, parameter.parameter),
+                    (method.method, formal)
+                );
+                assert_eq!(
+                    (site.kind, site.symbol),
+                    (dotty::core::SymbolKind::Parameter, formal)
+                );
+                assert_eq!(site.target.source, source);
+                assert_eq!(site.target.name.start() as usize, text.find(name).unwrap());
+                assert_eq!(index.references_to(formal), &[site.usage.unwrap()]);
+            }
+            checked_emission(plan, defs)
+        });
         let mut names: Vec<_> = classes.iter().map(|class| class.internal_name()).collect();
         names.sort_unstable();
         assert_eq!(names, ["demo/A", "demo/B", "demo/Use"], "{order}");
