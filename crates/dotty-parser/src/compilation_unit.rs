@@ -62,6 +62,8 @@ pub struct ParseResult {
     pub diagnostics: Vec<ParseDiagnostic>,
     /// Written bare expression names, selectors, value declaration names and method parameter names from this parse.
     pub member_names: crate::SourceMemberNames,
+    /// Shareable syntax ranges for argument-list cursor queries in this source revision.
+    pub call_arguments: std::sync::Arc<crate::SourceCallArguments>,
     /// Direct call names in this source arena.
     pub call_names: SourceCallNames,
     /// Parser feature policy after processing this input.
@@ -112,6 +114,7 @@ where
             ast: self.ast,
             root,
             diagnostics: self.diagnostics,
+            call_arguments: crate::SourceCallArguments::new(self.call_arguments).into(),
             call_names: SourceCallNames {
                 source: self.source_id,
                 entries: self.call_names,

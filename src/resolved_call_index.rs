@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    call_arguments: std::sync::Arc<crate::parser::SourceCallArguments>,
     constructor_types: Vec<crate::ResolvedConstructorType>,
     method_types: Vec<crate::ResolvedMethodType>,
     constructions: Vec<crate::ResolvedSourceConstruction>,
@@ -40,6 +41,27 @@ pub struct ResolvedSourceParent {
     pub origin: SourceSpan,
     /// Declaration and name token of the superclass in the same revision.
     pub target: SourceMemberTarget,
+}
+
+/// Selected declaration and argument-to-parameter correspondence for a checked
+/// positional call. All names and types borrow the retained revision index.
+#[derive(Debug)]
+pub struct ResolvedCallSignature<'a> {
+    /// Exact source overload, its written use, and its declaration.
+    pub call: ResolvedSourceCall,
+    /// Semantic name of the method.
+    pub name: &'a str,
+    /// Completed method type in the original semantic arena.
+    pub ty: crate::core::TypeId,
+    /// Formal names and types in declaration order.
+    pub parameters: &'a [crate::SourceSignatureParameter],
+    /// Explicit or inferred result of the selected declaration.
+    pub result: &'a crate::SourceNamedType,
+    /// Parentheses and argument expression ranges in the calling file.
+    pub arguments: &'a crate::parser::CallArgumentList,
+    /// Zero-based index into both the written arguments and the formals.
+    /// An empty clause has no active parameter.
+    pub active_parameter: Option<usize>,
 }
 
 /// A supported source symbol at a declaration or committed usage in one revision.
@@ -348,6 +370,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    call_arguments: file.named().syntax().call_arguments.clone(),
                     constructor_types,
                     method_types,
                     constructions,
@@ -432,6 +455,49 @@ impl ResolvedMemberIndex {
         parents
             .get(i)
             .filter(|p| p.origin.span().range().contains(offset))
+    }
+
+    /// Looks up the innermost parenthesized application at a UTF-8 insertion
+    /// position. Requires a committed direct call to a source method with one
+    /// plain positional clause, a retained signature and one written argument
+    /// per formal. A position immediately after a comma selects the next formal.
+    /// An empty `()` returns a signature without an active parameter. A trailing
+    /// comma without another argument, an unsupported or rejected inner call,
+    /// and positions outside the list yield `None`. Performs no further typing.
+    pub fn call_signature_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<ResolvedCallSignature<'_>> {
+        let arguments = self.files.get(&source)?.call_arguments.at(offset)?;
+        if !arguments.positional {
+            return None;
+        }
+        let call = *self.call_at(source, arguments.callee?.start())?;
+        let info = self.signatures.get(&call.method)?;
+        let crate::SourceSymbolSignature::Method {
+            ty,
+            parameters: Some(parameters),
+            result,
+        } = &info.signature
+        else {
+            return None;
+        };
+        let active_parameter = arguments.argument_index(offset);
+        if arguments.arguments.len() != parameters.len()
+            || (!parameters.is_empty() && active_parameter.is_none())
+        {
+            return None;
+        }
+        Some(ResolvedCallSignature {
+            call,
+            name: &info.name,
+            ty: *ty,
+            parameters,
+            result,
+            arguments,
+            active_parameter,
+        })
     }
 
     /// Looks up a written callee token by half-open UTF-8 byte offset.

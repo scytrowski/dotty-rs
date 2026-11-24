@@ -140,7 +140,8 @@ pub use source_declaration_index::{
 
 mod resolved_call_index;
 pub use resolved_call_index::{
-    ResolvedCallIndex, ResolvedMemberIndex, ResolvedSourceParent, SourceSymbolSite,
+    ResolvedCallIndex, ResolvedCallSignature, ResolvedMemberIndex, ResolvedSourceParent,
+    SourceSymbolSite,
 };
 
 mod source_symbol_info;

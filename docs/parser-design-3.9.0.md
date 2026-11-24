@@ -57,7 +57,11 @@ where recovery needs a tree-shaped placeholder, by `UntypedNode::Error`.
 with its application tree. For `a.take(42)` the range covers only `take`.
 Ranges use UTF-8 byte offsets and include the delimiters on backquoted names.
 Entries are in source order and retain their tree IDs when a detached parse
-is bound to a session.
+is bound to a session. `ParseResult::call_arguments` retains the parentheses,
+argument expression ranges and separator positions from the same parse. A
+cursor between the parentheses selects the innermost closed application.
+The parser records separators as it consumes them, including when adjacent
+arguments contain nested calls or comments with commas.
 
 `ParseResult::member_names` retains bare expression identifiers, selector tokens and names of simple
 value definitions and explicit constructor accessors. In `a.count = b.count`

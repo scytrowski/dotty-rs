@@ -61,6 +61,8 @@ where
         mark: crate::Mark,
         function: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
+        let open = self.current().span;
+        let diagnostics_before = self.diagnostics.len();
         let name = self
             .last_written_name
             .take()
@@ -89,7 +91,10 @@ where
             ));
         }
         let mut args = Vec::new();
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+        let mut comma_ends = Vec::new();
+        let closed = if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+            true
+        } else {
             loop {
                 if self.at_enum_body_parent_boundary()
                     || matches!(
@@ -108,17 +113,33 @@ where
                 }
                 self.consume_newlines_before_argument_delimiter();
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
-                    self.expect(TokenKind::Punctuation(Punctuation::RightParen));
-                    break;
+                    break self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                 }
-                if self
-                    .cursor
-                    .at(TokenKind::Punctuation(Punctuation::RightParen))
-                {
-                    self.advance();
-                    break;
+                comma_ends.push(self.last_real_token_end);
+                if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                    break true;
                 }
             }
+        };
+        if closed
+            && self.diagnostics.len() == diagnostics_before
+            && let Ok(range) = dotty_core::TextRange::new(open.start(), self.last_real_token_end)
+            && let Some(arguments) = args
+                .iter()
+                .map(|&tree| Some(self.ast.get(tree).position?.span().range()))
+                .collect()
+        {
+            self.call_arguments.push(crate::CallArgumentList {
+                callee: name.map(|(_, range)| range),
+                range,
+                arguments,
+                positional: kind == ApplyKind::Regular
+                    && !args
+                        .iter()
+                        .any(|&tree| matches!(self.ast.get(tree).kind, TreeKind::NamedArg(_))),
+                comma_ends: comma_ends.into_boxed_slice(),
+                parent: None,
+            });
         }
         let call = self.alloc_from(
             mark,

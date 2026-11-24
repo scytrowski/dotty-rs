@@ -240,7 +240,7 @@ fn selected_overload_retains_its_own_ordered_signature_in_either_file_order() {
     use crate::SourceSymbolSignature::Method;
     use crate::core::SymbolInfo;
     let methods = "class Ops { def pick(n: Int, b: Boolean): Boolean = b; def pick(b: Boolean, n: Int): Int = n; def empty() = 1; def plain = true; def curried(n: Int)(b: Boolean): Int = n }";
-    let calls = "class Use { def a(o: Ops): Boolean = o.pick(1, false); def b(o: Ops): Int = o.pick(true, 2); def bad(o: Ops): Int = o.pick(true, false) }";
+    let calls = "class Use { def a(o: Ops): Boolean = o.pick(1, false); def b(o: Ops): Int = o.pick(true, 2); def bad(o: Ops): Int = o.pick(true, false); def nested(o: Ops): Int = o.pick(o.pick(1, false), o.empty()); def id(o: Ops): Int = 0; def construct(): Int = id(new Ops()) }";
     for reverse in [false, true] {
         let mut store = SemanticStore::new();
         let defs = Definitions::bootstrap(&mut store);
@@ -316,6 +316,16 @@ fn selected_overload_retains_its_own_ordered_signature_in_either_file_order() {
                 expected
             );
             assert_eq!(result.ty, result_ty);
+            let after_comma = pos + calls[pos as usize..].find(',').unwrap() as u32 + 1;
+            for (cursor, active) in [(pos + 5, 0), (after_comma - 1, 0), (after_comma, 1)] {
+                let selected = index.call_signature_at(caller.source(), cursor).unwrap();
+                assert_eq!(selected.call.method, site.symbol);
+                assert_eq!(selected.ty, *ty);
+                assert!(std::ptr::eq(selected.parameters, &**params));
+                assert_eq!(selected.active_parameter, Some(active));
+                assert_eq!(selected.parameters[active].ty.ty, expected[active].1);
+                assert_eq!(selected.result.ty, result_ty);
+            }
             assert!(std::ptr::eq(
                 index
                     .symbol_info_at(ops.source(), site.target.name.start())
@@ -324,6 +334,26 @@ fn selected_overload_retains_its_own_ordered_signature_in_either_file_order() {
                 info
             ));
         }
+        let help = |s: &str, delta: usize| {
+            index.call_signature_at(caller.source(), (calls.rfind(s).unwrap() + delta) as u32)
+        };
+        assert!(help("pick(true, false)", 5).is_none());
+        assert!(help("pick(true, false)", 4).is_none());
+        assert!(help("new Ops()", 8).is_none());
+        assert_eq!(help("id(new", 3).unwrap().active_parameter, Some(0));
+        let inner = help("1, false),", 3).unwrap();
+        assert_eq!(
+            (inner.result.ty, inner.active_parameter),
+            (defs.boolean, Some(1))
+        );
+        let outer = help("), o.empty", 2).unwrap();
+        assert_eq!(
+            (outer.result.ty, outer.active_parameter),
+            (defs.int, Some(1))
+        );
+        let empty = help("empty()", 6).unwrap();
+        assert_eq!((empty.name, empty.active_parameter), ("empty", None));
+        assert!(empty.parameters.is_empty());
         let at = |s: &str| index.symbol_info_at(ops.source(), methods.find(s).unwrap() as u32);
         assert!(
             matches!(&at("empty").unwrap().1.signature, Method { parameters: Some(p), result, .. } if p.is_empty() && result.ty == defs.int)
