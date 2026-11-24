@@ -6,6 +6,7 @@ owns its workspace and lockfile, so its LSP dependencies stay outside the
 compiler library. The production language server belongs with the future
 compiler in a separate repository.
 
+Set `JAVA_HOME` to a JDK 21 installation for the binary dependency test.
 From this directory, run the protocol regression with:
 
 ```sh
@@ -128,3 +129,12 @@ the writer's receiver type moves that usage to a body field in a different class
 A subsequent Boolean assignment reports the mismatched value and removes the
 uncommitted write. The sibling method's read remains navigable in both UTF-8
 and UTF-16.
+
+The external dependency test compiles `demo.External` with `javac --release 21`.
+The test passes the absolute class output directory in the fixture's optional
+`initializationOptions.classDirectory`. The server combines that directory with
+`$JAVA_HOME/jmods/java.base.jmod` and borrows this classpath for each fresh
+analysis. After deleting only `External.class`, the test reopens the same
+document to trigger a new analysis and checks the constructor diagnostic in
+UTF-8 and UTF-16. The client also tests the underlying typed error before
+publishing it.
