@@ -725,6 +725,11 @@ assert_eq!(site.symbol, call.method);
 let dotty::SourceSymbolSignature::Method { parameters: Some(params), result, .. } = &info.signature
     else { panic!("ordinary method expected") };
 assert_eq!((&*params[0].name, &*params[0].ty.name, &*result.name), ("x", "Int", "Int"));
+let cursor = offset + "only(".len() as u32;
+let signature = index.call_signature_at(id, cursor).ok_or("missing positional call")?;
+assert_eq!(signature.call.method, call.method);
+assert_eq!(signature.active_parameter, Some(0));
+assert_eq!(signature.parameters[0].ty.name.as_ref(), "Int");
 assert_eq!(index.references_to(method), &[call.origin]);
 assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 # Ok::<(), Box<dyn std::error::Error>>(())
