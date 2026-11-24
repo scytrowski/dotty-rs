@@ -761,32 +761,34 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
             let caller = sources.file(b).unwrap();
             let provider = sources.file(a).unwrap();
-            let calls = caller.navigation().unwrap();
-            let method_at = |offset| {
-                bodies
-                    .complete(caller.classes()[0].symbol)
+            let resolve = |offset| {
+                sources
+                    .resolved_call_at(b, offset, &bodies, &output.arena, &store)
                     .unwrap()
-                    .selected_method_at(
-                        offset,
-                        calls.call_names(),
-                        caller.ast(),
-                        &output.arena,
-                        &store,
-                    )
             };
             let name_start = text.find("take(").unwrap() as u32;
-            let method = method_at(name_start).unwrap();
+            let call = resolve(name_start).unwrap();
             for offset in name_start..name_start + 4 {
-                assert_eq!(method_at(offset), Some(method));
+                assert_eq!(resolve(offset), Some(call));
             }
-            // Receiver, dot, opening parenthesis, argument and closing parenthesis.
             let close = text.rfind(')').unwrap() as u32;
             for offset in (name_start - 2..name_start).chain(name_start + 4..=close) {
-                assert_eq!(method_at(offset), None, "offset {offset} in {text}");
+                assert_eq!(resolve(offset), None, "offset {offset} in {text}");
             }
-            assert_eq!(method_at(text.len() as u32), None);
+            assert_eq!(resolve(text.len() as u32), None);
             let expected = provider.methods().nth(overload).unwrap();
-            assert_overload_target(&sources, method, provider, expected, declaration);
+            assert_eq!(call.method, expected.symbol);
+            assert_eq!((call.origin.source(), call.target.source), (b, a));
+            let start = OVERLOADS.find(declaration).unwrap() as u32;
+            assert_eq!(
+                (
+                    call.target.declaration.start(),
+                    call.target.declaration.end()
+                ),
+                (start, start + declaration.len() as u32)
+            );
+            assert_eq!(call.target.name.start(), start + 4);
+            assert_eq!(call.target.name.end(), start + 8);
 
             let body = bodies.complete(caller.classes()[0].symbol).unwrap();
             let read = caller.methods().next().unwrap();
@@ -997,13 +999,8 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
     let (mut store, defs, packages, unit) = class_planning::named(text);
     let units = std::slice::from_ref(&unit);
     let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
-    let (output, bodies) = type_bodies(
-        &dotty::NamedClassSources::new(units, &store).unwrap(),
-        &mut store,
-        defs,
-        &packages,
-        headers,
-    );
+    let sources = dotty::NamedClassSources::new(units, &store).unwrap();
+    let (output, bodies) = type_bodies(&sources, &mut store, defs, &packages, headers);
     let body = bodies.complete(unit.classes()[0].symbol).unwrap();
     let mut methods = unit.methods();
     let apply = methods.next().unwrap().symbol;
@@ -1023,13 +1020,10 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
             Some(call)
         );
         assert_eq!(
-            body.selected_method_at(
-                offset,
-                unit.navigation().unwrap().call_names(),
-                unit.ast(),
-                &output.arena,
-                &store
-            ),
+            sources
+                .resolved_call_at(unit.source(), offset, &bodies, &output.arena, &store)
+                .unwrap()
+                .map(|call| call.method),
             expected
         );
     }
