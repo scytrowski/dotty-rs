@@ -110,26 +110,7 @@ impl NamedClassSources<'_> {
         let Some(selection) = file.named().syntax().member_names.selection_at(offset) else {
             return Ok(None);
         };
-        self.resolve_field(file, navigation, selection, bodies, typed, store)
-    }
-
-    pub(crate) fn resolve_field(
-        &self,
-        caller: &NamedClassSource,
-        navigation: &SourceFileCalls,
-        selection: SourceSelection,
-        bodies: &CheckedClassBodies,
-        typed: &AstArena<Typed>,
-        store: &SemanticStore,
-    ) -> Result<Option<ResolvedFieldAccess>, DeclarationError> {
-        let Some(bindings) = navigation
-            .class_at(selection.name.start())
-            .and_then(|owner| bodies.bindings(owner))
-        else {
-            return Ok(None);
-        };
-        let Some((field, kind)) =
-            selected_field_access(selection, caller.ast(), bindings, typed, store)
+        let Some((field, kind)) = field_binding(file, navigation, selection, bodies, typed, store)
         else {
             return Ok(None);
         };
@@ -138,12 +119,24 @@ impl NamedClassSources<'_> {
         };
         let target = field_target(provider, provider.navigation()?, decl.class, field, store)?;
         Ok(target.map(|target| ResolvedFieldAccess {
-            origin: SourceSpan::new(caller.source(), Span::without_point(selection.name)),
+            origin: SourceSpan::new(file.source(), Span::without_point(selection.name)),
             field,
             kind,
             target,
         }))
     }
+}
+
+pub(crate) fn field_binding(
+    caller: &NamedClassSource,
+    navigation: &SourceFileCalls,
+    selection: SourceSelection,
+    bodies: &CheckedClassBodies,
+    typed: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Option<(SymbolId, FieldAccessKind)> {
+    let bindings = bodies.bindings(navigation.class_at(selection.name.start())?)?;
+    selected_field_access(selection, caller.ast(), bindings, typed, store)
 }
 
 pub(crate) fn field_target(

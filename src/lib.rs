@@ -136,7 +136,7 @@ pub use source_declaration_index::{
 };
 
 mod resolved_call_index;
-pub use resolved_call_index::ResolvedCallIndex;
+pub use resolved_call_index::{ResolvedCallIndex, ResolvedMemberIndex};
 
 mod source_field_access;
 pub use source_field_access::{FieldAccessKind, ResolvedFieldAccess, selected_field_access};

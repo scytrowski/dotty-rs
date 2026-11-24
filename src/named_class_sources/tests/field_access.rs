@@ -1,9 +1,9 @@
 use super::*;
 use crate::{CheckedClassBodies, FieldAccessKind, selected_field_access};
 
-const PROVIDERS: &str =
-    "class A(var count: Int); class B { val count: Int = 2; val unused: Int = 3 }";
-const CLIENT: &str = "class C { def copy(a: A, b: B): Unit = a.count = b.count }";
+const PROVIDERS: &str = "class A(var count: Int, plain: Int) { private val hidden: Int = 1 }; class B { val count: Int = 2; val unused: Int = 3 }";
+const CLIENT: &str =
+    "class C { def copy(a: A, b: B): Unit = a.count = b.count; def read(a: A): Int = a.count }";
 
 fn with_fields<R>(
     f: impl FnOnce(
@@ -72,7 +72,8 @@ fn committed_assignment_distinguishes_same_named_fields_on_opposite_sides() {
             accesses,
             [
                 Some((a, FieldAccessKind::Write)),
-                Some((b, FieldAccessKind::Read))
+                Some((b, FieldAccessKind::Read)),
+                Some((a, FieldAccessKind::Read))
             ]
         );
     });
@@ -101,7 +102,7 @@ fn field_query_selects_the_canonical_constructor_or_body_name() {
                 "var count: Int",
             ),
             (
-                CLIENT.rfind("count").unwrap(),
+                CLIENT.find("b.count").unwrap() + 2,
                 b,
                 FieldAccessKind::Read,
                 "val count: Int = 2",
@@ -132,4 +133,53 @@ fn field_query_selects_the_canonical_constructor_or_body_name() {
             assert!(lookup(offset as u32 + 5).is_none());
         }
     })
+}
+
+#[test]
+fn retained_member_index_preserves_order_kinds_and_unused_field_declarations() {
+    let (index, [a, b]) = with_fields(|sources, bodies, arena, store, ids| {
+        (
+            crate::ResolvedMemberIndex::build(sources, bodies, arena, store),
+            ids,
+        )
+    });
+    let caller = SourceId::from_index(2);
+    assert!(index.diagnostics().is_empty());
+    let accesses: Vec<_> = index
+        .references_to(a)
+        .iter()
+        .map(|p| {
+            assert_eq!(p.source(), caller);
+            let offset = p.span().range().start();
+            let access = index.field_at(caller, offset).unwrap();
+            assert_eq!(
+                index.definition_at(caller, offset),
+                Some((*p, access.target))
+            );
+            assert_eq!(index.member_at(caller, offset), Some((a, access.target)));
+            assert!(index.method_at(caller, offset).is_none());
+            (offset as usize, access.kind)
+        })
+        .collect();
+    assert_eq!(
+        accesses,
+        [
+            (CLIENT.find("a.count").unwrap() + 2, FieldAccessKind::Write),
+            (CLIENT.rfind("a.count").unwrap() + 2, FieldAccessKind::Read)
+        ]
+    );
+    assert_eq!(index.references_to(b).len(), 1);
+    let provider = SourceId::from_index(9);
+    for name in ["plain", "hidden"] {
+        assert!(
+            index
+                .member_at(provider, PROVIDERS.find(name).unwrap() as u32)
+                .is_none()
+        );
+    }
+    let offset = PROVIDERS.find("unused").unwrap() as u32;
+    let (unused, target) = index.member_at(provider, offset).unwrap();
+    assert_eq!(target.name.start(), offset);
+    assert!(index.references_to(unused).is_empty());
+    assert!(index.member_at(provider, target.name.end()).is_none());
 }
