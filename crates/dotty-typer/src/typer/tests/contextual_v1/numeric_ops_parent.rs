@@ -91,8 +91,16 @@ fn inherited_constructor_checks_the_argument_against_the_outer_base_view() {
         "{error:?}"
     );
     assert_eq!(typer.store.checkpoint(), checkpoint);
-    // A failed adaptation may also inspect the inherited implicit conversions.
-    assert!(typer.complete_symbol(wrong_type).is_err());
+    let call = template(wrong_type).parents[0];
+    let error = typer.complete_symbol(wrong_type).unwrap_err();
+    assert!(
+        matches!(&error, TyperError::ApplicationArgumentTypeMismatch {
+            source: site, tree_index, argument_index: 0, actual, expected,
+            actual_description, expected_description
+        } if (*site, *tree_index, *actual, *expected) == (source, call.index(), defs.boolean, defs.int)
+            && actual_description.as_ref() == "Boolean" && expected_description.as_ref() == "Int"),
+        "{error:?}"
+    );
     assert!(
         typer
             .source_typed_index()

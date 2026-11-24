@@ -925,7 +925,9 @@ For the tested subset, source Typer completion currently supports:
   the constructor is checked with the outer type arguments of that parent.
   In Scala 3.9.0's `Fractional[T]`, this makes the parameter of
   `extends NumericOps(lhs)` use the enclosing trait's `T`. Its typed
-  constructor selection keeps the `Fractional.this` prefix.
+  constructor selection keeps the `Fractional.this` prefix. Inside a subclass
+  of `Numeric[Int]`, the inherited conversion takes an `Int`. Passing a
+  `Boolean` to `NumericOps` reports the mismatch at the argument.
 
 Expression typing currently includes typed identifiers, stable term selections,
 ordinary method application on a direct constructor result, literal expressions,

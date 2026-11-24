@@ -875,31 +875,42 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
         let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
-        let capture_this = self.function_literals.is_method(context.owner);
+        self.type_resolved_this(class, this.qual, context.owner, tree.index(), position)
+    }
+
+    pub(in crate::typer) fn type_resolved_this(
+        &mut self,
+        class: SymbolId,
+        qualifier: Option<Name>,
+        owner: SymbolId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let capture_this = self.function_literals.is_method(owner);
         if capture_this
             && !self
                 .function_literals
-                .can_capture_enclosing_this(self.store, context.owner, class)
+                .can_capture_enclosing_this(self.store, owner, class)
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index,
                 symbol: None,
             });
         }
         if self.uninitialized_parent_receiver == Some(class) {
             return Err(TyperError::UninitializedParentArgumentReceiver {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index,
                 receiver: class,
             });
         }
         let ty = self.store.types.alloc(Type::ThisType { class });
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .this(this.qual, ty, position);
+            .this(qualifier, ty, position);
         if capture_this {
             self.function_literals
-                .capture(self.store, context.owner, class, typed);
+                .capture(self.store, owner, class, typed);
         }
         Ok(typed)
     }

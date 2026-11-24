@@ -137,3 +137,66 @@ fn nested_constructor_rejects_an_operand_outside_the_witness_type() {
     assert!(typer.source_typed_index().get(source, rhs).is_none());
     assert_eq!(typer.store.checkpoint(), checkpoint);
 }
+
+#[test]
+fn nested_conversion_search_uses_the_enclosing_subclass_type_arguments() {
+    let text = r#"
+        class View
+        trait Conversions[A] {
+          implicit def fromA(x: A): View = new View
+          implicit def fromInt(x: Int): View = new View
+        }
+        trait Outer extends Conversions[Boolean] {
+          class Inner { def unique(x: Boolean): View = x }
+        }
+        trait Other extends Conversions[Int] {
+          class Nested { def ambiguous(x: Int): View = x }
+        }
+    "#;
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+    let from_a = method_symbol(&parsed, &store, &index, source, "fromA");
+    let from_int = method_symbol(&parsed, &store, &index, source, "fromInt");
+    let (unique, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "unique");
+    let (ambiguous, bad_rhs) =
+        method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    let definition = |symbol| {
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(symbol) else {
+            panic!("source method")
+        };
+        tree
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer.type_method_definition(definition(unique)).unwrap();
+    let ast = typer.typed_ast();
+    let body = ast.get(typer.source_typed_index().get(source, rhs).unwrap());
+    let TreeKind::Apply(call) = &body.kind else {
+        panic!("implicit conversion")
+    };
+    let selected = ast.get(call.function);
+    assert_eq!(
+        typer.store.types.get(selected.ty).reference_symbol(),
+        Some(from_a)
+    );
+    let TreeKind::Select(selection) = &selected.kind else {
+        panic!("inherited conversion")
+    };
+    let receiver = ast.get(selection.qualifier);
+    assert!(matches!(receiver.kind, TreeKind::This(_)));
+    assert_eq!(
+        *typer.store.types.get(receiver.ty),
+        Type::ThisType { class: outer }
+    );
+
+    let checkpoint = typer.store.checkpoint();
+    let error = typer
+        .type_method_definition(definition(ambiguous))
+        .unwrap_err();
+    assert!(
+        matches!(&error, TyperError::AmbiguousContextualArgument { tree_index, candidates, .. }
+            if *tree_index == bad_rhs.index() && candidates.len() == 2
+                && candidates.contains(&from_a) && candidates.contains(&from_int)),
+        "{error:?}"
+    );
+    assert_eq!(typer.store.checkpoint(), checkpoint);
+}
