@@ -18,7 +18,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Select ready classes and track member signatures, retries and failures | [`NamedClassSources::member_signatures`], [`MemberSignaturePhase`], [`MemberSignatureReport`] |
 | Resolve source symbols and attempt signatures across files | [`NamedClassSources`], [`NamedClassSources::declaration`], [`NamedClassSources::try_complete_member_signature`] |
 | Retain checked bodies for source navigation and JVM planning | [`CheckedClassBodies::record`], [`NamedClassSources::definition_at`], [`CheckedClassBodies::complete`] |
-| Resolve a checked call or find uses of one source overload | [`NamedClassSources::resolved_call_at`], [`NamedClassSources::resolved_calls_in`], [`ResolvedCallIndex`] |
+| Resolve a checked call or field access and find its uses | [`NamedClassSources::resolved_call_at`], [`NamedClassSources::resolved_field_at`], [`ResolvedMemberIndex`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Check bodies of signature-ready members | [`MemberSignaturePhase::finish_with_body_work`], [`ClassBodyWork::members`], [`ClassBodyWork::check`] |
 | Type or check an ordinary class by symbol | [`NamedClassSources::type_class_body`], [`NamedClassSources::check_class_body`], [`ClassBodyCheck::into_parts`] |
@@ -610,7 +610,7 @@ use dotty::typer::{SignatureCompletion, TyperError};
 # let mut store = SemanticStore::new();
 # let defs = Definitions::bootstrap(&mut store);
 # let mut packages = Packages::new();
-let text = "class A { def only(x: Int): Int = x }; class B { def bad(a: A): Int = a.only(false); def good(a: A): Int = a.only(7) }";
+let text = "class A { def only(x: Int): Int = x }; class B { var count: Int = 0; def bad(a: A): Int = a.only(false); def good(a: A): Int = a.only(7); def copy(b: B): Unit = b.count = b.count }";
 let id = SourceId::from_index(42);
 let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
     .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
@@ -622,7 +622,7 @@ let mut arena = AstArena::new();
 # }
 # for (_, class) in sources.classes() {
 #     assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
-#     for method in class.methods() {
+#     for method in class.methods().chain(class.fields()) {
 #         assert!(matches!(sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages)?, SignatureCompletion::Complete(_)));
 #     }
 # }
@@ -654,9 +654,18 @@ let call = sources.resolved_call_at(id, offset, &bodies, &arena, &store)?
     .ok_or("missing call")?;
 assert_eq!(call.target.name.start() as usize, text.find("only(x").unwrap());
 
-let index = dotty::ResolvedCallIndex::build(&sources, &bodies, &arena, &store);
+let write = text.find("b.count").unwrap() as u32 + 2;
+let field = sources.resolved_field_at(id, write, &bodies, &arena, &store)?.unwrap();
+assert_eq!(field.kind, dotty::FieldAccessKind::Write);
+let index = dotty::ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
 assert!(index.diagnostics().is_empty());
 drop((bodies, arena, store));
+let (count, _) = index.member_at(id, field.target.name.start()).unwrap();
+let sites = index.references_to(count);
+assert_eq!(sites.len(), 2);
+assert_eq!(sites[0], field.origin);
+let read = index.field_at(id, sites[1].span().range().start()).unwrap();
+assert_eq!((read.field, read.kind), (count, dotty::FieldAccessKind::Read));
 let (method, _) = index.method_at(id, call.target.name.start()).ok_or("missing declaration")?;
 assert_eq!(method, call.method);
 assert_eq!(index.references_to(method), &[call.origin]);
@@ -667,13 +676,15 @@ assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 For a single lookup, [`NamedClassSources::resolved_call_at`] returns the written
 name, selected method symbol and source definition together. To collect one
 file's calls in source order, use [`NamedClassSources::resolved_calls_in`].
-For repeated queries across files, build one [`ResolvedCallIndex`] per checked
-revision and inspect its [`diagnostics`](ResolvedCallIndex::diagnostics).
-[`ResolvedCallIndex::references_to`] returns written direct call sites in file
-input order and then byte order. A client can add the declaration returned by
-[`ResolvedCallIndex::method_at`] when requested. These queries cover explicit
-parenthesized source calls. A synthetic `apply` selection has no written
-method token of its own.
+[`NamedClassSources::resolved_field_at`] returns the canonical public field
+and distinguishes a read from a direct assignment on an explicit receiver.
+This includes fields declared with `val` or `var` in the body or primary
+constructor of an ordinary class. For repeated queries across files, build
+one [`ResolvedMemberIndex`] per checked revision and inspect its diagnostics.
+[`ResolvedMemberIndex::references_to`] returns committed usages in input file
+order and then byte order. [`ResolvedMemberIndex::member_at`] accepts both
+usage and declaration name tokens, including fields without usages.
+[`ResolvedCallIndex`] remains available for existing direct-call clients.
 
 A complete check contains [`CheckedClassBody::Complete`] with its planning
 body. [`CheckedClassBody::Partial`] holds only committed source-to-typed

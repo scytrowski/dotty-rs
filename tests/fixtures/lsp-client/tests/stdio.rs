@@ -888,6 +888,28 @@ fn public_fields_navigate_from_reads_writes_and_declarations_in_both_encodings()
         }
         let other = column(providers.lines().nth(1).unwrap(), "count");
         assert_eq!(client.references(A, 1, other, false), json!([]));
+        let receiver = column(write, "A");
+        client.edit(B, 2, range(2, receiver, receiver + 1), "B");
+        client.diagnostics(B, 2, json!([]));
+        assert_eq!(client.references(A, 0, target, false), json!([read_site]));
+        assert_eq!(client.references(A, 1, other, false), json!([write_site]));
+        let write_position = json!({"textDocument":{"uri":B},"position":{"line":2,"character":w}});
+        assert_eq!(
+            client.request("textDocument/definition", write_position.clone()),
+            json!([{"originSelectionRange":write_site["range"],"targetUri":A,"targetSelectionRange":range(1,other,other+5),"targetRange":range(1,other-4,other+"count: Int = 2".len())}])
+        );
+
+        let rhs = column(write, "1");
+        client.edit(B, 3, range(2, rhs, rhs + 1), "false");
+        client.diagnostics(B,3,json!([{"range":range(2,rhs,rhs+5),"severity":1,"source":"dotty",
+            "code":"typer.expected_expression_type_mismatch","message":"Expression does not conform to the expected type"}]));
+        assert_eq!(client.references(A, 1, other, false), json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", write_position),
+            Value::Null
+        );
+        assert_eq!(client.references(B, 1, r, true), json!([decl, read_site]));
+
         client.shutdown();
     }
 }
