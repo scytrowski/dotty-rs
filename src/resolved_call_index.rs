@@ -91,7 +91,7 @@ fn merge_class_sites(
 }
 
 /// Index of ordinary source classes, methods, fields, named method and constructor parameters, and ordinary method locals in one session.
-/// Parent and method annotation names use completed class and method signatures.
+/// Parent, method and constructor type names use the corresponding completed signatures.
 /// Term uses require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
@@ -250,7 +250,10 @@ impl ResolvedMemberIndex {
             let method_types = crate::source_signature_types::method_types(file, &targets, store);
             let parent_sites = parents.iter().map(|s| (s.parent, s.origin));
             let construction_sites = constructions.iter().map(|s| (s.class, s.origin));
-            let signature_sites = method_types.iter().map(|s| (s.class, s.origin));
+            let signature_sites = merge_class_sites(
+                method_types.iter().map(|s| (s.class, s.origin)),
+                constructor_types.iter().map(|s| (s.class, s.origin)),
+            );
             for (class, span) in merge_class_sites(
                 merge_class_sites(parent_sites, construction_sites),
                 signature_sites,
@@ -547,7 +550,7 @@ impl ResolvedMemberIndex {
     }
 
     /// Looks up an ordinary class, method, field, parameter or method local by half-open
-    /// UTF-8 byte offset. Parent and method annotation names require completed signatures. Local declarations
+    /// UTF-8 byte offset. Parent, method and constructor type names require completed signatures. Local declarations
     /// and term uses require committed bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
@@ -556,6 +559,13 @@ impl ResolvedMemberIndex {
             if let Some((id, target)) = declaration_at(&file.class_declarations, offset) {
                 (id, SymbolKind::Class, target, None)
             } else if let Some(site) = self.method_type_at(source, offset) {
+                (
+                    site.class,
+                    SymbolKind::Class,
+                    site.target,
+                    Some(site.origin),
+                )
+            } else if let Some(site) = self.constructor_type_at(source, offset) {
                 (
                     site.class,
                     SymbolKind::Class,
@@ -605,7 +615,7 @@ impl ResolvedMemberIndex {
 
     /// Committed uses of this exact symbol, in input file order then
     /// token order. For classes, covers single unqualified explicit parents and committed
-    /// simple `new` expressions, as well as simple written class types in supported method signatures. Omits declarations. Unknown and unused symbols yield an
+    /// simple `new` expressions, as well as simple written class types in supported method and constructor signatures. Omits declarations. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)

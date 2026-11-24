@@ -130,3 +130,60 @@ fn constructor_type_queries_resolve_completed_formals_and_exact_class_targets() 
         }
     }
 }
+
+#[test]
+fn class_references_interleave_constructor_types_with_method_types_parents_and_allocations() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let model_text = "class Base; class Peer; class Other(x: Base)";
+    let text = "class Holder(seed: Base, val first: Base, var next: Peer) extends Base { def make(): Base = new Base() }; class Last(x: Base)";
+    let model = named(9, model_text, &mut store, &mut packages);
+    let file = named(2, text, &mut store, &mut packages);
+    for order in [[&model, &file], [&file, &model]] {
+        let sources = NamedClassSources::new(order, &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                file.classes()[0].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        assert!(report.errors.is_empty(), "{report:?}");
+        let mut bodies = crate::CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let index = crate::ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+        for (class, token) in model.classes().iter().zip(["Base", "Peer"]) {
+            let mut expected = Vec::new();
+            for source in order {
+                let (line, skip) = if source.source() == model.source() {
+                    (model_text, 1)
+                } else {
+                    (text, 0)
+                };
+                for (pos, _) in line.match_indices(token).skip(skip) {
+                    let site = index.symbol_at(source.source(), pos as u32).unwrap();
+                    assert_eq!(
+                        (site.symbol, site.kind, site.target.source),
+                        (class.symbol, SymbolKind::Class, model.source())
+                    );
+                    let usage = site.usage.unwrap();
+                    assert_eq!(
+                        (
+                            usage.source(),
+                            usage.span().range().start(),
+                            usage.span().range().end()
+                        ),
+                        (source.source(), pos as u32, (pos + token.len()) as u32)
+                    );
+                    expected.push(usage);
+                }
+            }
+            assert_eq!(index.references_to(class.symbol), expected);
+        }
+    }
+}
