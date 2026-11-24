@@ -2000,11 +2000,24 @@ class Derived extends Base:
   override def value(): Int = 7
 ",
     );
-    let first = super::compile([base, derived]);
-    let second = super::compile([derived, base]);
+    let compile = |files: [_; 2]| {
+        super::with_plan(&files, |plan, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                plan.typed_ast,
+                plan.store,
+            );
+            let at = derived.2.find("extends Base").unwrap() as u32 + 8;
+            let relation = index.parent_at(derived.0, at).unwrap();
+            checked_parent_emission(plan, defs, relation, "()V", &[0x2a])
+        })
+    };
+    let first = compile([base, derived]);
+    let second = compile([derived, base]);
     assert!(first.iter().eq(second.iter().rev()));
     for artifacts in [first, second] {
-        assert_super_call(&artifacts, "()V", &[0x2a]);
         assert_eq!(
             super::run_java_client("inheritance", "InheritanceClient", &artifacts)
                 .lines()
@@ -2014,15 +2027,39 @@ class Derived extends Base:
     }
 }
 
-fn assert_super_call(artifacts: &[dotty::jvm::GeneratedClass], descriptor: &str, loads: &[u8]) {
+fn checked_parent_emission(
+    plan: &dotty::jvm::JvmCompilationUnit<'_>,
+    defs: &Definitions,
+    relation: &dotty::ResolvedSourceParent,
+    descriptor: &str,
+    loads: &[u8],
+) -> Vec<dotty::jvm::GeneratedClass> {
     use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
+    let identity = |id| {
+        plan.classes
+            .iter()
+            .find(|c| c.class == id)
+            .unwrap()
+            .identity(plan.store)
+            .unwrap()
+    };
+    let child = identity(relation.child);
+    let parent = identity(relation.parent);
+    assert_eq!(
+        (child.internal_name(), parent.internal_name()),
+        ("demo/Derived", "demo/Base")
+    );
+    let artifacts = super::checked_emission(plan, defs);
     let artifact = artifacts
         .iter()
-        .find(|a| a.internal_name() == "demo/Derived")
+        .find(|a| a.internal_name() == child.internal_name())
         .unwrap();
     let class = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
     let pool = &class.constant_pool;
-    assert_eq!(pool.class_name(class.super_class.unwrap()), Ok("demo/Base"));
+    assert_eq!(
+        pool.class_name(class.super_class.unwrap()),
+        Ok(parent.internal_name())
+    );
     let constructor = class
         .methods
         .iter()
@@ -2043,11 +2080,12 @@ fn assert_super_call(artifacts: &[dotty::jvm::GeneratedClass], descriptor: &str,
     else {
         panic!("invokespecial must reference a class method")
     };
-    assert_eq!(pool.class_name(*class_index), Ok("demo/Base"));
+    assert_eq!(pool.class_name(*class_index), Ok(parent.internal_name()));
     assert_eq!(
         pool.name_and_type(*name_and_type_index),
         Ok(("<init>", descriptor))
     );
+    artifacts
 }
 
 #[test]
@@ -2096,14 +2134,16 @@ class Derived(start: Int) extends Base(start)
                 assert_eq!(ctor.symbol(), p.constructor);
                 assert_eq!(ctor.parameters(), &[p.formal]);
             }
-            super::checked_emission(plan, defs)
+            let relation = index
+                .parent_at(derived.0, derived.2.find("Base(start)").unwrap() as u32)
+                .unwrap();
+            checked_parent_emission(plan, defs, relation, "(I)V", &[0x2a, 0x1b])
         })
     };
     let first = compile([base, derived]);
     let second = compile([derived, base]);
     assert!(first.iter().eq(second.iter().rev()));
     for artifacts in [first, second] {
-        assert_super_call(&artifacts, "(I)V", &[0x2a, 0x1b]); // aload_0, iload_1
         assert_eq!(
             super::run_java_client("forwarded-parent", "ForwardingClient", &artifacts)
                 .lines()

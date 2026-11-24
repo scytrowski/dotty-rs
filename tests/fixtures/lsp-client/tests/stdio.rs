@@ -1232,3 +1232,69 @@ fn constructor_parameters_navigate_across_headers_and_bodies_in_both_encodings()
         client.shutdown();
     }
 }
+
+#[test]
+fn superclass_navigation_separates_the_parent_type_from_its_argument() {
+    let base = "/* 😀 */ class Base(n: Int)";
+    let peer = "/* 😀 */ class Peer(n: Int)";
+    let kept = "class Kept(n: Int) extends Base(n)";
+    let child = "class Child(/* 😀 */ start: Int) extends /* 😀 */ Base(start)";
+    for encoding in ["utf-8", "utf-16"] {
+        let col = |line, token| token_column(encoding, line, token);
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &[base, peer, kept].join("\n"));
+        client.open(B, child);
+        client.diagnostics(B, 1, json!([]));
+        let use_pos = col(child, "Base");
+        let arg_pos = col(child, "start)");
+        let arg_decl = col(child, "start:");
+        let loc = |uri: &str, line, c| json!({"uri":uri,"range":range(line,c,c+4)});
+        let parent_use = loc(B, 0, use_pos);
+        let kept_use = loc(A, 2, col(kept, "Base"));
+        let query = |pos| json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}});
+        for (version, name, line, provider) in [
+            (1, "Base", 0, base),
+            (2, "Peer", 1, peer),
+            (3, "Base", 0, base),
+        ] {
+            if version > 1 {
+                client.edit(B, version, range(0, use_pos, use_pos + 4), name);
+                client.diagnostics(B, version, json!([]));
+            }
+            let decl = col(provider, name);
+            let (base_refs, peer_refs, all) = if name == "Base" {
+                (
+                    json!([kept_use, parent_use]),
+                    json!([]),
+                    json!([loc(A, 0, decl), kept_use, parent_use]),
+                )
+            } else {
+                (
+                    json!([kept_use]),
+                    json!([parent_use]),
+                    json!([loc(A, 1, decl), parent_use]),
+                )
+            };
+            assert_eq!(client.references(A, 0, col(base, "Base"), false), base_refs);
+            assert_eq!(client.references(A, 1, col(peer, "Peer"), false), peer_refs);
+            assert_eq!(client.references(B, 0, use_pos, true), all);
+            assert_eq!(
+                client.request("textDocument/definition", query(use_pos)),
+                json!([{
+                    "originSelectionRange":parent_use["range"],"targetUri":A,
+                    "targetRange":range(line,col(provider,"class"),decl+"Base(n: Int)".len()),
+                    "targetSelectionRange":range(line,decl,decl+4)
+                }])
+            );
+            assert_eq!(
+                client.request("textDocument/definition", query(arg_pos)),
+                json!([{
+                    "originSelectionRange":range(0,arg_pos,arg_pos+5),"targetUri":B,
+                    "targetRange":range(0,arg_decl,arg_decl+"start: Int".len()),
+                    "targetSelectionRange":range(0,arg_decl,arg_decl+5)
+                }])
+            );
+        }
+        client.shutdown();
+    }
+}

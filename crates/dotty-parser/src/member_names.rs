@@ -19,6 +19,8 @@ pub type SourceSelection = SourceTermName;
 /// and visibility are determined later by the namer and typer.
 #[derive(Debug, Default)]
 pub struct SourceMemberNames {
+    pub(super) classes: Vec<(TreeId<Untyped>, TextRange)>,
+    pub(super) parents: Vec<(TreeId<Untyped>, TextRange)>,
     parameters: Vec<(TreeId<Untyped>, TextRange)>,
     values: Vec<(TreeId<Untyped>, TextRange)>,
     identifiers: Vec<SourceTermName>,
@@ -26,6 +28,17 @@ pub struct SourceMemberNames {
 }
 
 impl SourceMemberNames {
+    /// Written name of an ordinary class declaration in this parse, including backticks.
+    pub fn class_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
+        declaration_name(&self.classes, tree)
+    }
+
+    /// Written type name of a simple unqualified parent, bare or with one argument
+    /// list. Supply the parent tree from the template in this parse.
+    pub fn parent_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
+        declaration_name(&self.parents, tree)
+    }
+
     /// Exact name token for a simple value definition or explicit constructor
     /// `val`/`var` parameter. Supply a definition from this parse.
     pub fn value_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
@@ -131,6 +144,48 @@ fn name_at(entries: &[SourceTermName], offset: u32) -> Option<SourceTermName> {
 mod tests {
     use super::*;
     use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
+    #[test]
+    fn written_class_and_parent_names_exclude_arguments_and_qualified_types() {
+        let text = "class `Base`; class A extends /*comment*/ `Base`; class B(start: Int) extends `Base`(start); class C extends pkg.Base";
+        let parsed = crate::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            SourceId::from_index(0),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut NameInterner::new(),
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let slice = |r: TextRange| &text[r.start() as usize..r.end() as usize];
+        let mut seen = Vec::new();
+        for (tree, node) in parsed.ast.iter() {
+            if let Some(name) = parsed.member_names.class_name(tree) {
+                let TreeKind::TypeDef(class) = &node.kind else {
+                    panic!("class")
+                };
+                let TreeKind::Template(body) = &parsed.ast.get(class.rhs).kind else {
+                    panic!("template")
+                };
+                let parent = body
+                    .parents
+                    .first()
+                    .and_then(|&p| parsed.member_names.parent_name(p));
+                if let Some(p) = parent {
+                    assert!(!p.contains(p.end()));
+                    assert!(p.start() > name.end());
+                }
+                seen.push((slice(name), parent.map(slice)));
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                ("`Base`", None),
+                ("A", Some("`Base`")),
+                ("B", Some("`Base`")),
+                ("C", None)
+            ]
+        );
+    }
+
     #[test]
     fn plain_constructor_names_preserve_order_backticks_and_field_boundaries() {
         let text = "class Pair(z: Int, `a`: Int, val first: Int, var next: Int)";

@@ -43,3 +43,7 @@ the committed typed bindings for the same parse.
 
 Use [`SourceMemberNames::parameter_name`] with a named method parameter or plain constructor
 parameter declaration tree to obtain its exact name, including any backticks.
+
+Use [`SourceMemberNames::class_name`] on an ordinary class declaration and
+[`SourceMemberNames::parent_name`] on a template parent to locate the names in
+`class Child(start: Int) extends Base(start)`. The parent token covers only `Base`.

@@ -679,6 +679,9 @@ where
             start: prefix.start,
         };
         self.advance();
+        let name_range =
+            (!is_case && !is_enum && !is_trait && self.current_is_type_reference_name())
+                .then_some(self.current().span);
         let name = self.parse_type_name();
         let class_name_end = self.last_real_token_end;
         let owner = if is_case {
@@ -761,7 +764,7 @@ where
             metadata.modifiers.push(Modifier::Enum);
         }
 
-        ParsedStatement::Definition(self.alloc_from(
+        let definition = self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
                 name,
@@ -769,7 +772,11 @@ where
                 metadata,
                 variance: None,
             }),
-        ))
+        );
+        if let Some(range) = name_range {
+            self.member_names.classes.push((definition, range));
+        }
+        ParsedStatement::Definition(definition)
     }
 
     fn parse_template_tail(
@@ -1376,6 +1383,7 @@ where
 
     pub(crate) fn parse_parent(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        let first = self.current().span;
         let mut parent = self.with_parse_kind(crate::ParseKind::Type, |parser| {
             if parser.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
                 // Dotty's `constrApp` parses `annotType1`: a parenthesized
@@ -1389,6 +1397,12 @@ where
         if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
             parent = self.parse_type_application(mark, parent);
         }
+        let mut simple = matches!(&self.ast.get(parent).kind, TreeKind::Ident(id) if id.name.is_type())
+            && self
+                .ast
+                .get(parent)
+                .position
+                .is_some_and(|p| p.span().range() == first);
         if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
             let new_tree = self.alloc(
                 TreeKind::New(New { tpt: parent }),
@@ -1396,8 +1410,12 @@ where
             );
             parent = self.parse_application(mark, new_tree);
             while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+                simple = false;
                 parent = self.parse_application(mark, parent);
             }
+        }
+        if simple {
+            self.member_names.parents.push((parent, first));
         }
         parent
     }

@@ -67,7 +67,9 @@ first identifier records its assignment and the second records the read site.
 `selections()` stays selector-only. `term_names()` visits identifiers and
 selectors in written order. `parameter_name(tree)` identifies the exact token
 of a named method formal or plain class constructor parameter, including backticks. The typer
-supplies the referenced symbol.
+supplies the referenced symbol. `class_name(tree)` selects the written name of an ordinary
+class. `parent_name(tree)` selects a simple unqualified type name from a parent tree,
+including when a single argument list follows it.
 
 Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
 standalone source pattern through the real pattern productions, requires the
