@@ -1,5 +1,5 @@
 //! Fresh semantic session for one set of open document versions.
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use dotty::classloader::{ClasspathSymbolResolver, CompositeClassPath, LoadingSession};
@@ -223,12 +223,7 @@ fn analyze_sources(
         &mut bindings,
         &mut *resolver,
     );
-    let mut queue: VecDeque<_> = sources.classes().map(|(_, class)| class.symbol).collect();
-    while let Some(symbol) = queue.pop_front() {
-        if let Ok(attempt) = phase.attempt(symbol) {
-            queue.extend(attempt.retry);
-        }
-    }
+    phase.complete_all();
     let headers = phase.finish();
     let blocked = headers.blockage_report(sources.declarations(), store);
     for failure in headers.failures {
@@ -239,12 +234,7 @@ fn analyze_sources(
         .member_signatures(headers.ready.iter().copied(), store)
         .expect("classes from this session's header report");
     let mut signatures = MemberSignaturePhase::new(&selection, store, defs, packages);
-    queue.extend(selection.members().iter().copied());
-    while let Some(member) = queue.pop_front() {
-        if let Ok(attempt) = signatures.attempt_with_resolver(member, &mut *resolver) {
-            queue.extend(attempt.retry);
-        }
-    }
+    signatures.complete_all(&mut *resolver);
     let (signatures, work) = signatures.finish_with_body_work();
     let blocked = signatures.blockage_report(sources.declarations(), store);
     for failure in signatures.failures {
