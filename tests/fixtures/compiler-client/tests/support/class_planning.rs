@@ -826,7 +826,7 @@ class Pair(z: Int, a: Int):
         ),
     ];
     let compile = |files: [_; 2]| {
-        super::with_plan(&files, |plan, defs, sources, bodies| {
+        super::with_plan(&files, |plan, defs, sources, bodies, _| {
             let (id, _, text) = inputs[0];
             let field = sources.file(id).unwrap().classes()[0]
                 .fields()
@@ -936,7 +936,7 @@ class UseCounter:
 fn compile_counter(files: [(SourceId, &str, &str); 2]) -> Vec<dotty::jvm::GeneratedClass> {
     let &(counter, _, declaration) = files.iter().find(|f| f.1 == "Counter.scala").unwrap();
     let &(client, _, text) = files.iter().find(|f| f.1 == "UseCounter.scala").unwrap();
-    super::with_plan(&files, |plan, definitions, sources, bodies| {
+    super::with_plan(&files, |plan, definitions, sources, bodies, _| {
         let class = &sources.file(counter).unwrap().classes()[0];
         let field = class
             .constructor_fields
@@ -1255,7 +1255,7 @@ fn initializer_parameter_call_checks_arity_and_result_type() {
             (SourceId::from_index(0), "Provider.scala", provider.as_str()),
             (SourceId::from_index(1), "Consumer.scala", consumer.as_str()),
         ];
-        super::with_plan(&files, |unit, defs, _, _| {
+        super::with_plan(&files, |unit, defs, _, _, _| {
             let consumer = &unit.classes[1];
             let answer = &consumer.fields[0];
             let error = dotty::jvm::emit_class(unit, consumer.class, defs).unwrap_err();
@@ -1964,7 +1964,7 @@ fn bare_parent_requires_an_available_no_arg_constructor_before_emission() {
         "Classes.scala",
         "class Base(x: Int)\nclass Derived extends Base",
     )];
-    super::with_plan(&files, |unit, definitions, _, _| {
+    super::with_plan(&files, |unit, definitions, _, _, _| {
         let [base, derived] = unit.classes.as_slice() else {
             panic!("expected two classes")
         };
@@ -2068,8 +2068,39 @@ class Base(seed: Int):
 class Derived(start: Int) extends Base(start)
 ",
     );
-    let first = super::compile([base, derived]);
-    let second = super::compile([derived, base]);
+    let compile = |files: [_; 2]| {
+        super::with_plan(&files, |plan, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                plan.typed_ast,
+                plan.store,
+            );
+            assert!(index.diagnostics().is_empty());
+            for ((source, _, text), name) in [(base, "seed"), (derived, "start")] {
+                let read = text.rfind(name).unwrap() as u32;
+                let declaration = text.find(name).unwrap() as u32;
+                let p = index.constructor_parameter_at(source, read).unwrap();
+                let site = index.symbol_at(source, read).unwrap();
+                assert_eq!(site.symbol, p.parameter);
+                assert_eq!(site.target.source, source);
+                assert_eq!(site.target.name.start(), declaration);
+                assert_eq!(index.references_to(p.parameter), &[site.usage.unwrap()]);
+                let class = plan.classes.iter().find(|c| c.class == p.class).unwrap();
+                let dotty::jvm::JvmClassInitializationPlan::PrimaryConstructor(ctor) =
+                    &class.initialization
+                else {
+                    panic!("explicit constructor")
+                };
+                assert_eq!(ctor.symbol(), p.constructor);
+                assert_eq!(ctor.parameters(), &[p.formal]);
+            }
+            super::checked_emission(plan, defs)
+        })
+    };
+    let first = compile([base, derived]);
+    let second = compile([derived, base]);
     assert!(first.iter().eq(second.iter().rev()));
     for artifacts in [first, second] {
         assert_super_call(&artifacts, "(I)V", &[0x2a, 0x1b]); // aload_0, iload_1

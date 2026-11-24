@@ -32,8 +32,9 @@ impl SourceMemberNames {
         declaration_name(&self.values, tree)
     }
 
-    /// Exact written token of a named `def` parameter in this parse, including
-    /// any backticks. Anonymous, synthetic and constructor parameters have no entry.
+    /// Exact written token of a named method parameter or a parameter without
+    /// an explicit accessor in an ordinary class constructor, including backticks.
+    /// Use [`Self::value_name`] for explicit constructor `val` and `var` fields.
     pub fn parameter_name(&self, tree: TreeId<Untyped>) -> Option<TextRange> {
         declaration_name(&self.parameters, tree)
     }
@@ -130,6 +131,44 @@ fn name_at(entries: &[SourceTermName], offset: u32) -> Option<SourceTermName> {
 mod tests {
     use super::*;
     use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
+    #[test]
+    fn plain_constructor_names_preserve_order_backticks_and_field_boundaries() {
+        let text = "class Pair(z: Int, `a`: Int, val first: Int, var next: Int)";
+        let parsed = crate::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            SourceId::from_index(0),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut NameInterner::new(),
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let names = &parsed.member_names;
+        let slice = |r: TextRange| &text[r.start() as usize..r.end() as usize];
+        let parameters: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, _)| {
+                let name = names.parameter_name(tree)?;
+                assert!(names.value_name(tree).is_none());
+                assert!(!name.contains(name.end()));
+                Some((name.start() as usize, slice(name)))
+            })
+            .collect();
+        assert_eq!(
+            parameters,
+            [
+                (text.find("z:").unwrap(), "z"),
+                (text.find("`a`").unwrap(), "`a`")
+            ]
+        );
+        let fields: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, _)| names.value_name(tree))
+            .map(slice)
+            .collect();
+        assert_eq!(fields, ["first", "next"]);
+    }
+
     #[test]
     fn parameter_tokens_distinguish_formals_from_fields_and_uses() {
         let text =

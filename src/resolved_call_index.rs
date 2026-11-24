@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::source_declarations::DeclarationDiagnostic;
 use crate::source_field_access::TermAccess;
+use crate::source_parameters::ParameterDeclaration;
 use crate::{
     CheckedClassBodies, NamedClassSources, ResolvedFieldAccess, ResolvedSourceCall,
     SourceMemberTarget, SourceMethodParameter, SourceMethodTarget,
@@ -15,7 +16,7 @@ use crate::{
 struct IndexedFile {
     locals: Vec<(SymbolId, SourceMemberTarget)>,
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
-    parameters: Vec<SourceMethodParameter>,
+    parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
     fields: Vec<ResolvedFieldAccess>,
@@ -28,7 +29,7 @@ struct IndexedFile {
 pub struct SourceSymbolSite {
     /// Canonical identity to pass to [`ResolvedMemberIndex::references_to`].
     pub symbol: SymbolId,
-    /// Semantic category: method, field, method parameter, or local.
+    /// Semantic category: method, field, parameter, or local.
     pub kind: SymbolKind,
     /// Declaration range and exact written name token.
     pub target: SourceMemberTarget,
@@ -54,8 +55,8 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
         .filter(|(span, _)| span.span().range().contains(offset))
 }
 
-/// Index of source methods, fields, named method parameters and ordinary method locals in one session.
-/// Usage sites require committed body bindings.
+/// Index of source methods, fields, named method and constructor parameters, and ordinary method locals in one session.
+/// Usage sites require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -79,6 +80,27 @@ impl ResolvedMemberIndex {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
     ) -> Self {
+        Self::build_with_headers(
+            sources,
+            bodies,
+            &crate::ClassHeaderBindings::default(),
+            typed_ast,
+            store,
+        )
+    }
+
+    /// Includes constructor parameter reads from committed parent arguments as well
+    /// as body uses. Supply the headers, bodies, final typed arena and store of
+    /// the same session. Blocked and failed header attempts contribute no uses.
+    /// References are ordered by input file and written token across both phases.
+    pub fn build_with_headers(
+        sources: &NamedClassSources<'_>,
+        bodies: &CheckedClassBodies,
+        headers: &crate::ClassHeaderBindings,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Self {
+        let headers = (!headers.index.is_empty()).then_some(headers);
         let mut index = Self::default();
         let mut targets = HashMap::new();
         let mut valid_files = Vec::new();
@@ -135,17 +157,22 @@ impl ResolvedMemberIndex {
             }
             let locals = crate::source_locals::declarations(file, navigation, bodies, store);
             let mut local_uses = Vec::new();
-            let slots: HashMap<_, _> = parameters
+            let mut slots: HashMap<_, _> = parameters
                 .iter()
                 .enumerate()
-                .map(|(i, p)| (p.parameter, i))
+                .map(|(i, p)| (p.symbol(), i))
                 .chain(locals.iter().enumerate().map(|(i, (id, _))| (*id, i)))
                 .collect();
+            for (slot, declaration) in parameters.iter().enumerate() {
+                if let ParameterDeclaration::Constructor(p) = declaration {
+                    slots.insert(p.formal, slot);
+                }
+            }
             let mut fields = Vec::new();
             let mut parameter_uses = Vec::new();
             for name in file.named().syntax().member_names.term_names() {
                 let Some(access) = crate::source_field_access::term_binding(
-                    file, navigation, name, bodies, typed_ast, store,
+                    file, navigation, name, bodies, headers, typed_ast, store,
                 ) else {
                     continue;
                 };
@@ -156,7 +183,7 @@ impl ResolvedMemberIndex {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        id
+                        parameters[slot].symbol()
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
@@ -232,30 +259,56 @@ impl ResolvedMemberIndex {
     /// Only ordinary parameters of class methods with one value list are indexed.
     /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
     pub fn parameter_at(&self, source: SourceId, offset: u32) -> Option<SourceMethodParameter> {
-        if let Some((_, parameter)) = self.parameter_use_at(source, offset) {
-            return Some(parameter);
+        match self.parameter_site_at(source, offset)?.1 {
+            ParameterDeclaration::Method(p) => Some(p),
+            ParameterDeclaration::Constructor(_) => None,
         }
-        self.parameter_declaration_at(source, offset)
+    }
+
+    /// Looks up a plain primary constructor parameter at its declaration or a committed read. Parent argument reads require [`Self::build_with_headers`].
+    /// Includes unused parameters. Explicit constructor fields, contextual and
+    /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
+    pub fn constructor_parameter_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<crate::SourceConstructorParameter> {
+        match self.parameter_site_at(source, offset)?.1 {
+            ParameterDeclaration::Constructor(p) => Some(p),
+            ParameterDeclaration::Method(_) => None,
+        }
+    }
+
+    fn parameter_site_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<(Option<SourceSpan>, ParameterDeclaration)> {
+        if let Some((origin, p)) = self.parameter_use_at(source, offset) {
+            Some((Some(origin), p))
+        } else {
+            Some((None, self.parameter_declaration_at(source, offset)?))
+        }
     }
 
     fn parameter_declaration_at(
         &self,
         source: SourceId,
         offset: u32,
-    ) -> Option<SourceMethodParameter> {
+    ) -> Option<ParameterDeclaration> {
         let parameters = &self.files.get(&source)?.parameters;
-        let i = parameters.partition_point(|p| p.target.name.end() <= offset);
+        let i = parameters.partition_point(|p| p.target().name.end() <= offset);
         parameters
             .get(i)
             .copied()
-            .filter(|p| p.target.name.contains(offset))
+            .filter(|p| p.target().name.contains(offset))
     }
 
     fn parameter_use_at(
         &self,
         source: SourceId,
         offset: u32,
-    ) -> Option<(SourceSpan, SourceMethodParameter)> {
+    ) -> Option<(SourceSpan, ParameterDeclaration)> {
         let file = self.files.get(&source)?;
         let (origin, slot) = use_at(&file.parameter_uses, offset)?;
         Some((origin, file.parameters[slot]))
@@ -271,7 +324,7 @@ impl ResolvedMemberIndex {
             .filter(|f| f.origin.span().range().contains(offset))
     }
 
-    /// Classifies a committed use of a field, ordinary local, or method parameter
+    /// Classifies a committed use of a field, ordinary local, or parameter
     /// at its written name. Direct assignment targets are writes; other supported
     /// value uses are reads. Declarations and method calls yield `None`.
     pub fn value_access_at(&self, source: SourceId, offset: u32) -> Option<crate::ValueAccessKind> {
@@ -312,8 +365,8 @@ impl ResolvedMemberIndex {
     }
 
     /// Looks up a written method, field, ordinary parameter or method local by half-open
-    /// UTF-8 byte offset. Local declarations and all usage sites require committed body
-    /// bindings. Other supported declarations are available before body checking.
+    /// UTF-8 byte offset. Local declarations and all usage sites require committed
+    /// bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
         let file = self.files.get(&source)?;
@@ -327,14 +380,14 @@ impl ResolvedMemberIndex {
         } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
             (id, SymbolKind::Local, target, None)
         } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
-            (p.parameter, SymbolKind::Parameter, p.target, Some(origin))
+            (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
         } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
             (id, SymbolKind::Method, target, None)
         } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
             (id, SymbolKind::Field, target, None)
         } else {
             let p = self.parameter_declaration_at(source, offset)?;
-            (p.parameter, SymbolKind::Parameter, p.target, None)
+            (p.symbol(), SymbolKind::Parameter, p.target(), None)
         };
         Some(SourceSymbolSite {
             symbol,

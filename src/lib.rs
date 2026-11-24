@@ -140,7 +140,7 @@ pub use resolved_call_index::{ResolvedCallIndex, ResolvedMemberIndex, SourceSymb
 
 mod source_locals;
 mod source_parameters;
-pub use source_parameters::SourceMethodParameter;
+pub use source_parameters::{SourceConstructorParameter, SourceMethodParameter};
 
 mod source_field_access;
 pub use source_field_access::{

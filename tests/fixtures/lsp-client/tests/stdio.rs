@@ -1155,3 +1155,80 @@ fn renaming_a_local_redirects_the_same_read_from_its_parameter_and_back() {
         client.shutdown();
     }
 }
+
+#[test]
+fn constructor_parameters_navigate_across_headers_and_bodies_in_both_encodings() {
+    let base = "class Base(/* 😀 */ left: Int) { val initial: Int = left }";
+    let child = "class Derived(/* 😀 */ left: Int, next: Int) extends Base(/* 😀 */ left) { val own: Int = left }";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A, B]);
+        client.open(A, base);
+        client.open(B, child);
+        let col = |line, token| token_column(encoding, line, token);
+        let base_decl = col(base, "left:");
+        let base_read = col(base, "left }");
+        let child_decl = col(child, "left:");
+        let parent_arg = col(child, "left)");
+        let child_read = col(child, "left }");
+        let loc = |uri: &str, c| json!({"uri":uri,"range":range(0,c,c+4)});
+        for (uri, decl, uses) in [
+            (A, base_decl, vec![base_read]),
+            (B, child_decl, vec![parent_arg, child_read]),
+        ] {
+            let reads: Vec<_> = uses.iter().map(|&c| loc(uri, c)).collect();
+            let mut all = vec![loc(uri, decl)];
+            all.extend_from_slice(&reads);
+            assert_eq!(client.references(uri, 0, decl, true), json!(all));
+            for pos in uses {
+                assert_eq!(client.references(uri, 0, pos, false), json!(reads));
+                assert_eq!(
+                    client.request(
+                        "textDocument/definition",
+                        json!({"textDocument":{"uri":uri},"position":{"line":0,"character":pos}})
+                    ),
+                    json!([{"originSelectionRange":range(0,pos,pos+4),"targetUri":uri,
+                    "targetRange":range(0,decl,decl+"left: Int".len()),"targetSelectionRange":range(0,decl,decl+4)}])
+                );
+            }
+        }
+        let next_decl = col(child, "next:");
+        assert_eq!(client.references(B, 0, next_decl, false), json!([]));
+        for (version, replacement) in [(2, "next"), (3, "left")] {
+            client.edit(
+                B,
+                version,
+                range(0, parent_arg, parent_arg + 4),
+                replacement,
+            );
+            client.diagnostics(B, version, json!([]));
+            let (target, left_reads, next_reads) = if replacement == "next" {
+                (
+                    next_decl,
+                    json!([loc(B, child_read)]),
+                    json!([loc(B, parent_arg)]),
+                )
+            } else {
+                (
+                    child_decl,
+                    json!([loc(B, parent_arg), loc(B, child_read)]),
+                    json!([]),
+                )
+            };
+            assert_eq!(client.references(B, 0, child_decl, false), left_reads);
+            assert_eq!(client.references(B, 0, next_decl, false), next_reads);
+            assert_eq!(
+                client.references(A, 0, base_decl, false),
+                json!([loc(A, base_read)])
+            );
+            assert_eq!(
+                client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":parent_arg}})
+                ),
+                json!([{"originSelectionRange":range(0,parent_arg,parent_arg+4),"targetUri":B,
+                "targetRange":range(0,target,target+"next: Int".len()),"targetSelectionRange":range(0,target,target+4)}])
+            );
+        }
+        client.shutdown();
+    }
+}
