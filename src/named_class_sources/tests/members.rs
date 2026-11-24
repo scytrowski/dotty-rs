@@ -746,3 +746,86 @@ fn requested_member_path_stops_at_provider_rejection_before_the_next_root() {
     );
     assert_eq!(store.symbols.info(later), &crate::core::SymbolInfo::Missing);
 }
+
+#[test]
+fn collecting_signatures_drains_retries_and_keeps_cycles_separate_from_rejections() {
+    use crate::{MemberSignatureFailure, MemberSignaturePhase, SignatureBlockage};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let files: Vec<_> = [
+        "class Use(p: P, a: A) { val answer = p.good; val waiting = p.bad; val downstream = a.x }",
+        "class A(b: B) { val x = b.y }",
+        "class B(a: A) { val y = a.x }",
+        "class P { val good = 40; def value(): Int = 7; val bad = value(1) }",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, text)| named(i as u32, text, &mut store, &mut packages))
+    .collect();
+    let sources = NamedClassSources::new(&files, &store).unwrap();
+    let mut arena = Default::default();
+    let mut bindings = Default::default();
+    let mut headers = ClassHeaderPhase::prepare(
+        &sources,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        &mut bindings,
+    );
+    headers.complete_all();
+    let selection = sources
+        .member_signatures(headers.finish().ready, &store)
+        .unwrap();
+    let field = |file: usize, i| files[file].classes()[0].fields().nth(i).unwrap().symbol;
+    let (answer, waiting, downstream, x, y, bad) = (
+        field(0, 0),
+        field(0, 1),
+        field(0, 2),
+        field(1, 0),
+        field(2, 0),
+        field(3, 1),
+    );
+    let mut phase = MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
+    phase.complete_all(crate::core::NoResolver);
+    let (report, work) = phase.finish_with_body_work();
+    assert!(report.remaining.is_empty());
+    assert!(report.ready.contains(&answer));
+    assert_eq!(
+        store.symbols.info(answer),
+        &crate::core::SymbolInfo::Complete(defs.int)
+    );
+    let [MemberSignatureFailure::Typing { report: error, .. }] = report.failures.as_slice() else {
+        panic!("one direct error")
+    };
+    assert_eq!(error.member(), Some(bad));
+    assert!(matches!(
+        error.error(),
+        TyperError::ApplicationArityMismatch {
+            expected: 0,
+            actual: 1,
+            ..
+        }
+    ));
+    let [
+        (w, SignatureBlockage::Failed(provider)),
+        (d, SignatureBlockage::DependsOnCycle(c)),
+        (a, SignatureBlockage::CycleMember(first)),
+        (b, SignatureBlockage::CycleMember(second)),
+    ] = report.blockages.as_slice()
+    else {
+        panic!("{:?}", report.blockages)
+    };
+    assert_eq!(
+        (*w, *provider, *d, *a, *b),
+        (waiting, bad, downstream, x, y)
+    );
+    assert_eq!(c.path(), [x, y, x]);
+    assert!(std::sync::Arc::ptr_eq(c, first) && std::sync::Arc::ptr_eq(c, second));
+    assert!(
+        work.members(files[0].classes()[0].symbol)
+            .unwrap()
+            .any(|(id, reason)| id == answer && reason.is_none())
+    );
+}

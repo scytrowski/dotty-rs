@@ -194,6 +194,17 @@ impl<'s, 'file> MemberSignaturePhase<'s, 'file> {
         )
     }
 
+    /// Visits all selected members in selection order and drains released retries
+    /// in FIFO order. Uses the same resolver for every attempt. Rejections and
+    /// cycles leave independent members eligible for body checking. Inspect
+    /// [`Self::finish`] or [`Self::finish_with_body_work`] for the typed outcomes.
+    pub fn complete_all(&mut self, mut resolver: impl crate::core::SymbolResolver) {
+        let roots = self.selection.members().iter().copied();
+        crate::signature_schedule::complete_all(roots, |id| {
+            self.attempt_with_resolver(id, &mut resolver).ok()
+        });
+    }
+
     /// Stops at a direct failure and moves its original phase error to the caller.
     /// Returns `None` if that symbol has no direct failure.
     pub fn into_failure(mut self, member: SymbolId) -> Option<MemberSignatureError> {

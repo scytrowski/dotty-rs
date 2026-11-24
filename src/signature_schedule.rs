@@ -69,3 +69,15 @@ pub(crate) fn try_complete_roots<P, E>(
     }
     Ok(phase)
 }
+
+pub(crate) fn complete_all(
+    roots: impl IntoIterator<Item = SymbolId>,
+    mut attempt: impl FnMut(SymbolId) -> Option<SignatureAttempt>,
+) {
+    let mut queue: std::collections::VecDeque<_> = roots.into_iter().collect();
+    while let Some(symbol) = queue.pop_front() {
+        if let Some(attempt) = attempt(symbol) {
+            queue.extend(attempt.retry);
+        }
+    }
+}
