@@ -36,3 +36,76 @@ fn same_named_class_declarations_keep_their_package_identity_before_typing() {
         assert!(index.references_to(site.symbol).is_empty());
     }
 }
+
+#[test]
+fn bare_and_applied_parent_names_select_the_completed_class_in_the_right_package() {
+    for (base, child) in [
+        ("class Base", "class Child extends Base"),
+        (
+            "class Base(n: Int)",
+            "class Child(start: Int) extends Base(start)",
+        ),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let decoy = named(4, "package other\nclass Base", &mut store, &mut packages);
+        let base = named(
+            3,
+            &format!("package demo\n{base}"),
+            &mut store,
+            &mut packages,
+        );
+        let text = format!("package demo\n{child}");
+        let leaf = named(7, &text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&decoy, &leaf, &base], &store).unwrap();
+        prepare_constructors(&sources, &mut store, defs, &packages);
+        let mut arena = AstArena::new();
+        let mut headers = ClassHeaderBindings::default();
+        for file in [&base, &leaf] {
+            assert!(matches!(
+                sources.try_complete_class_header(
+                    file.classes()[0].symbol,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut arena,
+                    &mut headers
+                ),
+                Ok(SignatureCompletion::Complete(_))
+            ));
+        }
+        let index = ResolvedMemberIndex::build_with_headers(
+            &sources,
+            &CheckedClassBodies::default(),
+            &headers,
+            &arena,
+            &store,
+        );
+        let pos = text.find("extends Base").unwrap() as u32 + 8;
+        let relation = index.parent_at(leaf.source(), pos).unwrap();
+        assert_eq!(
+            (relation.child, relation.parent),
+            (leaf.classes()[0].symbol, base.classes()[0].symbol)
+        );
+        assert_eq!(
+            relation.target,
+            index
+                .symbol_at(base.source(), "package demo\nclass ".len() as u32)
+                .unwrap()
+                .target
+        );
+        assert_eq!(relation.origin.source(), leaf.source());
+        assert_eq!(relation.origin.span().range().start(), pos);
+        assert_eq!(relation.origin.span().range().end(), pos + 4);
+        assert!(index.parent_at(leaf.source(), pos + 4).is_none());
+        if child.ends_with("(start)") {
+            let arg = text.rfind("start").unwrap() as u32;
+            assert!(index.parent_at(leaf.source(), arg).is_none());
+            assert_eq!(
+                index.symbol_at(leaf.source(), arg).unwrap().kind,
+                SymbolKind::Parameter
+            );
+        }
+    }
+}

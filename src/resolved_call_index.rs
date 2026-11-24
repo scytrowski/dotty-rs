@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    parents: Vec<ResolvedSourceParent>,
     class_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     locals: Vec<(SymbolId, SourceMemberTarget)>,
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
@@ -23,6 +24,19 @@ struct IndexedFile {
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     method_declarations: Vec<(SymbolId, SourceMethodTarget)>,
+}
+
+/// One written direct parent of an ordinary class in the selected sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedSourceParent {
+    /// Canonical source class whose header was completed in this session.
+    pub child: SymbolId,
+    /// Canonical source superclass from the completed class information.
+    pub parent: SymbolId,
+    /// Exact written type name following `extends`, excluding its argument list.
+    pub origin: SourceSpan,
+    /// Declaration and name token of the superclass in the same revision.
+    pub target: SourceMemberTarget,
 }
 
 /// A supported source symbol at a declaration or committed usage in one revision.
@@ -126,14 +140,13 @@ impl ResolvedMemberIndex {
                         };
                         index.diagnostics.push(error.diagnostic(file.ast()));
                     } else {
-                        class_declarations.push((
-                            class.symbol,
-                            SourceMemberTarget {
-                                source: file.source(),
-                                declaration,
-                                name,
-                            },
-                        ));
+                        let target = SourceMemberTarget {
+                            source: file.source(),
+                            declaration,
+                            name,
+                        };
+                        targets.insert(class.symbol, target);
+                        class_declarations.push((class.symbol, target));
                     }
                 }
                 for field in class
@@ -170,6 +183,24 @@ impl ResolvedMemberIndex {
             ));
         }
         for (file, navigation, class_declarations, field_declarations, parameters) in valid_files {
+            let parents = file
+                .classes()
+                .iter()
+                .filter_map(|class| {
+                    let [tree] = class.parents.as_slice() else {
+                        return None;
+                    };
+                    let name = file.named().syntax().member_names.parent_name(*tree)?;
+                    let parent =
+                        crate::source_declarations::direct_source_parent(store, class.symbol)?;
+                    Some(ResolvedSourceParent {
+                        child: class.symbol,
+                        parent,
+                        origin: SourceSpan::new(file.source(), Span::without_point(name)),
+                        target: *targets.get(&parent)?,
+                    })
+                })
+                .collect();
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -238,6 +269,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    parents,
                     class_declarations,
                     locals,
                     local_uses,
@@ -256,6 +288,18 @@ impl ResolvedMemberIndex {
     /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Resolves a UTF-8 byte within the name of a single, unqualified, explicit
+    /// source superclass. Both index builders use completed class information,
+    /// including for a bare parent without expression bindings. Missing targets,
+    /// unfinished headers and positions outside the name yield `None`.
+    pub fn parent_at(&self, source: SourceId, offset: u32) -> Option<&ResolvedSourceParent> {
+        let parents = &self.files.get(&source)?.parents;
+        let i = parents.partition_point(|p| p.origin.span().range().end() <= offset);
+        parents
+            .get(i)
+            .filter(|p| p.origin.span().range().contains(offset))
     }
 
     /// Looks up a written callee token by half-open UTF-8 byte offset.

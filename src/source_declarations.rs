@@ -2,8 +2,8 @@
 
 use crate::core::{
     AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceSpan,
-    SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped,
-    Visibility,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind,
+    Type, TypeRefTarget, Untyped, Visibility,
 };
 use std::fmt;
 
@@ -49,6 +49,34 @@ pub struct SourceClass {
     pub parents: Vec<TreeId<Untyped>>,
     /// Body declarations, preserving interleaved field and method order.
     pub members: Vec<ClassMember>,
+}
+
+pub(crate) fn direct_source_parent(store: &SemanticStore, class: SymbolId) -> Option<SymbolId> {
+    if !store.symbols.contains(class) {
+        return None;
+    }
+    let SymbolInfo::Complete(info) = *store.symbols.info(class) else {
+        return None;
+    };
+    let Some(Type::ClassInfo(info)) = store.types.try_get(info) else {
+        return None;
+    };
+    let [parent] = info.parents.as_slice() else {
+        return None;
+    };
+    let Some(Type::TypeRef {
+        target: TypeRefTarget::Symbol(parent),
+        ..
+    }) = store.types.try_get(*parent)
+    else {
+        return None;
+    };
+    if info.class != class || !store.symbols.contains(*parent) {
+        return None;
+    }
+    let symbol = store.symbols.get(*parent);
+    (symbol.kind == SymbolKind::Class && matches!(symbol.origin, SymbolOrigin::Source(_)))
+        .then_some(*parent)
 }
 
 impl SourceClass {

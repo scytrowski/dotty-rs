@@ -136,7 +136,9 @@ pub use source_declaration_index::{
 };
 
 mod resolved_call_index;
-pub use resolved_call_index::{ResolvedCallIndex, ResolvedMemberIndex, SourceSymbolSite};
+pub use resolved_call_index::{
+    ResolvedCallIndex, ResolvedMemberIndex, ResolvedSourceParent, SourceSymbolSite,
+};
 
 mod source_locals;
 mod source_parameters;

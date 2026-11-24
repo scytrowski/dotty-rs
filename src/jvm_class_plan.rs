@@ -5,9 +5,8 @@ use std::fmt;
 
 use crate::core::{
     AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
-    SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Template,
-    TermRefTarget, TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped, UntypedNode, ValDef,
-    Visibility, VisibilitySyntax,
+    SourceTypedIndex, SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, TermRefTarget,
+    TreeId, TreeKind, Type, Typed, Untyped, UntypedNode, ValDef, Visibility, VisibilitySyntax,
 };
 use crate::jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmConstructorArgumentBinding, JvmFieldPlan,
@@ -571,7 +570,10 @@ impl<'a> JvmClassPlanner<'a> {
         let initialization = self.constructor_plan(class, source, template)?;
         let initialization = match template.parents.as_slice() {
             [] => initialization,
-            [parent] if self.has_source_parent(class) => {
+            [parent]
+                if crate::source_declarations::direct_source_parent(self.store, class)
+                    .is_some() =>
+            {
                 match &self
                     .ast
                     .try_get(*parent)
@@ -684,30 +686,6 @@ impl<'a> JvmClassPlanner<'a> {
             return Err(ClassPlanError::UnsupportedTemplate(class));
         }
         Ok((source, template))
-    }
-
-    fn has_source_parent(&self, class: SymbolId) -> bool {
-        let SymbolInfo::Complete(info) = *self.store.symbols.info(class) else {
-            return false;
-        };
-        let Some(Type::ClassInfo(info)) = self.store.types.try_get(info) else {
-            return false;
-        };
-        let [parent] = info.parents.as_slice() else {
-            return false;
-        };
-        let Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(parent),
-            ..
-        }) = self.store.types.try_get(*parent)
-        else {
-            return false;
-        };
-        if info.class != class || !self.store.symbols.contains(*parent) {
-            return false;
-        }
-        let symbol = self.store.symbols.get(*parent);
-        symbol.kind == SymbolKind::Class && matches!(symbol.origin, SymbolOrigin::Source(_))
     }
 
     fn plan_parent_call(
