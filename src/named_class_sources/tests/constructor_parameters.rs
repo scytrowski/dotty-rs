@@ -147,3 +147,90 @@ fn initializer_and_method_reads_share_the_source_parameter_and_respect_shadowing
         .unwrap();
     assert!(sites(unused.parameter).is_empty());
 }
+
+#[test]
+fn only_committed_parent_reads_enter_the_index_once_after_a_blocked_retry() {
+    use crate::typer::{SignatureCompletion, TyperError};
+    for (ty, valid) in [("Int", true), ("Boolean", false)] {
+        let text = format!("class Leaf(start: {ty}) extends Base(start)");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let leaf = named(7, &text, &mut store, &mut packages);
+        let base = named(3, "class Base(start: Int)", &mut store, &mut packages);
+        let sources = NamedClassSources::new([&leaf, &base], &store).unwrap();
+        prepare_constructors(&sources, &mut store, definitions, &packages);
+        let mut arena = AstArena::new();
+        let mut headers = ClassHeaderBindings::default();
+        let bodies = CheckedClassBodies::default();
+        let child = leaf.classes()[0].symbol;
+        let parent = base.classes()[0].symbol;
+        let read = text.rfind("start").unwrap() as u32;
+        let decl = text.find("start").unwrap() as u32;
+        assert!(
+            matches!(sources.try_complete_class_header(child,&mut store,definitions,&packages,&mut arena,&mut headers), Ok(SignatureCompletion::BlockedOn(id)) if id == parent)
+        );
+        let check = |headers: &ClassHeaderBindings,
+                     arena: &AstArena<Typed>,
+                     store: &SemanticStore,
+                     published: bool| {
+            let index =
+                ResolvedMemberIndex::build_with_headers(&sources, &bodies, headers, arena, store);
+            let p = index.constructor_parameter_at(leaf.source(), decl).unwrap();
+            assert_eq!(
+                index.constructor_parameter_at(leaf.source(), read),
+                published.then_some(p)
+            );
+            assert_eq!(
+                index.references_to(p.parameter).len(),
+                usize::from(published)
+            );
+            let base_p = index
+                .constructor_parameter_at(base.source(), "class Base(".len() as u32)
+                .unwrap();
+            assert_ne!(base_p.parameter, p.parameter);
+            assert!(index.references_to(base_p.parameter).is_empty());
+            if published {
+                let site = index.symbol_at(leaf.source(), read).unwrap();
+                assert_eq!(index.references_to(p.parameter), &[site.usage.unwrap()]);
+                assert_eq!(site.target, p.target);
+            }
+        };
+        check(&headers, &arena, &store, false);
+        assert!(matches!(
+            sources.try_complete_class_header(
+                parent,
+                &mut store,
+                definitions,
+                &packages,
+                &mut arena,
+                &mut headers
+            ),
+            Ok(SignatureCompletion::Complete(_))
+        ));
+        for _ in 0..2 {
+            let result = sources.try_complete_class_header(
+                child,
+                &mut store,
+                definitions,
+                &packages,
+                &mut arena,
+                &mut headers,
+            );
+            if valid {
+                assert!(matches!(result, Ok(SignatureCompletion::Complete(_))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(TyperError::ApplicationArgumentTypeMismatch { .. })
+                ));
+            }
+            check(&headers, &arena, &store, valid);
+        }
+        assert!(
+            ResolvedMemberIndex::build(&sources, &bodies, &arena, &store)
+                .symbol_at(leaf.source(), read)
+                .is_none()
+        );
+    }
+}

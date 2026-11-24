@@ -155,7 +155,7 @@ impl NamedClassSources<'_> {
             return Ok(None);
         };
         let Some(TermAccess::Field(field, kind)) =
-            term_binding(file, navigation, selection, bodies, typed, store)
+            term_binding(file, navigation, selection, bodies, None, typed, store)
         else {
             return Ok(None);
         };
@@ -177,12 +177,36 @@ pub(crate) fn term_binding(
     navigation: &SourceFileCalls,
     selection: SourceSelection,
     bodies: &CheckedClassBodies,
+    headers: Option<&crate::ClassHeaderBindings>,
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<TermAccess> {
     let owner = navigation.class_at(selection.name.start())?;
-    let bindings = bodies.bindings(owner)?;
-    term_access(selection, Some(owner), caller.ast(), bindings, typed, store)
+    if let Some(access) = bodies.bindings(owner).and_then(|bindings| {
+        term_access(selection, Some(owner), caller.ast(), bindings, typed, store)
+    }) {
+        return Some(access);
+    }
+    let headers = headers?;
+    let TermAccess::Parameter(id) = term_access(
+        selection,
+        Some(owner),
+        caller.ast(),
+        &headers.index,
+        typed,
+        store,
+    )?
+    else {
+        return None;
+    };
+    let parameter_owner = store.symbols.get(id).owner?;
+    if !store.symbols.contains(parameter_owner) {
+        return None;
+    }
+    let enclosing = store.symbols.get(parameter_owner);
+    (parameter_owner == owner
+        || (enclosing.kind == SymbolKind::Constructor && enclosing.owner == Some(owner)))
+    .then_some(TermAccess::Parameter(id))
 }
 
 pub(crate) fn field_target(

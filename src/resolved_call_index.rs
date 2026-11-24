@@ -56,7 +56,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
 }
 
 /// Index of source methods, fields, named method and constructor parameters, and ordinary method locals in one session.
-/// Usage sites require committed body bindings.
+/// Usage sites require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -80,6 +80,27 @@ impl ResolvedMemberIndex {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
     ) -> Self {
+        Self::build_with_headers(
+            sources,
+            bodies,
+            &crate::ClassHeaderBindings::default(),
+            typed_ast,
+            store,
+        )
+    }
+
+    /// Includes constructor parameter reads from committed parent arguments as well
+    /// as body uses. Supply the headers, bodies, final typed arena and store of
+    /// the same session. Blocked and failed header attempts contribute no uses.
+    /// References are ordered by input file and written token across both phases.
+    pub fn build_with_headers(
+        sources: &NamedClassSources<'_>,
+        bodies: &CheckedClassBodies,
+        headers: &crate::ClassHeaderBindings,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Self {
+        let headers = (!headers.index.is_empty()).then_some(headers);
         let mut index = Self::default();
         let mut targets = HashMap::new();
         let mut valid_files = Vec::new();
@@ -151,7 +172,7 @@ impl ResolvedMemberIndex {
             let mut parameter_uses = Vec::new();
             for name in file.named().syntax().member_names.term_names() {
                 let Some(access) = crate::source_field_access::term_binding(
-                    file, navigation, name, bodies, typed_ast, store,
+                    file, navigation, name, bodies, headers, typed_ast, store,
                 ) else {
                     continue;
                 };
@@ -244,7 +265,7 @@ impl ResolvedMemberIndex {
         }
     }
 
-    /// Looks up a plain primary constructor parameter at its declaration or a committed body read.
+    /// Looks up a plain primary constructor parameter at its declaration or a committed read. Parent argument reads require [`Self::build_with_headers`].
     /// Includes unused parameters. Explicit constructor fields, contextual and
     /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
     pub fn constructor_parameter_at(
@@ -344,8 +365,8 @@ impl ResolvedMemberIndex {
     }
 
     /// Looks up a written method, field, ordinary parameter or method local by half-open
-    /// UTF-8 byte offset. Local declarations and all usage sites require committed body
-    /// bindings. Other supported declarations are available before body checking.
+    /// UTF-8 byte offset. Local declarations and all usage sites require committed
+    /// bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
         let file = self.files.get(&source)?;
