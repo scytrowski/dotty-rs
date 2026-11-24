@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod clauses;
 mod fractional_conversion;
+mod fractional_source;
 mod inherited_nested;
 mod lookup;
 mod numeric_ops_parent;

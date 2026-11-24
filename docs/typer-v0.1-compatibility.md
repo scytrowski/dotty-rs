@@ -17,7 +17,8 @@ the [documentation map](README.md) for validation and evidence boundaries.
 ## Contextual arguments in Scala 3.9
 
 The [v1 acceptance audit](typer-contextual-acceptance-v1.md) compares selected
-upstream sites with the pinned compiler. All eleven in-scope observations agree.
+upstream sites with the pinned compiler. All fifteen in-scope observations agree, including the four concrete
+method bodies of the Scala library's `Fractional.scala`.
 
 At the start of this work, the frontend preserved contextual clause kinds and
 typed a number of explicit `using` applications. It could complete the
@@ -998,7 +999,15 @@ transparent wrappers are normalized only to discover the class symbol; the
 typed `New` keeps the unnormalized projected type. Anonymous-template `new`
 is deferred. Constructor discovery reads only the target class's declaration
 scope, returns every `<init>` constructor in insertion order, and never walks
-parent classes. A primary constructor application preserves its constructor
+parent classes. For a source member class with a single non-polymorphic
+constructor clause independent of its own term binder, the application can
+keep the enclosing instance. The two factories in `Fractional.scala`
+produce `Fractional.this.FractionalOps` and `num.FractionalOps`
+respectively. The latter conforms to `Fractional[T]#FractionalOps`
+through the declared type of the witness `num`. Different witness paths
+remain distinct.
+
+A primary constructor application preserves its constructor
 symbol in the typed selection and reuses ordinary method argument checking,
 including nested curried clauses. For a generic primary constructor, explicit
 type arguments are read from the typed `New` instance type and instantiate the

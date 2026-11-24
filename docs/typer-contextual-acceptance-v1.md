@@ -1,25 +1,27 @@
 # Acceptance audit of contextual argument typing, v1
 
-**The source typer meets the v1 acceptance criteria.** All eleven selected
-sites agree with Scala 3.9.0, including the context bound and implicit default
-in the upstream regression `i8491.scala`.
+**The source typer meets the v1 acceptance criteria.** The audit compares
+eleven Scala compiler regression sites and four method bodies in the Scala
+library's `Fractional.scala` with the pinned Scala 3.9.0 compiler.
 
 ## What the audit measures
 
-The sample consists of eleven sites chosen by feature from the Scala compiler's
+The original sample consists of eleven sites chosen by feature from the Scala compiler's
 positive, negative, and run suites before inspecting the Rust outcomes.
 It covers ordinary and inherited lookup, legacy implicits, companion search,
-by-name recursion, ambiguity, and interactions between clauses. The denominator
-is the selected sites. It gives no estimate of coverage across the Scala corpus.
+by-name recursion, ambiguity, and interactions between clauses. The four
+library sites exercise the definitions behind a real implicit conversion.
+Each of the fifteen sites is checked independently. The denominator measures
+this selected sample.
 
 The reference is Scala **3.9.0**, repository revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The runner verifies the revision,
 the bytes of every selected file against its Git blob, the compiler artifact
 hashes, and the compiler and JDK versions. Each upstream source gets a separate
-Scala invocation and output directory. Scala accepts nine files and rejects
+Scala invocation and output directory. Scala accepts ten files and rejects
 two with E172. Both sides see the same Scala runtime
 jars. The audit checks typer output for run-suite inputs without executing
-those programs. [Pinned Scala source tree](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8/tests)
+those programs. [Pinned Scala source tree](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8)
 
 Rust parses the entire source and runs the namer with the real filename.
 After naming succeeds, each probe types the designated method body, initializer,
@@ -46,13 +48,25 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Match.** Rust resolves the constructor-form given to `given_Context`. The call of `narrow` and the call of `narrow$default$2` reuse the same evidence. The getter body calls `root` with its own copy of the contextual parameter. |
 | `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Match.** The complete definition returns its `B` parameter. The polymorphic getter takes only the type parameter. Its default constructs a fresh anonymous class owned by the getter, with parents `Object` and `Bar`, and widens the result to `Bar`. |
 
+The four library observations use the original
+`library/src/scala/math/Fractional.scala` with binary `Numeric` on the
+classpath. They run in separate Rust sessions so a completed declaration in
+one probe cannot mask a failure in another.
+
+| Method body | Identity checked against Scala 3.9.0 |
+| --- | --- |
+| `FractionalOps./` | Calls the enclosing `Fractional.div` with the captured `lhs` and the method's `rhs`, and returns the enclosing type parameter `T`. |
+| `Fractional.mkNumericOps` | Constructs `Fractional.this.FractionalOps` using its own `lhs`. |
+| `ExtraImplicits.infixFractionalOps` | Constructs `num.FractionalOps(x)` with its implicit parameter as prefix. The declared result projects the same class from `Fractional[T]`. |
+| `Fractional.apply` | Returns the declaration's implicit parameter `frac` with declared result `Fractional[T]`. |
+
 The contextual CI job separately compares source-object exports on the shared
 `ExportLibrary.scala`, `ExportClient.scala` and `ExportErrors.scala` fixtures.
 Scala compiles the library before typing the clients. Rust names the combined
 source unit and checks the selected method and original delegate identities,
 the method-owned type and evidence parameters, and rollback on rejected calls.
 The eight positive client sites and six negative sites are project controls
-outside the eleven-site upstream sample.
+outside the upstream sample.
 
 Three additional project fixtures exercise chained exports. `ChainedExports.scala`
 has nine successful sites, including the one-hop control, direct selection,
@@ -112,13 +126,13 @@ method parameter and result. The Rust assertion checks the declaring
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,
 nested context functions, conversions, extensions, extractors, and binary
-providers. They exercise different samples from the eleven sites above.
+providers. They exercise different samples from the fifteen sites above.
 The [typer compatibility contract](typer-v0.1-compatibility.md#contextual-arguments-in-scala-39)
 describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Scope of closure
 
-The eleven in-scope observations and the focused regressions cover source typing.
+The fifteen in-scope observations and the focused regressions cover source typing.
 The curried test exercises the original `narrow()` inside `Test`, as well as
 the definition of `narrow` and its default expression. The run-suite program's
 `@main` launcher, JVM output and TASTy emission have separate acceptance criteria.
@@ -138,7 +152,7 @@ comparing its TASTy bytes, and compiling separate positive and negative clients.
 The multiclause clients cover partial and full omission, an intervening empty
 clause, a final witness search, and legacy implicit defaults with curried
 getters. Rust tests check the identity and evaluation order of the typed operands. These
-controls are reported separately from the eleven v1 observations.
+controls are reported separately from the fifteen v1 observations.
 
 Use JDK 21, a checkout of the revision above and the cached artifacts specified
 by the [oracle setup](../tools/tasty-pickler-oracle/README.md). Export

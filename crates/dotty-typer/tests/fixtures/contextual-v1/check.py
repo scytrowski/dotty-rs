@@ -206,7 +206,10 @@ def main():
     checkout = Path(os.environ["SCALA39_ROOT"]).resolve()
     print(f"{tc.compiler_version}; JDK {tc.jdk_release['JAVA_VERSION']}", flush=True)
     rows = cases()
+    by_source = {}
     for source, code, needles in rows.values():
+        by_source.setdefault((source, code), []).extend(needles)
+    for (source, code), needles in by_source.items():
         with tempfile.TemporaryDirectory() as out:
             scala_observation(tc, checkout, source, code, needles, out)
     check_controls(tc, checkout)
