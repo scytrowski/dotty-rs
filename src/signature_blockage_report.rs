@@ -16,6 +16,7 @@ use std::{
 pub struct SignatureBlockageReport {
     /// Phase whose attempts produced the classified waits.
     pub phase: SignaturePhase,
+    waits: Vec<(SymbolId, SignatureBlockage)>,
     cycles: Vec<Arc<SignatureCycle>>,
     declarations: HashMap<SymbolId, SignatureDeclaration>,
 }
@@ -30,22 +31,51 @@ impl SignatureBlockageReport {
         let mut cycles = Vec::new();
         let mut seen = HashSet::new();
         let mut declarations = HashMap::new();
-        for (_, cause) in waits {
-            if let SignatureBlockage::CycleMember(cycle) | SignatureBlockage::DependsOnCycle(cycle) =
-                cause
-                && seen.insert(cycle.path()[0])
-            {
-                for &symbol in cycle.participants() {
-                    declarations.insert(symbol, index.signature_declaration(symbol, store));
+        let mut capture_declaration = |symbol| {
+            declarations
+                .entry(symbol)
+                .or_insert_with(|| index.signature_declaration(symbol, store));
+        };
+        for (waiter, cause) in waits {
+            capture_declaration(*waiter);
+            match cause {
+                SignatureBlockage::Pending(id) | SignatureBlockage::Failed(id) => {
+                    capture_declaration(*id)
                 }
-                cycles.push(Arc::clone(cycle));
+                SignatureBlockage::CycleMember(cycle)
+                | SignatureBlockage::DependsOnCycle(cycle) => {
+                    if seen.insert(cycle.path()[0]) {
+                        for &id in cycle.participants() {
+                            capture_declaration(id);
+                        }
+                        cycles.push(Arc::clone(cycle));
+                    }
+                }
             }
         }
         Self {
             phase,
+            waits: waits.to_vec(),
             cycles,
             declarations,
         }
+    }
+
+    /// Each blocked root and its original terminal cause, in the phase report's
+    /// order. A failed provider refers to the independently retained direct
+    /// failure. Pending providers can still be scheduled by the caller.
+    pub fn waiters(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&SignatureDeclaration, &SignatureBlockage)> {
+        self.waits
+            .iter()
+            .map(|(id, cause)| (&self.declarations[id], cause))
+    }
+
+    /// Details captured for a waiter, terminal provider or cycle participant.
+    /// Returns `None` for symbols not mentioned by this snapshot.
+    pub fn declaration(&self, id: SymbolId) -> Option<&SignatureDeclaration> {
+        self.declarations.get(&id)
     }
 
     /// Distinct cycles in first-observed order in the classified waits,
