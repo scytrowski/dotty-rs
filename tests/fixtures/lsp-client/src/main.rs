@@ -31,15 +31,23 @@ fn method_label(name: &str, labels: Option<&[String]>, result: &str) -> String {
     }
 }
 
-fn signature_help(call: ResolvedCallSignature<'_>) -> Value {
-    let labels = parameter_labels(call.parameters);
-    let method = method_label(call.name, Some(&labels), &call.result.name);
+fn signature_information(
+    name: &str,
+    parameters: &[SourceSignatureParameter],
+    result: &str,
+) -> Value {
+    let labels = parameter_labels(parameters);
+    let method = method_label(name, Some(&labels), result);
     let parameters: Vec<_> = labels
         .into_iter()
         .map(|label| json!({"label":label}))
         .collect();
-    let mut help =
-        json!({"signatures":[{"label":method,"parameters":parameters}],"activeSignature":0});
+    json!({"label":method,"parameters":parameters})
+}
+
+fn signature_help(call: ResolvedCallSignature<'_>) -> Value {
+    let selected = signature_information(call.name, call.parameters, &call.result.name);
+    let mut help = json!({"signatures":[selected],"activeSignature":0});
     if let Some(index) = call.active_parameter {
         help["activeParameter"] = json!(index);
     }
@@ -172,10 +180,18 @@ impl Workspace {
         let analysis = self.ready.as_ref()?;
         let source = analysis.source(uri)?;
         if method == "textDocument/signatureHelp" {
-            return analysis
-                .members
-                .call_signature_at(source, pos)
-                .map(signature_help);
+            if let Some(call) = analysis.members.call_signature_at(source, pos) {
+                return Some(signature_help(call));
+            }
+            let pending = analysis.unfinished.at(source, pos)?;
+            let signatures: Vec<_> = pending
+                .candidates
+                .iter()
+                .map(|c| signature_information(&c.name, &c.parameters, &c.result.name))
+                .collect();
+            return Some(
+                json!({"signatures":signatures,"activeParameter":pending.active_parameter}),
+            );
         }
         if method == "textDocument/hover" {
             let (site, info) = analysis.members.symbol_info_at(source, pos)?;
