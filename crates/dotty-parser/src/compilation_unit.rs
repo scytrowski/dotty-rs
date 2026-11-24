@@ -60,7 +60,7 @@ pub struct ParseResult {
     pub root: TreeId<Untyped>,
     /// Recoverable diagnostics collected while constructing the AST.
     pub diagnostics: Vec<ParseDiagnostic>,
-    /// Written bare expression names, selectors and value declaration names from this parse.
+    /// Written bare expression names, selectors, value declaration names and method parameter names from this parse.
     pub member_names: crate::SourceMemberNames,
     /// Direct call names in this source arena.
     pub call_names: SourceCallNames,

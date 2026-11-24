@@ -31,17 +31,25 @@ pub fn selected_field_access(
     typed: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Option<(SymbolId, FieldAccessKind)> {
-    field_access(selection, None, ast, bindings, typed, store)
+    match term_access(selection, None, ast, bindings, typed, store)? {
+        TermAccess::Field(field, kind) => Some((field, kind)),
+        TermAccess::Parameter(_) => None,
+    }
 }
 
-fn field_access(
+pub(crate) enum TermAccess {
+    Field(SymbolId, FieldAccessKind),
+    Parameter(SymbolId),
+}
+
+fn term_access(
     selection: SourceTermName,
     enclosing_class: Option<SymbolId>,
     ast: &AstArena<Untyped>,
     bindings: &SourceTypedIndex,
     typed: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Option<(SymbolId, FieldAccessKind)> {
+) -> Option<TermAccess> {
     let written = ast.try_get(selection.tree)?;
     let source = written.position?.source();
     let id = bindings.get(source, selection.tree)?;
@@ -56,16 +64,22 @@ fn field_access(
         _ => return None,
     };
     let Type::TermRef {
-        target: TermRefTarget::Symbol(field),
+        target: TermRefTarget::Symbol(target),
         ..
     } = store.types.try_get(node.ty)?
     else {
         return None;
     };
-    if !store.symbols.contains(*field) {
+    if !store.symbols.contains(*target) {
         return None;
     }
-    let symbol = store.symbols.get(*field);
+    let symbol = store.symbols.get(*target);
+    if symbol.kind == SymbolKind::Parameter
+        && matches!(written.kind, TreeKind::Ident(_))
+        && selection.assignment.is_none()
+    {
+        return Some(TermAccess::Parameter(*target));
+    }
     let own_field = own_receiver && enclosing_class.is_some() && symbol.owner == enclosing_class;
     if symbol.kind != SymbolKind::Field
         || (matches!(written.kind, TreeKind::Ident(_)) && !own_field)
@@ -89,7 +103,7 @@ fn field_access(
     } else {
         FieldAccessKind::Read
     };
-    Some((*field, kind))
+    Some(TermAccess::Field(*target, kind))
 }
 
 /// A committed use of a field declared in the selected sources.
@@ -131,7 +145,8 @@ impl NamedClassSources<'_> {
         else {
             return Ok(None);
         };
-        let Some((field, kind)) = field_binding(file, navigation, selection, bodies, typed, store)
+        let Some(TermAccess::Field(field, kind)) =
+            term_binding(file, navigation, selection, bodies, typed, store)
         else {
             return Ok(None);
         };
@@ -148,17 +163,17 @@ impl NamedClassSources<'_> {
     }
 }
 
-pub(crate) fn field_binding(
+pub(crate) fn term_binding(
     caller: &NamedClassSource,
     navigation: &SourceFileCalls,
     selection: SourceSelection,
     bodies: &CheckedClassBodies,
     typed: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Option<(SymbolId, FieldAccessKind)> {
+) -> Option<TermAccess> {
     let owner = navigation.class_at(selection.name.start())?;
     let bindings = bodies.bindings(owner)?;
-    field_access(selection, Some(owner), caller.ast(), bindings, typed, store)
+    term_access(selection, Some(owner), caller.ast(), bindings, typed, store)
 }
 
 pub(crate) fn field_target(
