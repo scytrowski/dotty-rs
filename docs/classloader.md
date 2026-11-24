@@ -300,6 +300,15 @@ behavior — each with a doc comment at its own definition site:
   type-variable names in the nested class signature can resolve through the
   enclosing class scopes described above.
 
+The constructor of a non-static Scala member class can carry a synthetic
+`$outer` parameter in its JVM descriptor. For a single ordinary source
+parameter typed as the enclosing class's unbounded type parameter, the loader checks the
+same-origin enclosing TASTy declaration, the classfile `InnerClasses`
+self-entry, `MethodParameters`, and the generic signature. A proven match
+exposes the source parameter with its original type and name. Classfile
+metadata retains the complete physical descriptor, including the enclosing
+instance. Other constructor shapes use the existing classfile signature rules.
+
 For a direct nested Scala conversion, the loader correlates the classfile
 descriptor and generic signature with the method in its enclosing TASTy
 resource from the same origin. The supported shape is an unannotated

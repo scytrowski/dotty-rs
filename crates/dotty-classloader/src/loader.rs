@@ -8365,6 +8365,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }))
     }
 
+    // The descriptor erases this variable to Object. Authenticate its owner,
+    // position, and upper bound before giving the source constructor that type.
+    fn unbounded_outer_parameter(&self, inner: SymbolId, name: &str) -> Option<SymbolId> {
+        let outer = self.store.symbols.owner(inner)?;
+        let [parameter] = self.session.class_type_parameters.get(&outer)?.as_slice() else {
+            return None;
+        };
+        let symbol = self.store.symbols.get(parameter.symbol);
+        let SymbolInfo::Complete(bounds) = symbol.info else {
+            return None;
+        };
+        let Type::Bounds { high, .. } = *self.store.types.get(bounds) else {
+            return None;
+        };
+        (self.store.names.resolve(symbol.name.text()) == name
+            && self.store.types.get(high).reference_symbol() == Some(self.definitions.any_class))
+        .then_some(parameter.symbol)
+    }
+
     fn nested_tasty_resource(
         &self,
         name: &BinaryName,
@@ -8646,7 +8665,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
             let returns_inner = signature.as_ref().is_some_and(|sig|
                 matches!(&sig.result, Some(TypeSignature::Reference(ReferenceTypeSignature::Class(class))) if !class.suffix.is_empty() && !class.type_arguments.is_empty()));
-            if source_methods.is_none() && (returns_inner || method_name == "$div") && scala_marked
+            // Scala marks the enclosing-instance argument of a member class
+            // synthetic. The remaining source parameter must be ordinary.
+            let outer_constructor = method_name == "<init>"
+                && captures_enclosing_type_parameters
+                && signature.as_ref().is_some_and(|sig| {
+                    matches!(
+                        sig.parameters.as_slice(),
+                        [TypeSignature::Reference(
+                            ReferenceTypeSignature::TypeVariable(_)
+                        )]
+                    )
+                })
+                && method.attributes.iter().any(|attribute| {
+                    matches!(attribute, Attribute::MethodParameters(params) if
+                        matches!(params.as_slice(), [outer, value] if
+                            outer.access_flags & dotty_classfile::access_flags::ACC_SYNTHETIC != 0
+                            && value.access_flags & !dotty_classfile::access_flags::ACC_FINAL == 0))
+                });
+            if source_methods.is_none()
+                && (outer_constructor || returns_inner || method_name == "$div")
+                && scala_marked
             {
                 source_methods = Some(
                     match self.nested_tasty_resource(name, &class_file, &resource_origin)? {
@@ -8713,7 +8752,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     &method.attributes,
                     &class_file.constant_pool,
                 )?;
-                let resolved_type = if let Some(method) = contextual {
+                let resolved_type = if outer_constructor
+                    && source_instance_method
+                    && let (Some(nested), Some(method), Some(sig)) =
+                        (nested, named("<init>"), signature.as_ref())
+                    && let Some(variable) =
+                        nested.constructor_parameter(method, sig, &descriptor, &parameter_names)
+                    && let Some(parameter) = self.unbounded_outer_parameter(class_symbol, variable)
+                {
+                    let parameter = self.type_ref(parameter);
+                    self.lower_tasty_method_with_class_parameters(name, method, &[parameter])
+                } else if let Some(method) = contextual {
                     self.lower_tasty_method_with_class_parameters(name, method, &[])
                 } else {
                     self.lower_method_descriptor(
@@ -9345,10 +9394,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// malformed input: JVMS §4.7.9.1 allows a `MethodSignature` to omit
     /// leading synthetic/mandated parameters (e.g. an inner class
     /// constructor's implicit outer-instance parameter) that the descriptor
-    /// still carries, and this loader does not yet track which parameters
-    /// those are — so a mismatched signature is simply not used, falling
-    /// back to the descriptor entirely, rather than risk misaligning names/
-    /// types across the two lists.
+    /// still carries. The caller handles a verified Scala member constructor
+    /// using its matching TASTy declaration. This descriptor-based fallback
+    /// keeps all physical parameters when the signature arities differ.
     ///
     /// A method that declares type parameters of its own delegates to
     /// [`Self::lower_generic_method_descriptor`] instead, wrapping the
@@ -17014,6 +17062,122 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
         classes
+    }
+
+    fn scala_inner_constructor_classpath() -> ResourceClassPath {
+        let origin = ClassOrigin::Directory(PathBuf::from("<constructors>"));
+        let mut entries = HashMap::new();
+        for (binary, file, format) in [
+            ("constructors/Outer", "Outer.tasty", ClassFormat::Tasty),
+            (
+                "constructors/Outer$Inner",
+                "Outer$Inner.class",
+                ClassFormat::Class,
+            ),
+            ("constructors/Pair", "Pair.class", ClassFormat::Class),
+        ] {
+            entries.insert(
+                BinaryName::from_internal(binary),
+                (
+                    own_fixture_bytes(&format!("scala_inner_constructor/{file}")),
+                    format,
+                    origin.clone(),
+                ),
+            );
+        }
+        entries.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            (
+                synthetic_class("java/lang/Object", None),
+                ClassFormat::Class,
+                origin,
+            ),
+        );
+        ResourceClassPath(entries)
+    }
+
+    #[test]
+    fn scala_inner_constructor_exposes_the_outer_type_parameter_and_keeps_its_jvm_descriptor() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(scala_inner_constructor_classpath(), &mut store);
+        let inner = loader
+            .load_class(&BinaryName::from_internal("constructors/Outer$Inner"))
+            .unwrap();
+        let pair = loader
+            .load_class(&BinaryName::from_internal("constructors/Pair"))
+            .unwrap();
+        let ctor = loader
+            .metadata(inner)
+            .unwrap()
+            .methods
+            .iter()
+            .find(|m| m.name() == "<init>")
+            .unwrap();
+        assert_eq!(
+            ctor.descriptor(),
+            &MethodDescriptor::parse("(Lconstructors/Outer;Ljava/lang/Object;)V").unwrap()
+        );
+        drop(loader);
+        let owner = store.symbols.owner(inner).unwrap();
+        let param = type_parameter_symbol(&mut store, owner, "A");
+        let ty = member_type_id(&mut store, inner, "<init>");
+        let Type::Method(method) = store.types.get(ty) else {
+            panic!("inner constructor")
+        };
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(
+            store.names.resolve(method.params[0].name.as_name().text()),
+            "value"
+        );
+        assert_eq!(
+            store.types.get(method.params[0].ty).reference_symbol(),
+            Some(param)
+        );
+        let ty = member_type_id(&mut store, pair, "<init>");
+        let Type::Method(method) = store.types.get(ty) else {
+            panic!("ordinary constructor")
+        };
+        assert_eq!(method.params.len(), 2);
+        assert_eq!(
+            store.names.resolve(method.params[0].name.as_name().text()),
+            "first"
+        );
+    }
+
+    #[test]
+    fn scala_inner_constructor_preserves_outer_when_the_synthetic_flag_is_absent() {
+        let mut path = scala_inner_constructor_classpath();
+        let binary = BinaryName::from_internal("constructors/Outer$Inner");
+        let bytes = &mut path.0.get_mut(&binary).unwrap().0;
+        let mut file = ClassFile::decode(&mut Reader::new(bytes)).unwrap();
+        let constructor = file
+            .methods
+            .iter_mut()
+            .find(|m| file.constant_pool.utf8(m.name_index) == Ok("<init>"))
+            .unwrap();
+        let parameters = constructor
+            .attributes
+            .iter_mut()
+            .find_map(|a| match a {
+                Attribute::MethodParameters(parameters) => Some(parameters),
+                _ => None,
+            })
+            .unwrap();
+        parameters[0].access_flags &= !dotty_classfile::access_flags::ACC_SYNTHETIC;
+        *bytes = file.encode().unwrap();
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(path, &mut store);
+        let inner = loader.load_class(&binary).unwrap();
+        let ty = member_type_id(&mut store, inner, "<init>");
+        let Type::Method(method) = store.types.get(ty) else {
+            panic!("constructor")
+        };
+        assert_eq!(method.params.len(), 2);
+        assert_eq!(
+            store.names.resolve(method.params[0].name.as_name().text()),
+            "$outer"
+        );
     }
 
     #[test]
