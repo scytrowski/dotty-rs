@@ -35,8 +35,16 @@ Both requests use `ResolvedMemberIndex::symbol_at`.
 For `textDocument/hover` the fixture calls `symbol_info_at` on the same revision.
 It formats the typed class, value or method locally and returns the written name
 range in the negotiated encoding. Editing a call changes the selected signature;
-a rejected call returns JSON `null` until repaired. The references request
-accepts positions on direct calls, supported field accesses, method parameter
+a rejected call returns JSON `null` until repaired.
+
+For `textDocument/signatureHelp`, the client passes the insertion position to
+`ResolvedMemberIndex::call_signature_at`. It renders the selected method and
+its formal parameters, highlighting the next formal immediately after a comma.
+The stdio regression checks nested calls, a change of overload after an edit,
+and a rejected sibling call in both negotiated encodings. The request covers
+completed positional applications with a committed source target.
+
+The references request accepts positions on direct calls, supported field accesses, method parameter
 reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,
 bare uses of the enclosing class’s fields, and its private body fields written
 with a bare name or `this`. The stdio tests rename a parameter so it shadows a

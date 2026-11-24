@@ -70,6 +70,10 @@ impl Client {
         assert_eq!(init["capabilities"]["positionEncoding"], encoding);
         assert_eq!(init["capabilities"]["definitionProvider"], true);
         assert_eq!(init["capabilities"]["hoverProvider"], true);
+        assert_eq!(
+            init["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+            json!(["(", ","])
+        );
         assert_eq!(init["capabilities"]["referencesProvider"], true);
         assert_eq!(init["capabilities"]["textDocumentSync"]["change"], 2);
         client.notify("initialized", json!({}));
@@ -1631,6 +1635,67 @@ fn removing_a_compiled_dependency_reports_its_exact_type_token() {
             "range": range(1, col, col + "External".len()), "severity": 1,
             "source": "dotty", "code": "typer.type_name_not_found", "message": "Unknown type name"
         }]));
+        client.shutdown();
+    }
+}
+
+#[test]
+fn signature_help_tracks_the_active_formal_and_selected_overload_across_edits() {
+    let methods = "class Ops { def pick(n: Int, b: Boolean): Int = n; def pick(b: Boolean, n: Int): Int = n; def empty(): Int = 0 }";
+    let line = "  def run(o: Ops): Int = /* 😀 */ o.pick(42, false)";
+    let nested = "  def nested(o: Ops): Int = o.pick(o.empty(), false)";
+    let expected = |first: &str, second: &str, active| {
+        json!({
+            "signatures":[{"label":format!("def pick({first}, {second}): Int"),
+                "parameters":[{"label":first},{"label":second}]}],
+            "activeSignature":0, "activeParameter":active,
+        })
+    };
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![A]);
+        client.open(A, methods);
+        client.open(B, &format!("class Use {{\r\n{line}\r\n{nested}\r\n  def only(n: Int): Int = n\r\n  def bad(): Int = only(1)\r\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        let query = |client: &mut Client, line: usize, character: usize| {
+            client.request(
+                "textDocument/signatureHelp",
+                json!({"textDocument":{"uri":B},"position":{"line":line,"character":character}}),
+            )
+        };
+        let start = token_column(enc, line, "42");
+        for (delta, active) in [(0, 0), (2, 0), (3, 1), (4, 1)] {
+            assert_eq!(
+                query(&mut client, 1, start + delta),
+                expected("n: Int", "b: Boolean", active)
+            );
+        }
+        assert_eq!(query(&mut client, 1, start - 1), Value::Null);
+        assert_eq!(
+            query(&mut client, 2, token_column(enc, nested, "empty()") + 6),
+            json!({
+                "signatures":[{"label":"def empty(): Int","parameters":[]}], "activeSignature":0
+            })
+        );
+        assert_eq!(
+            query(&mut client, 2, token_column(enc, nested, ", false") + 1),
+            expected("n: Int", "b: Boolean", 1)
+        );
+        client.edit(B, 2, range(1, start, start + "42, false".len()), "true, 7");
+        client.diagnostics(B, 2, json!([]));
+        assert_eq!(
+            query(&mut client, 1, start + 5),
+            expected("b: Boolean", "n: Int", 1)
+        );
+        client.edit(B, 3, range(4, 24, 25), "false");
+        client.diagnostics(B, 3, json!([{
+            "range":range(4,24,29), "severity":1, "source":"dotty",
+            "code":"typer.application_argument_type_mismatch", "message":"Expected Int, found Boolean"
+        }]));
+        assert_eq!(query(&mut client, 4, 24), Value::Null);
+        assert_eq!(
+            query(&mut client, 1, start),
+            expected("b: Boolean", "n: Int", 0)
+        );
         client.shutdown();
     }
 }

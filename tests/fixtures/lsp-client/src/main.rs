@@ -1,6 +1,9 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
-use dotty::{SourceDiagnostic, SourceSymbolInfo, SourceSymbolSignature};
+use dotty::{
+    ResolvedCallSignature, SourceDiagnostic, SourceSignatureParameter, SourceSymbolInfo,
+    SourceSymbolSignature,
+};
 use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze_with_classpath};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
@@ -14,6 +17,35 @@ fn wire_range(text: &DocumentText, r: TextRange, enc: PositionEncoding) -> Optio
     let (el, ec) = text.position(r.end(), enc)?;
     Some(json!({"start":{"line":sl,"character":sc},"end":{"line":el,"character":ec}}))
 }
+fn parameter_labels(parameters: &[SourceSignatureParameter]) -> Vec<String> {
+    parameters
+        .iter()
+        .map(|p| format!("{}: {}", p.name, p.ty.name))
+        .collect()
+}
+
+fn method_label(name: &str, labels: Option<&[String]>, result: &str) -> String {
+    match labels {
+        Some(labels) => format!("def {name}({}): {result}", labels.join(", ")),
+        None => format!("def {name}: {result}"),
+    }
+}
+
+fn signature_help(call: ResolvedCallSignature<'_>) -> Value {
+    let labels = parameter_labels(call.parameters);
+    let method = method_label(call.name, Some(&labels), &call.result.name);
+    let parameters: Vec<_> = labels
+        .into_iter()
+        .map(|label| json!({"label":label}))
+        .collect();
+    let mut help =
+        json!({"signatures":[{"label":method,"parameters":parameters}],"activeSignature":0});
+    if let Some(index) = call.active_parameter {
+        help["activeParameter"] = json!(index);
+    }
+    help
+}
+
 fn hover_label(info: &SourceSymbolInfo) -> String {
     let name = &info.name;
     match &info.signature {
@@ -22,15 +54,8 @@ fn hover_label(info: &SourceSymbolInfo) -> String {
         SourceSymbolSignature::Method {
             parameters, result, ..
         } => {
-            let clause = parameters.as_ref().map_or_else(String::new, |params| {
-                let formals = params
-                    .iter()
-                    .map(|p| format!("{}: {}", p.name, p.ty.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({formals})")
-            });
-            format!("def {name}{clause}: {}", result.name)
+            let labels = parameters.as_deref().map(parameter_labels);
+            method_label(name, labels.as_deref(), &result.name)
         }
     }
 }
@@ -146,6 +171,12 @@ impl Workspace {
         let pos = offset(text, &p["position"], enc)?;
         let analysis = self.ready.as_ref()?;
         let source = analysis.source(uri)?;
+        if method == "textDocument/signatureHelp" {
+            return analysis
+                .members
+                .call_signature_at(source, pos)
+                .map(signature_help);
+        }
         if method == "textDocument/hover" {
             let (site, info) = analysis.members.symbol_info_at(source, pos)?;
             let token = site
@@ -356,7 +387,19 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
         }
         None => None,
     };
-    conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"hoverProvider":true,"referencesProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
+    conn.initialize_finish(
+        id,
+        json!({
+            "capabilities": {
+                "positionEncoding": encoding,
+                "definitionProvider": true,
+                "hoverProvider": true,
+                "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
+                "referencesProvider": true,
+                "textDocumentSync": {"openClose": true, "change": 2}
+            }
+        }),
+    )?;
     let mut ws = Workspace {
         ready: Some(Analysis::default()),
         ..Workspace::default()
@@ -400,6 +443,7 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
                         "textDocument/definition"
                             | "textDocument/references"
                             | "textDocument/hover"
+                            | "textDocument/signatureHelp"
                     ) {
                         conn.sender.send(
                             Response::new_err(req.id, -32601, "Unsupported method".into()).into(),
