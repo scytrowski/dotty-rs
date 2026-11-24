@@ -295,13 +295,16 @@ behavior — each with a doc comment at its own definition site:
 
 For a direct nested Scala conversion, the loader correlates the classfile
 descriptor and generic signature with the method in its enclosing TASTy
-resource from the same origin. The supported shape is
+resource from the same origin. The supported shape is an unannotated
 `[A](x: A)(implicit ev: C[A]): C[A]#M` with unconstrained `A`.
+An annotation can change the method's JVM name.
 The source view keeps both clauses, the implicit flag, and the applied outer
 type of the result. An inherited JVM copy with the same signature remains in
 classfile metadata. Source lookup selects the declaring conversion.
-A unary `/` declared in a nested template can be selected under its Scala
-name while the classfile symbol retains its JVM spelling `$div`.
+For an instance class nested in `C[A]`, a unique unannotated `/(A): A`
+declaration can be selected under its Scala name. Its JVM `$div` must have
+the matching generic signature and erased descriptor. Bridge and synthetic
+methods keep their classfile names.
 
 ## 4. Architecture
 

@@ -1,5 +1,37 @@
 use super::*;
 
+pub(crate) struct NestedMethods {
+    pub(crate) methods: Vec<DecodedTastyMethod>,
+    // The unshadowed enclosing parameter in the source declaration /(A): A.
+    division_parameter: Option<String>,
+}
+
+impl NestedMethods {
+    pub(crate) fn matches_division(
+        &self,
+        flags: MethodAccessFlags,
+        signature: Option<&dotty_classfile::signature::MethodSignature>,
+        descriptor: &dotty_classfile::descriptor::MethodDescriptor,
+    ) -> bool {
+        use dotty_classfile::descriptor::FieldType;
+        use dotty_classfile::signature::{
+            ReferenceTypeSignature::TypeVariable, TypeSignature::Reference,
+        };
+        let (Some(param), Some(signature)) = (&self.division_parameter, signature) else {
+            return false;
+        };
+        !flags.is_static()
+            && !flags.is_bridge()
+            && !flags.is_synthetic()
+            && !flags.is_varargs()
+            && signature.type_parameters.is_empty()
+            && matches!(signature.parameters.as_slice(), [Reference(TypeVariable(name))] if name == param)
+            && matches!(&signature.result, Some(Reference(TypeVariable(name))) if name == param)
+            && matches!(descriptor.parameters.as_slice(), [FieldType::Object(name)] if name == "java/lang/Object")
+            && matches!(&descriptor.return_type, Some(FieldType::Object(name)) if name == "java/lang/Object")
+    }
+}
+
 /// Direct methods from the matching nested template in the enclosing class's
 /// compilation unit. The JVM InnerClasses self-entry establishes the enclosing
 /// owner and distinguishes members of a companion from instance members.
@@ -8,7 +40,7 @@ pub(crate) fn nested_methods(
     owner: &BinaryName,
     inner: &str,
     is_static: bool,
-) -> Result<Option<Vec<DecodedTastyMethod>>, TastyDecodeError> {
+) -> Result<Option<NestedMethods>, TastyDecodeError> {
     let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
     let outer_name = if is_static {
@@ -35,7 +67,20 @@ pub(crate) fn nested_methods(
         {
             continue;
         }
-        for stat in template.decode_template_structure()?.stats {
+        let outer = template.decode_template_structure()?;
+        // Only an instance member of a unary generic outer can use this form.
+        let parameter = match outer.type_params.as_slice() {
+            [ParameterNode::TypeParam { name, payload, .. }] if !is_static => index
+                .iter()
+                .find(|node| {
+                    node.tag == dotty_tasty::tasty::TYPEPARAM_TAG
+                        && std::ptr::eq(node.payload, *payload)
+                })
+                .and_then(|node| u32::try_from(node.offset).ok())
+                .zip(wire_name(&file, *name)),
+            _ => None,
+        };
+        for stat in outer.stats {
             let RawTree::LengthNode(def) = stat else {
                 continue;
             };
@@ -60,19 +105,75 @@ pub(crate) fn nested_methods(
             }
             let binary = BinaryName::from_internal(format!("{}${inner}", owner.as_internal()));
             let template = body.decode_template_structure()?;
+            let parameter = parameter
+                .as_ref()
+                .filter(|_| template.type_params.is_empty());
+            let class_parameters = parameter
+                .map(|&(address, _)| (address, 0))
+                .into_iter()
+                .collect();
             let (_, decoded) = decode_members(
                 &file,
                 &binary,
                 &template.stats,
                 true,
                 owner.package_path(),
-                &HashMap::new(),
+                &class_parameters,
                 &mut |_, _| None,
             )?;
-            methods = Some(decoded);
+            let division_parameter = match parameter {
+                Some((_, name)) if declared_outer_division(&file, &template.stats, &decoded)? => {
+                    Some(name.clone())
+                }
+                _ => None,
+            };
+            methods = Some(NestedMethods {
+                methods: decoded,
+                division_parameter,
+            });
         }
     }
     Ok(methods)
+}
+
+// Inspect the original definitions: unsupported overloads can be absent
+// from the decoded list. An annotated operator may have a different @targetName.
+fn declared_outer_division(
+    file: &TastyFile<'_>,
+    stats: &[RawTree<'_>],
+    decoded: &[DecodedTastyMethod],
+) -> Result<bool, TastyDecodeError> {
+    let mut division = None;
+    for stat in stats {
+        let RawTree::LengthNode(def) = stat else {
+            continue;
+        };
+        if def.tag != DEFDEF_TAG {
+            continue;
+        }
+        let StructuredNode::DefDef(body) = def.decode_structured()? else {
+            continue;
+        };
+        let name = wire_name(file, body.name);
+        if name.as_deref() == Some("$div") {
+            return Ok(false);
+        }
+        if name.as_deref() != Some("/") {
+            continue;
+        }
+        if division.is_some()
+            || term_clauses(&body.header_items)?.as_slice() != [(MethodKind::Plain, 1)]
+        {
+            return Ok(false);
+        }
+        division = Some(def.offset);
+    }
+    Ok(decoded.iter().find(|m| Some(m.offset) == division).is_some_and(|m| {
+        !m.has_annotations
+            && m.type_parameters.is_empty()
+            && matches!(m.parameters.as_slice(), [arg] if !arg.erased && arg.declared_type == Some(DecodedTastyType::ClassParamRef(0)))
+            && m.return_type == Some(DecodedTastyType::ClassParamRef(0))
+    }))
 }
 
 /// Correlates the source declaration `[A](x: A)(implicit ev: C[A]): C[A]#M`
@@ -140,6 +241,7 @@ pub(crate) fn matches_contextual_projection(
     input == "java/lang/Object"
         && context == evidence.as_internal()
         && *erased_result == format!("{}${member}", evidence.as_internal())
+        && !method.has_annotations
         && method.contextual_flags.contains(SymbolFlags::IMPLICIT)
         && method.term_clauses.as_deref()
             == Some(&[(MethodKind::Plain, 1), (MethodKind::Implicit, 1)])

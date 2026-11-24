@@ -8463,7 +8463,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     },
                 );
             }
-            let decoded = source_methods.as_ref().and_then(Option::as_ref);
+            let nested = source_methods.as_ref().and_then(Option::as_ref);
+            let decoded = nested.map(|nested| &nested.methods);
             let named = |source_name: &str| {
                 decoded.and_then(|methods| {
                     let mut matching = methods.iter().filter(|m| m.name == source_name);
@@ -8473,6 +8474,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             };
             let contextual = named(&method_name).filter(|m| {
                 !method.access_flags.is_static()
+                    && !method.access_flags.is_bridge()
+                    && !method.access_flags.is_synthetic()
                     && !method.access_flags.is_varargs()
                     && signature.as_ref().is_some_and(|sig| {
                         tasty_symbol::matches_contextual_projection(m, sig, &descriptor)
@@ -8498,10 +8501,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                             })
                     });
             let division_alias = method_name == "$div"
-                && !method.access_flags.is_static()
-                && descriptor.parameters.len() == 1
-                && named("/").is_some_and(|m| m.parameters.len() == 1)
-                && decoded.is_some_and(|methods| methods.iter().all(|m| m.name != "$div"));
+                && nested.is_some_and(|nested| {
+                    nested.matches_division(method.access_flags, signature.as_ref(), &descriptor)
+                });
 
             // `<clinit>` is a JVM static-initializer entry point, not a
             // source-level member -- see `enter_method`'s doc comment.

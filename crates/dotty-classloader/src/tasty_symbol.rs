@@ -328,6 +328,8 @@ pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
     pub contextual_flags: SymbolFlags,
+    /// An annotation such as `@targetName` can change the physical method name.
+    pub has_annotations: bool,
     /// Wire clause boundaries for contextual methods and their linked getters.
     pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
@@ -3464,6 +3466,10 @@ fn decode_members(
                             | SymbolFlags::INLINE
                             | SymbolFlags::TRANSPARENT,
                     ),
+                    has_annotations: body
+                        .tail
+                        .iter()
+                        .any(|part| matches!(part, DefinitionTail::Annotation(_))),
                     term_clauses: preserve_clauses.then_some(clauses),
                     singleton_result_parameter,
                     type_parameters,
@@ -6102,6 +6108,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let method = methods
+            .methods
             .iter()
             .find(|m| m.name == "infixFractionalOps")
             .unwrap();
@@ -6112,6 +6119,13 @@ mod tests {
         .unwrap();
         assert!(matches_contextual_projection(
             method,
+            &MethodSignature::parse(signature).unwrap(),
+            &descriptor
+        ));
+        let mut annotated = method.clone();
+        annotated.has_annotations = true;
+        assert!(!matches_contextual_projection(
+            &annotated,
             &MethodSignature::parse(signature).unwrap(),
             &descriptor
         ));
@@ -6140,6 +6154,52 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn nested_division_requires_the_declared_outer_parameter_and_a_real_method() {
+        use dotty_classfile::{
+            access_flags::{ACC_BRIDGE, ACC_SYNTHETIC},
+            descriptor::MethodDescriptor,
+            signature::MethodSignature,
+        };
+        let bytes = fixture_bytes("scala3-library/scala/math/Fractional.tasty");
+        let ops = nested_methods(
+            &bytes,
+            &BinaryName::from_internal("scala/math/Fractional"),
+            "FractionalOps",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let signature = MethodSignature::parse("(TT;)TT;").unwrap();
+        let erased = MethodDescriptor::parse("(Ljava/lang/Object;)Ljava/lang/Object;").unwrap();
+        let public = MethodAccessFlags(ACC_PUBLIC);
+        assert!(ops.matches_division(public, Some(&signature), &erased));
+        for flag in [ACC_BRIDGE, ACC_SYNTHETIC, ACC_STATIC] {
+            assert!(!ops.matches_division(
+                MethodAccessFlags(ACC_PUBLIC | flag),
+                Some(&signature),
+                &erased
+            ));
+        }
+        for other in [
+            "(TU;)TU;",
+            "<T:Ljava/lang/Object;>(TT;)TT;",
+            "(TT;)Ljava/lang/Object;",
+        ] {
+            assert!(!ops.matches_division(
+                public,
+                Some(&MethodSignature::parse(other).unwrap()),
+                &erased
+            ));
+        }
+        assert!(!ops.matches_division(public, None, &erased));
+        assert!(!ops.matches_division(
+            public,
+            Some(&signature),
+            &MethodDescriptor::parse("(Ljava/lang/String;)Ljava/lang/String;").unwrap()
+        ));
     }
 
     fn fixture_bytes(relative_path: &str) -> Vec<u8> {
