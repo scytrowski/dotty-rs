@@ -681,8 +681,7 @@ mod tests {
         let defs = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
         let target_text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";
-        let text =
-            "class B { def yes(a: A): Int = a.take(false); def skipped(a: A): Int = a.take(1) }";
+        let text = "class B { def yes(a: A): Int = a.take(false); def number(a: A): Int = a.take(42); def skipped(a: A): Int = a.take(1) }";
         let target = named(42, target_text, &mut store, &mut packages);
         let caller = named(8, text, &mut store, &mut packages);
         let sources = NamedClassSources::new([&caller, &target], &store).unwrap();
@@ -704,7 +703,7 @@ mod tests {
             .unwrap();
         let mut phase = crate::MemberSignaturePhase::new(&selection, &mut store, defs, &packages);
         let owner = &caller.classes()[0];
-        for d in target.classes()[0].methods().chain(owner.methods().take(1)) {
+        for d in target.classes()[0].methods().chain(owner.methods().take(2)) {
             let _ = phase.attempt(d.symbol).unwrap();
         }
         let (_, work) = phase.finish_with_body_work();
@@ -726,6 +725,25 @@ mod tests {
                 .unwrap()
         };
         let byte = text.find("take").unwrap() as u32;
+        for (spelling, method) in [("take(false)", 1), ("take(42)", 0)] {
+            let start = text.find(spelling).unwrap() as u32;
+            let resolve = |offset| {
+                sources
+                    .resolved_call_at(caller.source(), offset, &bodies, &arena, &store)
+                    .unwrap()
+            };
+            let call = resolve(start + 1).unwrap();
+            assert_eq!(
+                call.method,
+                target.classes()[0].methods().nth(method).unwrap().symbol
+            );
+            assert_eq!(call.origin.source(), caller.source());
+            let origin = call.origin.span().range();
+            assert_eq!((origin.start(), origin.end()), (start, start + 4));
+            assert_eq!(Some(call.target), lookup(caller.source(), start));
+            assert!(resolve(start - 1).is_none());
+            assert!(resolve(start + 4).is_none());
+        }
         let hit = lookup(caller.source(), byte + 1).unwrap();
         assert_eq!(hit.source, target.source());
         let slice = |r: crate::core::TextRange| &target_text[r.start() as usize..r.end() as usize];
@@ -738,6 +756,137 @@ mod tests {
         assert!(lookup(caller.source(), byte + 4).is_none());
         assert!(lookup(caller.source(), text.rfind("take").unwrap() as u32).is_none());
         assert!(lookup(SourceId::from_index(900), byte).is_none());
+    }
+
+    #[test]
+    fn bulk_calls_in_source_order_skip_only_uncommitted_members() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let text = "class A { def value(i: Int): Int = i; def one(): Int = value(1); def bad(): Int = value(false) }; class B { def read(a: A): Int = a.value(a.value(2)) }";
+        let file = named(9, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let mut bodies = crate::CheckedClassBodies::default();
+        for class in file.classes() {
+            let check = sources.check_class_body(
+                class.symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            );
+            let (body, report) = check.into_parts();
+            assert_eq!(
+                report.errors.len(),
+                usize::from(class.symbol == file.classes()[0].symbol)
+            );
+            bodies.record(body).unwrap();
+        }
+        let calls = sources
+            .resolved_calls_in(file.source(), &bodies, &arena, &store)
+            .unwrap();
+        let offsets: Vec<_> = calls
+            .iter()
+            .map(|c| c.origin.span().range().start() as usize)
+            .collect();
+        assert_eq!(
+            offsets,
+            ["value(1)", "value(a.value", "value(2)"].map(|s| text.find(s).unwrap())
+        );
+        for c in calls {
+            assert_eq!(c.method, file.classes()[0].methods().next().unwrap().symbol);
+            assert_eq!(
+                sources
+                    .resolved_call_at(
+                        file.source(),
+                        c.origin.span().range().start(),
+                        &bodies,
+                        &arena,
+                        &store
+                    )
+                    .unwrap(),
+                Some(c)
+            );
+        }
+    }
+
+    #[test]
+    fn retained_calls_separate_overloads_in_input_file_and_token_order() {
+        let first = "class B { def one(a: A): Int = a.take(1) }";
+        let second =
+            "class C { def two(a: A): Int = a.take(2); def yes(a: A): Int = a.take(false) }";
+        let target = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7; def unused(): Int = 1 }";
+        let (index, methods) = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let b = named(90, first, &mut store, &mut packages);
+            let c = named(4, second, &mut store, &mut packages);
+            let a = named(42, target, &mut store, &mut packages);
+            let sources = NamedClassSources::new([&b, &a, &c], &store).unwrap();
+            let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+            let mut bodies = crate::CheckedClassBodies::default();
+            for (_, class) in sources.classes() {
+                let (body, report) = sources
+                    .check_class_body(
+                        class.symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                        &mut arena,
+                        crate::core::NoResolver,
+                    )
+                    .into_parts();
+                assert!(report.errors.is_empty());
+                bodies.record(body).unwrap();
+            }
+            let methods: Vec<_> = a.classes()[0].methods().map(|d| d.symbol).collect();
+            (
+                crate::ResolvedCallIndex::build(&sources, &bodies, &arena, &store),
+                methods,
+            )
+        };
+        assert!(index.diagnostics().is_empty());
+        let uses = |n: usize| {
+            index
+                .references_to(methods[n])
+                .iter()
+                .map(|p| (p.source(), p.span().range().start() as usize))
+                .collect::<Vec<_>>()
+        };
+        let (b, c) = (SourceId::from_index(90), SourceId::from_index(4));
+        assert_eq!(
+            uses(0),
+            [
+                (b, first.find("take").unwrap()),
+                (c, second.find("take").unwrap())
+            ]
+        );
+        assert_eq!(uses(1), [(c, second.rfind("take").unwrap())]);
+        assert!(uses(2).is_empty());
+        let a = SourceId::from_index(42);
+        for (n, name) in ["take(n", "take(b", "unused("].into_iter().enumerate() {
+            let start = target.find(name).unwrap() as u32;
+            let (method, declaration) = index.method_at(a, start + 1).unwrap();
+            assert_eq!(method, methods[n]);
+            assert_eq!(declaration.name.start(), start);
+            assert_eq!(declaration.source, a);
+            assert!(index.method_at(a, declaration.name.end()).is_none());
+        }
+        for (n, positions) in [uses(0), uses(1)].into_iter().enumerate() {
+            for (file, start) in positions {
+                let call = index.call_at(file, start as u32 + 3).unwrap();
+                assert_eq!(call.method, methods[n]);
+                assert_eq!(
+                    index.method_at(file, start as u32),
+                    Some((methods[n], call.target))
+                );
+                assert_eq!(call.target.source, SourceId::from_index(42));
+                assert!(index.call_at(file, start as u32 + 4).is_none());
+            }
+        }
     }
 
     #[test]

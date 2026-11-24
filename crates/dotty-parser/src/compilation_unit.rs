@@ -37,11 +37,17 @@ impl SourceCallNames {
 
     /// Finds the application whose written name contains this byte offset.
     pub fn call_at(&self, offset: u32) -> Option<TreeId<Untyped>> {
+        self.call_name_at(offset).map(|(_, call)| call)
+    }
+
+    /// Returns the written name range and application at a UTF-8 byte offset.
+    /// The byte at the exclusive end of the name is outside the token.
+    pub fn call_name_at(&self, offset: u32) -> Option<(TextRange, TreeId<Untyped>)> {
         let next = self
             .entries
             .partition_point(|(range, _)| range.start() <= offset);
         let &(range, call) = self.entries.get(next.checked_sub(1)?)?;
-        range.contains(offset).then_some(call)
+        range.contains(offset).then_some((range, call))
     }
 }
 

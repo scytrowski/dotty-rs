@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
-    SymbolId, TextRange, Typed,
+    SymbolId, Typed,
 };
 use dotty::{
     CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
     NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
-    SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport, SignatureCycle,
+    ResolvedCallIndex, SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport,
+    SignatureCycle,
 };
 
 #[derive(Clone)]
@@ -47,17 +48,31 @@ fn record_semantic(results: &mut HashMap<SourceId, FileResult>, diagnostic: Sema
         .push(Problem::Semantic(diagnostic));
 }
 
-pub struct Link {
-    pub origin: TextRange,
-    pub uri: String,
-    pub declaration: TextRange,
-    pub name: TextRange,
-}
-
 #[derive(Default)]
 pub struct FileResult {
     pub problems: Vec<Problem>,
-    pub links: Vec<Link>,
+}
+
+#[derive(Default)]
+pub struct Analysis {
+    pub files: BTreeMap<String, FileResult>,
+    pub calls: ResolvedCallIndex,
+    // Source IDs follow the open documents' URI order in this revision.
+    uris: Vec<String>,
+}
+
+impl Analysis {
+    pub fn uri(&self, source: SourceId) -> Option<&str> {
+        self.uris.get(source.index() as usize).map(String::as_str)
+    }
+
+    pub fn source(&self, uri: &str) -> Option<SourceId> {
+        let i = self
+            .uris
+            .binary_search_by(|candidate| candidate.as_str().cmp(uri))
+            .ok()?;
+        Some(SourceId::from_index(i as u32))
+    }
 }
 
 fn name(
@@ -120,16 +135,16 @@ fn report_blockages(report: SignatureBlockageReport, results: &mut HashMap<Sourc
     }
 }
 
-pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
+pub fn analyze(docs: &Documents) -> Analysis {
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let mut uris = HashMap::new();
+    let mut uris = Vec::with_capacity(docs.len());
     let mut results = HashMap::new();
     let mut units = Vec::new();
     for (i, (uri, doc)) in docs.iter().enumerate() {
         let source = SourceId::from_index(i as u32);
-        uris.insert(source, uri.as_str());
+        uris.push(uri.clone());
         if let Some(unit) = name(
             doc.text.as_str(),
             source,
@@ -141,18 +156,20 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             units.push(unit);
         }
     }
-    match NamedClassSources::new(&units, &store) {
-        Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &uris, &mut results),
+    let calls = match NamedClassSources::new(&units, &store) {
+        Ok(sources) => analyze_sources(&sources, &mut store, defs, &packages, &mut results),
         Err(error) => {
             for result in results.values_mut() {
                 result.problems.push(Problem::Sources(error));
             }
+            ResolvedCallIndex::default()
         }
-    }
-    results
+    };
+    let files = results
         .into_iter()
-        .map(|(id, file)| (uris[&id].to_owned(), file))
-        .collect()
+        .map(|(id, file)| (uris[id.index() as usize].clone(), file))
+        .collect();
+    Analysis { files, calls, uris }
 }
 
 fn analyze_sources(
@@ -160,9 +177,8 @@ fn analyze_sources(
     store: &mut SemanticStore,
     defs: Definitions,
     packages: &Packages,
-    uris: &HashMap<SourceId, &str>,
     results: &mut HashMap<SourceId, FileResult>,
-) {
+) -> ResolvedCallIndex {
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
     let mut phase =
@@ -203,35 +219,17 @@ fn analyze_sources(
         }
         bodies.record(body).expect("one check per ready class");
     }
-    for u in sources.files() {
-        let source = u.source();
-        let calls = match u.navigation() {
-            Ok(calls) => calls,
-            Err(error) => {
-                results
-                    .get_mut(&source)
-                    .unwrap()
-                    .problems
-                    .push(Problem::Preparation(PreparationDiagnostic::Declaration(
-                        error.diagnostic(u.ast()),
-                    )));
-                continue;
-            }
-        };
-        for (origin, _) in calls.call_names().iter() {
-            // Each file reports its own index error once in the navigation() match above.
-            if let Ok(Some(t)) =
-                sources.definition_at(source, origin.start(), &bodies, &arena, store)
-            {
-                results.get_mut(&source).unwrap().links.push(Link {
-                    origin,
-                    uri: uris[&t.source].to_owned(),
-                    declaration: t.declaration,
-                    name: t.name,
-                });
-            }
-        }
+    let index = ResolvedCallIndex::build(sources, &bodies, &arena, store);
+    for diagnostic in index.diagnostics() {
+        results
+            .get_mut(&diagnostic.error.source_id())
+            .expect("open source document")
+            .problems
+            .push(Problem::Preparation(PreparationDiagnostic::Declaration(
+                *diagnostic,
+            )));
     }
+    index
 }
 
 #[cfg(test)]
@@ -260,7 +258,7 @@ mod tests {
         .collect();
         let results = analyze(&files);
         let [Problem::Preparation(PreparationDiagnostic::Naming(d))] =
-            results["A.scala"].problems.as_slice()
+            results.files["A.scala"].problems.as_slice()
         else {
             panic!("expected a namer diagnostic")
         };
@@ -272,7 +270,7 @@ mod tests {
                 error: dotty::source_declarations::DeclarationError::Unsupported { source, .. },
                 location: Some(span),
             })),
-        ] = results["T.scala"].problems.as_slice()
+        ] = results.files["T.scala"].problems.as_slice()
         else {
             panic!("expected a located projection failure")
         };
@@ -308,18 +306,19 @@ mod tests {
             analyze(&docs)
         };
         let cycle = check("class Provider(c: Consumer) { val seed = c.answer }");
-        assert!(cycle["Leaf.scala"].problems.is_empty());
+        assert!(cycle.files["Leaf.scala"].problems.is_empty());
         let [
             Problem::Cycle { cycle: a, .. },
             Problem::Semantic(SemanticDiagnostic {
                 issue: SemanticIssue::Typing(independent),
                 ..
             }),
-        ] = cycle["Consumer.scala"].problems.as_slice()
+        ] = cycle.files["Consumer.scala"].problems.as_slice()
         else {
             panic!("expected one participant and one independent call")
         };
-        let [Problem::Cycle { cycle: b, .. }] = cycle["Provider.scala"].problems.as_slice() else {
+        let [Problem::Cycle { cycle: b, .. }] = cycle.files["Provider.scala"].problems.as_slice()
+        else {
             panic!("expected the other participant")
         };
         assert!(Arc::ptr_eq(a, b));
@@ -327,14 +326,14 @@ mod tests {
         assert_eq!(independent.code(), Some("typer.application_arity_mismatch"));
 
         let failed = check("class Provider { def value(): Int = 1; val seed = value(1) }");
-        assert!(failed["Leaf.scala"].problems.is_empty());
+        assert!(failed.files["Leaf.scala"].problems.is_empty());
         for file in ["Consumer.scala", "Provider.scala"] {
             let [
                 Problem::Semantic(SemanticDiagnostic {
                     issue: SemanticIssue::Typing(call),
                     ..
                 }),
-            ] = failed[file].problems.as_slice()
+            ] = failed.files[file].problems.as_slice()
             else {
                 panic!("expected only the original call in {file}")
             };
@@ -357,7 +356,7 @@ mod tests {
                 phase: dotty::SemanticPhase::ClassBody,
                 ..
             }),
-        ] = files[uri].problems.as_slice()
+        ] = files.files[uri].problems.as_slice()
         else {
             panic!("expected one typed warning");
         };
@@ -385,7 +384,7 @@ mod tests {
                 ..
             })),
             Problem::Preparation(PreparationDiagnostic::Syntax(SyntaxDiagnostic::Parser(parser))),
-        ] = files[uri].problems.as_slice()
+        ] = files.files[uri].problems.as_slice()
         else {
             panic!("expected both phases")
         };
@@ -410,7 +409,7 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let results = analyze(&[(uri.to_owned(), doc)].into());
-        let file = &results[uri];
+        let file = &results.files[uri];
         let [
             Problem::Semantic(SemanticDiagnostic {
                 issue: SemanticIssue::Typing(error),
@@ -421,12 +420,18 @@ mod tests {
             panic!("expected only the Bad constructor error");
         };
         assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
-        let [link] = file.links.as_slice() else {
-            panic!("expected Good.use to resolve Good.get")
-        };
-        assert_eq!(link.uri, uri);
-        assert_eq!(link.origin.start() as usize, text.rfind("get").unwrap());
-        assert_eq!(link.name.start() as usize, text.find("get").unwrap());
+        let source = results.source(uri).unwrap();
+        let start = text.rfind("get").unwrap() as u32;
+        let call = results.calls.call_at(source, start).unwrap();
+        assert_eq!(call.target.source, source);
+        assert_eq!(call.origin.span().range().start(), start);
+        assert_eq!(call.target.name.start() as usize, text.find("get").unwrap());
+        assert!(
+            results
+                .calls
+                .call_at(source, text.rfind("only").unwrap() as u32)
+                .is_none()
+        );
     }
 
     #[test]
@@ -443,7 +448,7 @@ mod tests {
                 issue: SemanticIssue::Typing(problem),
                 ..
             }),
-        ] = files[uri].problems.as_slice()
+        ] = files.files[uri].problems.as_slice()
         else {
             panic!("expected one constructor diagnostic");
         };
@@ -473,7 +478,7 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
-        let problems = &files[uri].problems;
+        let problems = &files.files[uri].problems;
         assert_eq!(problems.len(), 2);
         for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
             let Problem::Semantic(SemanticDiagnostic {
@@ -513,7 +518,7 @@ mod tests {
             })
             .collect();
         let files = analyze(&docs);
-        let caller = &files["file:///B.scala"];
+        let caller = &files.files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
         let Problem::Semantic(SemanticDiagnostic {
             issue: SemanticIssue::Typing(d),
@@ -524,9 +529,18 @@ mod tests {
         };
         let range = d.location().expect("argument position").span().range();
         assert_eq!(&b[range.start() as usize..range.end() as usize], "x");
-        assert_eq!(caller.links.len(), 1);
-        let l = &caller.links[0];
-        assert_eq!(l.uri, "file:///A.scala");
-        assert_eq!(l.name.start(), a.rfind("take").unwrap() as u32);
+        let source = files.source("file:///B.scala").unwrap();
+        let call = files
+            .calls
+            .call_at(source, b.find("take").unwrap() as u32)
+            .unwrap();
+        assert_eq!(files.uri(call.target.source), Some("file:///A.scala"));
+        assert_eq!(call.target.name.start(), a.rfind("take").unwrap() as u32);
+        assert!(
+            files
+                .calls
+                .call_at(source, b.rfind("good").unwrap() as u32)
+                .is_none()
+        );
     }
 }

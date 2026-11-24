@@ -135,8 +135,11 @@ pub use source_declaration_index::{
     SignatureDeclaration, SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
 
+mod resolved_call_index;
+pub use resolved_call_index::ResolvedCallIndex;
+
 mod source_file_calls;
-pub use source_file_calls::{SourceFileCalls, SourceMethodTarget};
+pub use source_file_calls::{ResolvedSourceCall, SourceFileCalls, SourceMethodTarget};
 
 mod typer_error_span;
 pub use typer_error_span::{typer_error_span, typer_error_span_with};
