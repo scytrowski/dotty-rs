@@ -138,6 +138,9 @@ pub use source_declaration_index::{
 mod resolved_call_index;
 pub use resolved_call_index::ResolvedCallIndex;
 
+mod source_field_access;
+pub use source_field_access::{FieldAccessKind, selected_field_access};
+
 mod source_file_calls;
 pub use source_file_calls::{ResolvedSourceCall, SourceFileCalls, SourceMethodTarget};
 
