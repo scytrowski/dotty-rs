@@ -1319,50 +1319,67 @@ fn construction_class_argument_and_method_have_independent_definition_links() {
         let loc = |uri: &str, line, c| json!({"uri":uri,"range":range(line,c,c+4)});
         let parent = loc(A, 2, col(kept, "Base"));
         let allocation = loc(B, 0, use_pos);
-        let decl = col(base, "Base");
-        assert_eq!(
-            client.references(A, 0, decl, false),
-            json!([parent, allocation])
-        );
-        assert_eq!(
-            client.references(B, 0, use_pos, true),
-            json!([loc(A, 0, decl), parent, allocation])
-        );
-        assert_eq!(client.references(A, 1, col(peer, "Peer"), false), json!([]));
-        let method_decl = col(base, "def read");
-        for (pos, len, uri, line, declaration, name) in [
-            (
-                use_pos,
-                4,
-                A,
-                0,
-                range(0, col(base, "class"), col(base, "}") + 1),
-                decl,
-            ),
-            (
-                arg,
-                5,
-                B,
-                0,
-                range(0, arg_decl, arg_decl + "start: Int".len()),
-                arg_decl,
-            ),
-            (
-                read,
-                4,
-                A,
-                0,
-                range(0, method_decl, method_decl + "def read(): Int = n".len()),
-                col(base, "read"),
-            ),
+        for (version, name, line, provider) in [
+            (1, "Base", 0, base),
+            (2, "Peer", 1, peer),
+            (3, "Base", 0, base),
         ] {
-            assert_eq!(
-                client.request(
-                    "textDocument/definition",
-                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+            if version > 1 {
+                client.edit(B, version, range(0, use_pos, use_pos + 4), name);
+                client.diagnostics(B, version, json!([]));
+            }
+            let decl = col(provider, name);
+            let (base_refs, peer_refs, all) = if name == "Base" {
+                (
+                    json!([parent, allocation]),
+                    json!([]),
+                    json!([loc(A, 0, decl), parent, allocation]),
+                )
+            } else {
+                (
+                    json!([parent]),
+                    json!([allocation]),
+                    json!([loc(A, 1, decl), allocation]),
+                )
+            };
+            assert_eq!(client.references(A, 0, col(base, "Base"), false), base_refs);
+            assert_eq!(client.references(A, 1, col(peer, "Peer"), false), peer_refs);
+            assert_eq!(client.references(B, 0, use_pos, true), all);
+            let method_decl = col(provider, "def read");
+            for (pos, len, uri, line, declaration, name) in [
+                (
+                    use_pos,
+                    4,
+                    A,
+                    line,
+                    range(line, col(provider, "class"), col(provider, "}") + 1),
+                    decl,
                 ),
-                json!([{"originSelectionRange":range(0,pos,pos+len),"targetUri":uri,"targetRange":declaration,"targetSelectionRange":range(line,name,name+len)}])
-            );
+                (
+                    arg,
+                    5,
+                    B,
+                    0,
+                    range(0, arg_decl, arg_decl + "start: Int".len()),
+                    arg_decl,
+                ),
+                (
+                    read,
+                    4,
+                    A,
+                    line,
+                    range(line, method_decl, method_decl + "def read(): Int = n".len()),
+                    col(provider, "read"),
+                ),
+            ] {
+                assert_eq!(
+                    client.request(
+                        "textDocument/definition",
+                        json!({"textDocument":{"uri":B},"position":{"line":0,"character":pos}})
+                    ),
+                    json!([{"originSelectionRange":range(0,pos,pos+len),"targetUri":uri,"targetRange":declaration,"targetSelectionRange":range(line,name,name+len)}])
+                );
+            }
         }
         client.shutdown();
     }

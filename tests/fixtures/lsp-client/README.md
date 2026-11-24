@@ -41,6 +41,9 @@ check the exact parameter token and its references in UTF-8 and UTF-16.
 Tests for nested blocks check distinct local declarations and reads before and
 after a sibling method fails. Renaming a local to shadow a parameter redirects
 a read at the same offset; undo restores both reference lists.
+The construction scenario follows the class, argument and method in `new Base(start).read()`.
+An edit to `new Peer(start)` retargets the allocation and `read` method. Undo restores
+both links, and a separate subclass retains its reference to `Base` throughout.
 The superclass scenario follows `Base` in `extends Base(start)` into its defining file.
 An edit to `Peer(start)` and undo move one reference while preserving the other subclass
 and the argument definition in both position encodings.
