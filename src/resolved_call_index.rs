@@ -1,7 +1,9 @@
-//! Retained direct calls and field accesses in one revision.
+//! Retained declaration and usage sites for source symbols in one revision.
 use std::collections::HashMap;
 
-use crate::core::{AstArena, SemanticStore, SourceId, SourceSpan, Span, SymbolId, Typed};
+use crate::core::{
+    AstArena, SemanticStore, SourceId, SourceSpan, Span, SymbolId, SymbolKind, Typed,
+};
 use crate::source_declarations::DeclarationDiagnostic;
 use crate::source_field_access::TermAccess;
 use crate::{
@@ -19,7 +21,32 @@ struct IndexedFile {
     method_declarations: Vec<(SymbolId, SourceMethodTarget)>,
 }
 
-/// Index of direct source calls and source field accesses with committed body bindings in one session.
+/// A supported source symbol at a declaration or committed usage in one revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSymbolSite {
+    /// Canonical identity to pass to [`ResolvedMemberIndex::references_to`].
+    pub symbol: SymbolId,
+    /// Semantic category: method, field, or method parameter.
+    pub kind: SymbolKind,
+    /// Declaration range and exact written name token.
+    pub target: SourceMemberTarget,
+    /// Written use token, or `None` when the query hit the declaration.
+    pub usage: Option<SourceSpan>,
+}
+
+fn declaration_at(
+    declarations: &[(SymbolId, SourceMemberTarget)],
+    offset: u32,
+) -> Option<(SymbolId, SourceMemberTarget)> {
+    let i = declarations.partition_point(|(_, target)| target.name.end() <= offset);
+    declarations
+        .get(i)
+        .copied()
+        .filter(|(_, target)| target.name.contains(offset))
+}
+
+/// Index of source methods, fields and named method parameters in one session.
+/// Usage sites require committed body bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -149,7 +176,7 @@ impl ResolvedMemberIndex {
         index
     }
 
-    /// File indexing and field declaration errors in input file order.
+    /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
     }
@@ -176,12 +203,7 @@ impl ResolvedMemberIndex {
         if let Some(call) = self.call_at(source, offset) {
             return Some((call.method, call.target));
         }
-        let declarations = &self.files.get(&source)?.method_declarations;
-        let i = declarations.partition_point(|(_, target)| target.name.end() <= offset);
-        declarations
-            .get(i)
-            .copied()
-            .filter(|(_, target)| target.name.contains(offset))
+        declaration_at(&self.files.get(&source)?.method_declarations, offset)
     }
 
     /// Finds a named parameter at its declaration or a committed bare read.
@@ -192,6 +214,14 @@ impl ResolvedMemberIndex {
         if let Some((_, parameter)) = self.parameter_use_at(source, offset) {
             return Some(parameter);
         }
+        self.parameter_declaration_at(source, offset)
+    }
+
+    fn parameter_declaration_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<SourceMethodParameter> {
         let parameters = &self.files.get(&source)?.parameters;
         let i = parameters.partition_point(|p| p.target.name.end() <= offset);
         parameters
@@ -251,18 +281,41 @@ impl ResolvedMemberIndex {
         if let Some(access) = self.field_at(source, offset) {
             return Some((access.field, access.target));
         }
-        let declarations = &self.files.get(&source)?.field_declarations;
-        let i = declarations.partition_point(|(_, target)| target.name.end() <= offset);
-        declarations
-            .get(i)
-            .copied()
-            .filter(|(_, target)| target.name.contains(offset))
+        declaration_at(&self.files.get(&source)?.field_declarations, offset)
     }
 
-    /// Direct calls or explicit reads and writes of this exact member, in input file order then
+    /// Looks up a written method, field, or ordinary method parameter by half-open
+    /// UTF-8 byte offset. A declaration can be queried before its body is checked.
+    /// Uses require committed bindings in this revision. Locals and unsupported
+    /// declarations yield `None`. The result can be retained with the index.
+    pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
+        let file = self.files.get(&source)?;
+        let (symbol, kind, target, usage) = if let Some(c) = self.call_at(source, offset) {
+            (c.method, SymbolKind::Method, c.target, Some(c.origin))
+        } else if let Some(f) = self.field_at(source, offset) {
+            (f.field, SymbolKind::Field, f.target, Some(f.origin))
+        } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
+            (p.parameter, SymbolKind::Parameter, p.target, Some(origin))
+        } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
+            (id, SymbolKind::Method, target, None)
+        } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
+            (id, SymbolKind::Field, target, None)
+        } else {
+            let p = self.parameter_declaration_at(source, offset)?;
+            (p.parameter, SymbolKind::Parameter, p.target, None)
+        };
+        Some(SourceSymbolSite {
+            symbol,
+            kind,
+            target,
+            usage,
+        })
+    }
+
+    /// Committed calls, field accesses or reads of this exact parameter, in input file order then
     /// token order. Omits the definition. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
-    pub fn references_to(&self, member: SymbolId) -> &[SourceSpan] {
-        self.references.get(&member).map_or(&[], Vec::as_slice)
+    pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
+        self.references.get(&symbol).map_or(&[], Vec::as_slice)
     }
 }

@@ -118,3 +118,59 @@ fn committed_parameter_reads_respect_shadowing_and_partial_body_rollback() {
     assert_eq!(offsets(set.parameter), [rhs]);
     assert_eq!(offsets(read.parameter), [before, after]);
 }
+
+#[test]
+fn unified_symbol_sites_retain_only_revision_data_and_member_lookup_stays_scoped() {
+    use crate::core::SymbolKind;
+    let source = SourceId::from_index(7);
+    let text =
+        "class A { val n: Int = 1; def add(x: Int): Int = x + n; def result(): Int = add(2) }";
+    let index = {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let file = named(7, text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&file], &store).unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                file.classes()[0].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        assert!(report.errors.is_empty());
+        let mut bodies = CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        ResolvedMemberIndex::build(&sources, &bodies, &arena, &store)
+    };
+    for (declaration, expression, kind) in [
+        ("add(x", "add(2)", SymbolKind::Method),
+        ("n: Int", "n;", SymbolKind::Field),
+        ("x: Int", "x +", SymbolKind::Parameter),
+    ] {
+        let decl = text.find(declaration).unwrap() as u32;
+        let usage = text.find(expression).unwrap() as u32;
+        let target = index.symbol_at(source, decl).unwrap();
+        let site = index.symbol_at(source, usage).unwrap();
+        assert_eq!(target.kind, kind);
+        assert_eq!(target.usage, None);
+        assert_eq!(site.symbol, target.symbol);
+        assert_eq!(site.target, target.target);
+        assert_eq!(site.kind, kind);
+        let span = site.usage.unwrap();
+        assert_eq!(span.span().range().start(), usage);
+        assert_eq!(index.references_to(site.symbol), &[span]);
+        assert_eq!(
+            index.member_at(source, usage).is_some(),
+            kind != SymbolKind::Parameter
+        );
+        assert_eq!(
+            index.member_at(source, decl).is_some(),
+            kind != SymbolKind::Parameter
+        );
+    }
+}
