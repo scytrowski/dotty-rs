@@ -492,6 +492,7 @@ mod tests {
     mod headers;
     mod locals;
     mod members;
+    mod method_types;
     mod own_fields;
     mod parameters;
     mod parent_navigation;

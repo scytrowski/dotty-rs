@@ -71,7 +71,10 @@ supplies the referenced symbol. `class_name(tree)` selects the written name of a
 class. `parent_name(tree)` selects a simple unqualified type name from a parent tree,
 including when a single argument list follows it. `constructions()` pairs that same
 name token in a simple explicit `new` with its whole application tree, including
-the zero-argument application of a bare `new Empty`.
+the zero-argument application of a bare `new Empty`. For a simple type identifier
+in a method signature, use the position of the parameter or result type tree.
+It spans the written identifier including backticks. A method with an omitted
+result annotation has a synthetic type tree and supplies no result name token.
 
 Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
 standalone source pattern through the real pattern productions, requires the

@@ -2089,6 +2089,81 @@ fn checked_parent_emission(
 }
 
 #[test]
+fn source_method_types_match_the_emitted_reference_descriptor_in_both_orders() {
+    use dotty::MethodTypeRole;
+    use dotty::classfile::{ClassFile, Reader};
+    let base = (
+        SourceId::from_index(9),
+        "Base.scala",
+        "package demo\nclass Base",
+    );
+    let caller = (
+        SourceId::from_index(3),
+        "Relay.scala",
+        "package demo\nclass Relay { def pass(x: Base): Base = x }",
+    );
+    for files in [[base, caller], [caller, base]] {
+        let artifacts = super::with_plan(&files, |unit, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                unit.typed_ast,
+                unit.store,
+            );
+            let at = |pos| index.method_type_at(caller.0, pos).unwrap();
+            let input = at(caller.2.find("Base)").unwrap() as u32);
+            let result = at(caller.2.find("Base =").unwrap() as u32);
+            assert_eq!(input.target.source, base.0);
+            assert_eq!(result.target, input.target);
+            let metadata = unit.metadata(defs).unwrap();
+            let name = |symbol| {
+                metadata
+                    .iter()
+                    .find(|c| c.identity().symbol() == symbol)
+                    .unwrap()
+                    .identity()
+                    .internal_name()
+            };
+            let descriptor = format!("(L{};)L{};", name(input.class), name(result.class));
+            assert_eq!(descriptor, "(Ldemo/Base;)Ldemo/Base;");
+            let pass = metadata
+                .iter()
+                .flat_map(|c| c.methods())
+                .find(|m| m.symbol() == input.method)
+                .unwrap();
+            let [param] = pass.parameters() else {
+                panic!("expected one parameter")
+            };
+            assert_eq!(input.role, MethodTypeRole::Parameter(param.symbol()));
+            assert_eq!(
+                (result.method, result.role),
+                (pass.symbol(), MethodTypeRole::Result)
+            );
+            let artifacts = super::checked_emission(unit, defs);
+            let relay = artifacts
+                .iter()
+                .find(|c| c.internal_name() == "demo/Relay")
+                .unwrap();
+            let class = ClassFile::decode(&mut Reader::new(relay.bytes())).unwrap();
+            let pool = &class.constant_pool;
+            let method = class
+                .methods
+                .iter()
+                .find(|m| pool.utf8(m.name_index) == Ok(pass.name()))
+                .unwrap();
+            assert_eq!(pool.utf8(method.descriptor_index), Ok(descriptor.as_str()));
+            artifacts
+        });
+        assert_eq!(
+            super::run_java_client("method-annotation", "MethodAnnotationClient", &artifacts)
+                .trim(),
+            "true"
+        );
+    }
+}
+
+#[test]
 fn source_construction_matches_the_emitted_allocation_and_constructor_in_both_orders() {
     use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
     let base = (

@@ -783,8 +783,8 @@ Explicit constructor `val` and `var` declarations use field navigation.
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The
 [`ResolvedSourceParent`] gives the child, superclass and both source locations.
-Class references include these single, unqualified written parents and simple
-construction sites in committed bodies. Type annotations are outside this subset.
+Class references include these parents, simple method parameter and result
+annotations from completed signatures, and construction sites in checked bodies.
 
 The example indexes a header before checking any class bodies. Changing
 `Base(left)` to `Peer(left)` redirects the superclass reference. Changing the
@@ -880,6 +880,66 @@ for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
     let expected = &file.classes()[selected];
     assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));
     assert_eq!(index.references_to(site.class), &[site.origin]);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### Navigate through a completed method signature
+
+[`ResolvedMemberIndex::method_type_at`] returns the canonical method, the
+referenced class and a [`MethodTypeRole`] for each supported written type.
+A parameter site identifies the exact formal. Both parameter and result
+sites are available as soon as the method signature succeeds, including when
+its body later fails. An unfinished signature supplies no annotation sites.
+The query covers single unqualified class names in ordinary non-generic
+methods with one plain value list.
+
+In this example the parameter changes from `Base` to `Peer` while the result
+and the allocation still refer to `Base`. Undo restores the first revision.
+
+```rust
+use dotty::{CheckedClassBodies, MethodTypeRole, ResolvedMemberIndex};
+# use dotty::{ClassHeaderBindings, NamedClassSources, parse_source};
+# use dotty::core::{AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId};
+# use dotty::typer::SignatureCompletion;
+
+let original = "class Base; class Peer; class Use { def copy(x: Base): Base = new Base() }";
+let edit = original.replace("x: Base", "x: Peer");
+let input = original.find("Base)").unwrap() as u32;
+let result = original.find("Base =").unwrap() as u32;
+for (text, param_class) in [(original, 0), (edit.as_str(), 1), (original, 0)] {
+#   let source = SourceId::from_index(0);
+#   let mut store = SemanticStore::new();
+#   let defs = Definitions::bootstrap(&mut store);
+#   let mut packages = Packages::new();
+#   let file = parse_source(source, text, Default::default())?.bind(&mut store.names)
+#       .name("Example.scala", &mut store, &mut packages)?.into_classes(&store)?;
+#   let sources = NamedClassSources::new([&file], &store)?;
+#   let mut arena = AstArena::new();
+#   let mut headers = ClassHeaderBindings::default();
+#   for (_, class) in sources.classes() {
+#       sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
+#       assert!(matches!(sources.try_complete_class_header_reported(class.symbol, &mut store, defs, &packages, &mut arena, &mut headers)?, SignatureCompletion::Complete(_)));
+#   }
+#   let owner = file.classes()[2].symbol;
+#   let method = file.classes()[2].methods().next().unwrap().symbol;
+#   assert!(matches!(sources.try_complete_member_signature(method, &mut store, defs, &packages)?, SignatureCompletion::Complete(_)));
+    let mut bodies = CheckedClassBodies::default();
+    let signatures = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let arg = signatures.method_type_at(source, input).unwrap();
+    let ret = signatures.method_type_at(source, result).unwrap();
+    assert!(matches!(arg.role, MethodTypeRole::Parameter(_)));
+    assert_eq!((ret.method, ret.role), (arg.method, MethodTypeRole::Result));
+    assert_eq!(arg.class, file.classes()[param_class].symbol);
+    assert_eq!(ret.class, file.classes()[0].symbol);
+
+    let (body, report) = sources.check_class_body(owner, &mut store, defs, &packages, &mut arena, NoResolver).into_parts();
+    assert!(report.errors.is_empty());
+    bodies.record(body)?;
+    let checked = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let allocation = checked.construction_at(source, text.rfind("Base()").unwrap() as u32).unwrap();
+    assert_eq!(allocation.class, ret.class);
+    assert_eq!(checked.references_to(ret.class).len(), if arg.class == ret.class { 3 } else { 2 });
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```

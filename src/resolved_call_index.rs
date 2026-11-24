@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    method_types: Vec<crate::ResolvedMethodType>,
     constructions: Vec<crate::ResolvedSourceConstruction>,
     parents: Vec<ResolvedSourceParent>,
     class_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -71,8 +72,26 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
         .filter(|(span, _)| span.span().range().contains(offset))
 }
 
+// Each input is already ordered within one file. Keep reference collection linear
+// when declarations, parent clauses and allocations occur in interleaved order.
+fn merge_class_sites(
+    left: impl Iterator<Item = (SymbolId, SourceSpan)>,
+    right: impl Iterator<Item = (SymbolId, SourceSpan)>,
+) -> impl Iterator<Item = (SymbolId, SourceSpan)> {
+    let mut left = left.peekable();
+    let mut right = right.peekable();
+    std::iter::from_fn(move || match (left.peek(), right.peek()) {
+        (Some((_, a)), Some((_, b))) if b.span().range().start() < a.span().range().start() => {
+            right.next()
+        }
+        (Some(_), _) => left.next(),
+        _ => right.next(),
+    })
+}
+
 /// Index of ordinary source classes, methods, fields, named method and constructor parameters, and ordinary method locals in one session.
-/// A parent name requires completed class information. Other uses require committed body or header bindings.
+/// Parent and method annotation names use completed class and method signatures.
+/// Term uses require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
@@ -225,19 +244,15 @@ impl ResolvedMemberIndex {
                     )
                 })
                 .collect();
-            // Both lists are in token order, but a construction can precede a later class header.
-            let mut record = |class, span| index.references.entry(class).or_default().push(span);
-            let mut allocations = constructions.iter().peekable();
-            for parent in &parents {
-                while let Some(site) = allocations.next_if(|s| {
-                    s.origin.span().range().start() < parent.origin.span().range().start()
-                }) {
-                    record(site.class, site.origin);
-                }
-                record(parent.parent, parent.origin);
-            }
-            for site in allocations {
-                record(site.class, site.origin);
+            let method_types = crate::source_method_types::method_types(file, &targets, store);
+            let parent_sites = parents.iter().map(|s| (s.parent, s.origin));
+            let construction_sites = constructions.iter().map(|s| (s.class, s.origin));
+            let signature_sites = method_types.iter().map(|s| (s.class, s.origin));
+            for (class, span) in merge_class_sites(
+                merge_class_sites(parent_sites, construction_sites),
+                signature_sites,
+            ) {
+                index.references.entry(class).or_default().push(span);
             }
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
@@ -307,6 +322,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    method_types,
                     constructions,
                     parents,
                     class_declarations,
@@ -327,6 +343,23 @@ impl ResolvedMemberIndex {
     /// File indexing and declaration errors in input file order.
     pub fn diagnostics(&self) -> &[DeclarationDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Resolves a byte within a simple written class type in a method parameter
+    /// or result. Requires a completed ordinary, non-generic method signature
+    /// with one plain value list, even when empty. Both files must be indexed.
+    /// Body checking is independent. Inferred results, aliases, qualified or
+    /// compound annotations and offsets outside the name yield `None`.
+    pub fn method_type_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedMethodType> {
+        let sites = &self.files.get(&source)?.method_types;
+        let i = sites.partition_point(|s| s.origin.span().range().end() <= offset);
+        sites
+            .get(i)
+            .filter(|s| s.origin.span().range().contains(offset))
     }
 
     /// Looks up a byte within the unqualified class name of a written `new` in
@@ -493,7 +526,7 @@ impl ResolvedMemberIndex {
     }
 
     /// Looks up an ordinary class, method, field, parameter or method local by half-open
-    /// UTF-8 byte offset. Parent names require completed class information. Local declarations
+    /// UTF-8 byte offset. Parent and method annotation names require completed signatures. Local declarations
     /// and term uses require committed bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
@@ -501,6 +534,13 @@ impl ResolvedMemberIndex {
         let (symbol, kind, target, usage) =
             if let Some((id, target)) = declaration_at(&file.class_declarations, offset) {
                 (id, SymbolKind::Class, target, None)
+            } else if let Some(site) = self.method_type_at(source, offset) {
+                (
+                    site.class,
+                    SymbolKind::Class,
+                    site.target,
+                    Some(site.origin),
+                )
             } else if let Some(parent) = self.parent_at(source, offset) {
                 (
                     parent.parent,
@@ -544,7 +584,7 @@ impl ResolvedMemberIndex {
 
     /// Committed uses of this exact symbol, in input file order then
     /// token order. For classes, covers single unqualified explicit parents and committed
-    /// simple `new` expressions. Omits type annotations and declarations. Unknown and unused symbols yield an
+    /// simple `new` expressions, as well as simple written class types in supported method signatures. Omits declarations. Unknown and unused symbols yield an
     /// empty slice. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)
