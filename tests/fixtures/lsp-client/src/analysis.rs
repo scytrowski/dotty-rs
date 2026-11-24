@@ -9,7 +9,7 @@ use dotty::core::{
 use dotty::{
     CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
     NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
-    SemanticDiagnostic, SignatureBlockage, SignatureCycle, SourceDeclarationIndex,
+    SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport, SignatureCycle,
 };
 
 #[derive(Clone)]
@@ -82,46 +82,41 @@ fn name(
 }
 
 // Report one marker at each participant. A downstream waiter already has a provider report.
-fn report_blockages(
-    blockages: Vec<(SymbolId, SignatureBlockage)>,
-    declarations: &SourceDeclarationIndex,
-    store: &SemanticStore,
-    results: &mut HashMap<SourceId, FileResult>,
-) {
-    for (symbol, cause) in blockages {
-        match cause {
-            SignatureBlockage::CycleMember(cycle) if cycle.path()[0] == symbol => {
-                for (member, location) in cycle.declarations(store) {
-                    let file = declarations.get(member).unwrap().source;
-                    results
-                        .get_mut(&file)
-                        .unwrap()
-                        .problems
-                        .push(Problem::Cycle {
-                            cycle: cycle.clone(),
-                            location,
-                        });
-                }
-            }
-            SignatureBlockage::Pending(provider) => {
-                let file = declarations.get(symbol).unwrap().source;
-                results
-                    .get_mut(&file)
-                    .unwrap()
-                    .problems
-                    .push(Problem::Pending {
-                        provider,
-                        name: store
-                            .names
-                            .resolve(store.symbols.get(provider).name.text())
-                            .to_owned(),
-                        location: store.symbols.get(symbol).position,
-                    });
-            }
-            SignatureBlockage::CycleMember(_)
-            | SignatureBlockage::DependsOnCycle(_)
-            | SignatureBlockage::Failed(_) => {}
+fn report_blockages(report: SignatureBlockageReport, results: &mut HashMap<SourceId, FileResult>) {
+    for (cycle, participants) in report.cycles() {
+        for participant in participants {
+            let source = participant
+                .declaration
+                .expect("indexed cycle participant")
+                .source;
+            results
+                .get_mut(&source)
+                .expect("open source document")
+                .problems
+                .push(Problem::Cycle {
+                    cycle: Arc::clone(cycle),
+                    location: participant.location,
+                });
         }
+    }
+    for (waiter, cause) in report.waiters() {
+        let SignatureBlockage::Pending(provider) = cause else {
+            continue;
+        };
+        let source = waiter.declaration.expect("indexed waiter").source;
+        let name = report
+            .declaration(*provider)
+            .and_then(|d| d.name.as_deref())
+            .expect("provider in selected source files");
+        results
+            .get_mut(&source)
+            .expect("open source document")
+            .problems
+            .push(Problem::Pending {
+                provider: *provider,
+                name: name.to_owned(),
+                location: waiter.location,
+            });
     }
 }
 
@@ -179,10 +174,11 @@ fn analyze_sources(
         }
     }
     let headers = phase.finish();
+    let blocked = headers.blockage_report(sources.declarations(), store);
     for failure in headers.failures {
         record_semantic(results, failure.into_semantic_diagnostic());
     }
-    report_blockages(headers.blockages, sources.declarations(), store, results);
+    report_blockages(blocked, results);
     let selection = sources
         .member_signatures(headers.ready.iter().copied(), store)
         .expect("classes from this session's header report");
@@ -194,10 +190,11 @@ fn analyze_sources(
         }
     }
     let (signatures, work) = signatures.finish_with_body_work();
+    let blocked = signatures.blockage_report(sources.declarations(), store);
     for failure in signatures.failures {
         record_semantic(results, failure.into_semantic_diagnostic(sources));
     }
-    report_blockages(signatures.blockages, sources.declarations(), store, results);
+    report_blockages(blocked, results);
     let mut bodies = CheckedClassBodies::default();
     for symbol in headers.ready {
         let (body, report) = work.check(symbol, store, defs, packages, &mut arena, NoResolver);
