@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use dotty::SourceDiagnostic;
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
-use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze};
+use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze_with_classpath};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
 use std::{error::Error, sync::Arc, thread};
@@ -272,9 +272,16 @@ fn notify(
     Ok(())
 }
 
-fn worker(jobs: Receiver<Job>, done: Sender<Completed>) {
+fn worker(
+    jobs: Receiver<Job>,
+    done: Sender<Completed>,
+    classpath: Option<dotty::classloader::CompositeClassPath>,
+) {
     while let Ok((revision, docs)) = jobs.recv() {
-        if done.send((revision, analyze(&docs))).is_err() {
+        if done
+            .send((revision, analyze_with_classpath(&docs, classpath.as_ref())))
+            .is_err()
+        {
             break;
         }
     }
@@ -301,6 +308,23 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
         PositionEncoding::Utf16 => "utf-16",
         PositionEncoding::Utf8 => "utf-8",
     };
+    let classpath = match params.pointer("/initializationOptions/classDirectory") {
+        Some(value) => {
+            use dotty::classloader::{CompositeClassPath, DirectoryClassPath, JmodClassPath};
+            let classes = value
+                .as_str()
+                .ok_or("classDirectory must be a directory path")?;
+            let jdk =
+                std::env::var_os("JAVA_HOME").ok_or("set JAVA_HOME when using classDirectory")?;
+            Some(CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(classes)),
+                Box::new(JmodClassPath::new(
+                    std::path::Path::new(&jdk).join("jmods/java.base.jmod"),
+                )?),
+            ]))
+        }
+        None => None,
+    };
     conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"referencesProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
     let mut ws = Workspace {
         ready: Some(Analysis::default()),
@@ -309,7 +333,7 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
     let (send, jobs) = crossbeam_channel::bounded(1);
     let queued = jobs.clone();
     let (done, completed) = unbounded();
-    let handle = thread::spawn(move || worker(jobs, done));
+    let handle = thread::spawn(move || worker(jobs, done, classpath));
     let mut pending: Vec<Request> = Vec::new();
     enum Event {
         Input(Message),
