@@ -262,6 +262,16 @@ impl SourceFileCalls {
         Some((source, method))
     }
 
+    pub(crate) fn method_targets(&self) -> Vec<(SymbolId, SourceMethodTarget)> {
+        let mut names: Vec<_> = self
+            .targets
+            .iter()
+            .map(|(&id, &target)| (id, target))
+            .collect();
+        names.sort_unstable_by_key(|(_, target)| target.name.start());
+        names
+    }
+
     fn target(&self, source: SourceId, method: SymbolId) -> Option<SourceMethodTarget> {
         self.targets
             .get(&method)

@@ -3,14 +3,20 @@ use std::collections::HashMap;
 
 use crate::core::{AstArena, SemanticStore, SourceId, SourceSpan, SymbolId, Typed};
 use crate::source_declarations::DeclarationDiagnostic;
-use crate::{CheckedClassBodies, NamedClassSources, ResolvedSourceCall};
+use crate::{CheckedClassBodies, NamedClassSources, ResolvedSourceCall, SourceMethodTarget};
+
+#[derive(Debug)]
+struct IndexedFile {
+    calls: Vec<ResolvedSourceCall>,
+    declarations: Vec<(SymbolId, SourceMethodTarget)>,
+}
 
 /// Index of direct source calls with committed body bindings in one session.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
 #[derive(Debug, Default)]
 pub struct ResolvedCallIndex {
-    calls: HashMap<SourceId, Vec<ResolvedSourceCall>>,
+    files: HashMap<SourceId, IndexedFile>,
     references: HashMap<SymbolId, Vec<SourceSpan>>,
     diagnostics: Vec<DeclarationDiagnostic>,
 }
@@ -48,7 +54,13 @@ impl ResolvedCallIndex {
                     .push(call.origin);
                 calls.push(call);
             }
-            index.calls.insert(file.source(), calls);
+            index.files.insert(
+                file.source(),
+                IndexedFile {
+                    calls,
+                    declarations: navigation.method_targets(),
+                },
+            );
         }
         index
     }
@@ -61,11 +73,31 @@ impl ResolvedCallIndex {
     /// Looks up a written callee token by half-open UTF-8 byte offset.
     /// Missing files, unchecked calls and offsets outside a name yield `None`.
     pub fn call_at(&self, source: SourceId, offset: u32) -> Option<&ResolvedSourceCall> {
-        let calls = self.calls.get(&source)?;
+        let calls = &self.files.get(&source)?.calls;
         let i = calls.partition_point(|c| c.origin.span().range().end() <= offset);
         calls
             .get(i)
             .filter(|c| c.origin.span().range().contains(offset))
+    }
+
+    /// Identifies a source method from its written declaration name or a resolved
+    /// direct call. Returns the original symbol and its declaration ranges.
+    /// Includes named methods without call sites; a position outside both
+    /// kinds of half-open name tokens yields `None`.
+    pub fn method_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<(SymbolId, SourceMethodTarget)> {
+        if let Some(call) = self.call_at(source, offset) {
+            return Some((call.method, call.target));
+        }
+        let declarations = &self.files.get(&source)?.declarations;
+        let i = declarations.partition_point(|(_, target)| target.name.end() <= offset);
+        declarations
+            .get(i)
+            .copied()
+            .filter(|(_, target)| target.name.contains(offset))
     }
 
     /// Written direct call sites of this exact method, in input file order then

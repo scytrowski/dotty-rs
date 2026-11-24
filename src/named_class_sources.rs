@@ -866,10 +866,23 @@ mod tests {
         );
         assert_eq!(uses(1), [(c, second.rfind("take").unwrap())]);
         assert!(uses(2).is_empty());
+        let a = SourceId::from_index(42);
+        for (n, name) in ["take(n", "take(b", "unused("].into_iter().enumerate() {
+            let start = target.find(name).unwrap() as u32;
+            let (method, declaration) = index.method_at(a, start + 1).unwrap();
+            assert_eq!(method, methods[n]);
+            assert_eq!(declaration.name.start(), start);
+            assert_eq!(declaration.source, a);
+            assert!(index.method_at(a, declaration.name.end()).is_none());
+        }
         for (n, positions) in [uses(0), uses(1)].into_iter().enumerate() {
             for (file, start) in positions {
                 let call = index.call_at(file, start as u32 + 3).unwrap();
                 assert_eq!(call.method, methods[n]);
+                assert_eq!(
+                    index.method_at(file, start as u32),
+                    Some((methods[n], call.target))
+                );
                 assert_eq!(call.target.source, SourceId::from_index(42));
                 assert!(index.call_at(file, start as u32 + 4).is_none());
             }
