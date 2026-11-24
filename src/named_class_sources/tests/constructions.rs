@@ -102,3 +102,62 @@ fn references_interleave_constructions_and_parents_and_preserve_neighboring_term
         (SymbolKind::Method, class.methods().next().unwrap().symbol)
     );
 }
+
+#[test]
+fn partial_bodies_publish_only_successful_method_and_field_constructions() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let base = named(9, "class Base(n: Int)", &mut store, &mut packages);
+    let text = "class Use { val kept: Base = new Base(1); def bad(): Base = { new Base(2); new Base(true) }; def good(): Base = new Base(3) }";
+    let caller = named(4, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&base, &caller], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let class = &caller.classes()[0];
+    let (body, report) = sources
+        .check_class_body(
+            class.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(matches!(body, crate::CheckedClassBody::Partial { .. }));
+    let [
+        crate::ClassBodyError::Member {
+            member,
+            error:
+                TyperError::ApplicationArgumentTypeMismatch {
+                    source,
+                    argument_index: 0,
+                    expected,
+                    actual_description,
+                    ..
+                },
+            ..
+        },
+    ] = report.errors.as_slice()
+    else {
+        panic!("wrong report: {report:?}")
+    };
+    assert_eq!(member.symbol(), class.methods().next().unwrap().symbol);
+    assert_eq!((*source, *expected), (caller.source(), defs.int));
+    assert_eq!(actual_description.as_ref(), "Boolean");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let mut expected = Vec::new();
+    for (arg, ok) in [("1", true), ("2", false), ("true", false), ("3", true)] {
+        let pos = text.find(&format!("Base({arg})")).unwrap() as u32;
+        let site = index.construction_at(caller.source(), pos);
+        assert_eq!(site.is_some(), ok);
+        assert_eq!(index.symbol_at(caller.source(), pos).is_some(), ok);
+        if let Some(site) = site {
+            assert_eq!(site.constructor, base.classes()[0].constructor);
+            expected.push(site.origin);
+        }
+    }
+    assert_eq!(index.references_to(base.classes()[0].symbol), expected);
+}
