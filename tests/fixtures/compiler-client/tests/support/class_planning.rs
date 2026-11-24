@@ -2256,8 +2256,11 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } else {
             assert!(blocked.is_empty());
         }
-        let super::SignatureError::Header(dotty::ClassHeaderError::Typing(report)) = error else {
-            panic!("expected a header typing error, got {error:?}")
+        let diagnostic = error.into_semantic_diagnostic(&sources).unwrap();
+        assert_eq!(diagnostic.phase, dotty::SemanticPhase::ClassHeader);
+        assert_eq!(diagnostic.owner_source, Some(derived.0));
+        let dotty::SemanticIssue::Typing(report) = diagnostic.issue else {
+            panic!("expected header typer error")
         };
         assert_eq!(report.class(), Some(child.symbol));
         let error = report.error();

@@ -397,14 +397,21 @@ struct TypedHeaders {
 
 #[derive(Debug)]
 enum SignatureError {
-    Header(dotty::ClassHeaderError),
+    Header(dotty::ClassHeaderFailure),
     Member(dotty::MemberSignatureError),
     Cycle(std::sync::Arc<dotty::SignatureCycle>),
 }
 
-impl From<dotty::ClassHeaderError> for SignatureError {
-    fn from(error: dotty::ClassHeaderError) -> Self {
-        Self::Header(error)
+impl SignatureError {
+    fn into_semantic_diagnostic(
+        self,
+        sources: &NamedClassSources,
+    ) -> Result<dotty::SemanticDiagnostic, std::sync::Arc<dotty::SignatureCycle>> {
+        match self {
+            Self::Header(failure) => Ok(failure.into_semantic_diagnostic()),
+            Self::Member(error) => Ok(error.into_semantic_diagnostic(sources)),
+            Self::Cycle(cycle) => Err(cycle),
+        }
     }
 }
 
@@ -435,7 +442,7 @@ fn complete_headers(
         &mut headers.arena,
         &mut headers.bindings,
     )
-    .map_err(|failure| SignatureError::Header(failure.error))?;
+    .map_err(SignatureError::Header)?;
     for (_, root) in sources.classes() {
         if phase.is_ready(root.symbol) {
             continue;
@@ -444,7 +451,7 @@ fn complete_headers(
         while let Some(symbol) = ready.pop() {
             let Ok(attempt) = phase.attempt(symbol) else {
                 let failure = phase.into_failure(symbol).expect("rejected header");
-                return Err(SignatureError::Header(failure.error));
+                return Err(SignatureError::Header(failure));
             };
             observe(symbol, attempt.completion);
             ready.extend(attempt.retry.into_iter().rev());
@@ -1306,7 +1313,6 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             &mut packages,
         );
         let sources = NamedClassSources::new(&units, &store).unwrap();
-        let lookup = |source| sources.file(source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
         let selection = sources
@@ -1332,12 +1338,18 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
                     result.unwrap();
                     continue;
                 }
-                let SignatureError::Member(error) = result.unwrap_err() else {
-                    panic!("expected a member failure")
+                let diagnostic = result
+                    .unwrap_err()
+                    .into_semantic_diagnostic(&sources)
+                    .unwrap();
+                assert_eq!(diagnostic.phase, dotty::SemanticPhase::MemberSignature);
+                assert_eq!(diagnostic.class, Some(unit.classes()[0].symbol));
+                assert_eq!(diagnostic.owner_source, Some(unit.source()));
+                assert_eq!(diagnostic.member(), Some(member));
+                assert_eq!(diagnostic.source(), Some(caller.0));
+                let dotty::SemanticIssue::Typing(report) = diagnostic.issue else {
+                    panic!("expected a typing error")
                 };
-                let report = error.into_reported_error(lookup).unwrap();
-                assert_eq!(report.member(), Some(member));
-                assert_eq!(report.source(), Some(caller.0));
                 assert!(matches!(store.symbols.info(member), SymbolInfo::Missing));
                 reports.push(report);
             }
@@ -1361,7 +1373,8 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             &mut headers.arena,
             dotty::core::NoResolver,
         );
-        let retries = check.body.unwrap_err();
+        let (_, body_report) = check.into_parts();
+        let retries: Vec<_> = body_report.into_semantic_diagnostics(&sources).collect();
         assert_eq!((reports.len(), retries.len()), (2, 2));
         assert!(matches!(
             reports[0].error(),
@@ -1378,7 +1391,12 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             ("a.value(1)", "typer.application_arity_mismatch"),
             ("false", "typer.application_argument_type_mismatch"),
         ]) {
-            let retry = retry.into_reported_error(lookup).unwrap();
+            assert_eq!(retry.phase, dotty::SemanticPhase::ClassBody);
+            assert_eq!(retry.class, Some(bad.classes()[0].symbol));
+            assert_eq!(retry.member(), original.member());
+            let dotty::SemanticIssue::Typing(retry) = retry.issue else {
+                panic!("expected a body rejection")
+            };
             assert_eq!(
                 retry.call_identity(&defs),
                 Some(original.call_identity(&defs).unwrap())
