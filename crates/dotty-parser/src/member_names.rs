@@ -50,6 +50,18 @@ impl SourceMemberNames {
         &self.identifiers
     }
 
+    /// All bare identifiers and explicit selectors, interleaved in source token
+    /// order. Each token is visited once without allocating a combined list.
+    pub fn term_names(&self) -> impl Iterator<Item = SourceTermName> + '_ {
+        let mut bare = self.identifiers.iter().peekable();
+        let mut selected = self.selections.iter().peekable();
+        std::iter::from_fn(move || match (bare.peek(), selected.peek()) {
+            (Some(b), Some(s)) if s.name.start() < b.name.start() => selected.next().copied(),
+            (Some(_), _) => bare.next().copied(),
+            _ => selected.next().copied(),
+        })
+    }
+
     /// Bare expression identifier whose half-open name contains this UTF-8 byte offset.
     pub fn identifier_at(&self, offset: u32) -> Option<SourceTermName> {
         name_at(&self.identifiers, offset)

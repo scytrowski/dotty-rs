@@ -116,3 +116,55 @@ fn own_private_body_fields_require_the_declaring_receiver_and_canonical_definiti
         }
     });
 }
+
+#[test]
+fn retained_fields_agree_with_point_queries_in_source_order_after_the_session() {
+    let text = "class A { private var n: Int = 1; def mix(): Unit = n = this.n + n }; class B { var n: Int = 2; def read(): Int = n }";
+    let (index, source, a, b) = with_checked(text, |sources, bodies, arena, store| {
+        let index = crate::ResolvedMemberIndex::build(sources, bodies, arena, store);
+        assert!(index.diagnostics().is_empty());
+        let file = sources.file(SourceId::from_index(1)).unwrap();
+        for offset in 0..text.len() as u32 {
+            let direct = sources
+                .resolved_field_at(file.source(), offset, bodies, arena, store)
+                .unwrap();
+            assert_eq!(
+                index.field_at(file.source(), offset),
+                direct.as_ref(),
+                "at {offset}"
+            );
+        }
+        let a = file.classes()[0].fields().next().unwrap().symbol;
+        let b = file.classes()[1].fields().next().unwrap().symbol;
+        (index, file.source(), a, b)
+    });
+    assert_ne!(a, b);
+    let sites = |symbol| {
+        index
+            .references_to(symbol)
+            .iter()
+            .map(|s| {
+                assert_eq!(s.source(), source);
+                let offset = s.span().range().start();
+                let usage = index.field_at(source, offset).unwrap();
+                assert_eq!(
+                    index.member_at(source, usage.target.name.start()),
+                    Some((symbol, usage.target))
+                );
+                (offset as usize, usage.kind)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sites(a),
+        [
+            (text.find("n = this").unwrap(), FieldAccessKind::Write),
+            (text.find("this.n").unwrap() + 5, FieldAccessKind::Read),
+            (text.find("+ n").unwrap() + 2, FieldAccessKind::Read)
+        ]
+    );
+    assert_eq!(
+        sites(b),
+        [(text.rfind("= n").unwrap() + 2, FieldAccessKind::Read)]
+    );
+}
