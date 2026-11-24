@@ -54,3 +54,9 @@ done
 cp "$work_dir/me/cytrowski/tastyfixtures/visibility/Holder\$InProtected.class" \
   "$fixture_dir/me/cytrowski/tastyfixtures/visibility/"
 echo "regenerated Holder\$InProtected.class"
+
+# Keep real InnerClasses metadata for the instance, private and static controls.
+for member in Member Hidden CompanionOnly; do
+  cp "$work_dir/me/cytrowski/tastyfixtures/visibility/Enclosing\$$member.class" \
+    "$fixture_dir/me/cytrowski/tastyfixtures/visibility/"
+done

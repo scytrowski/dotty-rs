@@ -236,3 +236,39 @@ fn lookup_inherited_priority() {
     }
     outcome("match");
 }
+
+#[test]
+#[ignore = "requires the pinned Scala 3.9 runtime jars"]
+fn binary_fractional_companion_search() {
+    let positive =
+        include_str!("../../../../tests/fixtures/contextual-v1/controls/FractionalStandard.scala");
+    let negative =
+        include_str!("../../../../tests/fixtures/contextual-v1/controls/FractionalMissing.scala");
+    for (method, text, witness) in [
+        ("standard", positive, Some("DoubleIsFractional")),
+        ("single", positive, Some("FloatIsFractional")),
+        ("missing", negative, None),
+    ] {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name_file(text, "Client.scala");
+        let (symbol, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
+        let resolver = audit_resolver(defs, &packages);
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+            .with_resolver(Box::new(resolver));
+        let result = typer.type_method_definition(declaration(&index, symbol));
+        if let Some(expected) = witness {
+            result.unwrap();
+            let body = typer.source_typed_index().get(source, rhs).unwrap();
+            let selected = typer.store.symbols.get(referent(&typer, body));
+            assert_eq!(typer.store.names.resolve(selected.name.text()), expected);
+            let owner = typer.store.symbols.get(selected.owner.unwrap());
+            assert_eq!(typer.store.names.resolve(owner.name.text()), "Numeric$");
+        } else {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { source: id, tree_index, .. })
+                if id == source && tree_index == rhs.index()),
+                "{result:?}"
+            );
+        }
+    }
+}

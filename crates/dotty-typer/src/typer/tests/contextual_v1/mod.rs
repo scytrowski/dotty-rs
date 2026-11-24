@@ -6,6 +6,7 @@ use dotty_classloader::classloader::{
 use std::path::PathBuf;
 
 mod clauses;
+mod inherited_nested;
 mod lookup;
 mod search;
 
