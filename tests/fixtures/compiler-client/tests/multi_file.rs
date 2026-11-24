@@ -552,6 +552,7 @@ fn with_plan<R>(
         &Definitions,
         &NamedClassSources<'_>,
         &CheckedClassBodies,
+        &ClassHeaderBindings,
     ) -> R,
 ) -> R {
     let mut store = SemanticStore::new();
@@ -581,7 +582,13 @@ fn with_plan<R>(
         typed_ast: &output.arena,
         classes,
     };
-    run(&plan, &definitions, &sources, &typed_classes)
+    run(
+        &plan,
+        &definitions,
+        &sources,
+        &typed_classes,
+        &output.bindings,
+    )
 }
 
 fn named_classes(
@@ -690,7 +697,7 @@ fn emit_batch(
 }
 
 fn compile<const N: usize>(files: [(SourceId, &str, &str); N]) -> Vec<GeneratedClass> {
-    with_plan(&files, |plan, definitions, _, _| {
+    with_plan(&files, |plan, definitions, _, _, _| {
         checked_emission(plan, definitions)
     })
 }
@@ -1082,7 +1089,7 @@ fn same_named_methods_in_one_source_execute_on_jdk21_in_either_file_order() {
         ("providers-first", [providers, consumer]),
         ("consumer-first", [consumer, providers]),
     ] {
-        let classes = with_plan(&files, |plan, defs, sources, bodies| {
+        let classes = with_plan(&files, |plan, defs, sources, bodies, _| {
             let index =
                 dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
             assert!(index.diagnostics().is_empty());
@@ -1266,7 +1273,7 @@ fn measure_jvm_batch() {
             .enumerate()
             .map(|(i, text)| (SourceId::from_index(i as u32), "Batch.scala", text.as_str()))
             .collect();
-        with_plan(&files, |plan, defs, _, _| {
+        with_plan(&files, |plan, defs, _, _, _| {
             for _ in 0..5 {
                 let start = Instant::now();
                 plan.validate().unwrap();
