@@ -1,18 +1,14 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
-use crate::zip_archive::ZipArchive;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::zip_archive::{ArchiveClassPathIndex, ZipArchive};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
 
-/// The lowest feature-release version multi-release JARs recognize
-/// (JEP 238): `META-INF/versions/N/` directories with `N < 9` are not
-/// version directories at all.
-const MIN_VERSIONED_DIRECTORY: u16 = 9;
 const MAX_RESOURCE_CACHE_ENTRIES: usize = 512;
 const MAX_RESOURCE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CACHED_RESOURCE_BYTES: usize = 1024 * 1024;
@@ -44,9 +40,7 @@ const MAX_CACHED_RESOURCE_BYTES: usize = 1024 * 1024;
 pub struct JarClassPath {
     path: PathBuf,
     archive: ZipArchive,
-    release_version: u16,
-    multi_release: bool,
-    package_prefixes: HashSet<String>,
+    packages: ArchiveClassPathIndex,
     profile: JarResourceProfileCounters,
     resource_cache: Mutex<JarResourceCache>,
 }
@@ -81,17 +75,12 @@ impl JarClassPath {
             Some(manifest_bytes) => manifest::declares_multi_release(&manifest_bytes),
             None => false,
         };
-        let mut package_prefixes = archive.package_prefixes_under("");
-        if multi_release {
-            package_prefixes.extend(archive.versioned_package_prefixes(release_version));
-        }
+        let packages = archive.package_index("", multi_release.then_some(release_version));
 
         Ok(Self {
             path,
             archive,
-            release_version,
-            multi_release,
-            package_prefixes,
+            packages,
             profile: JarResourceProfileCounters::default(),
             resource_cache: Mutex::new(JarResourceCache::default()),
         })
@@ -109,37 +98,17 @@ impl JarClassPath {
         }
     }
 
-    /// The versioned entry names to probe, highest version first, for
-    /// `entry_name`'s multi-release override. Empty when this JAR isn't
-    /// multi-release, or when `release_version` is below the lowest
-    /// version directory JEP 238 recognizes (`MIN_VERSIONED_DIRECTORY`
-    /// then exceeds the upper bound, which `RangeInclusive` already
-    /// treats as empty).
-    fn versioned_entry_names(&self, entry_name: &str) -> impl Iterator<Item = String> {
-        let upper_bound = if self.multi_release {
-            self.release_version
-        } else {
-            0
-        };
-
-        (MIN_VERSIONED_DIRECTORY..=upper_bound)
-            .rev()
-            .map(move |version| format!("META-INF/versions/{version}/{entry_name}"))
-    }
-
-    /// Reads `entry_name`, preferring the highest multi-release override
-    /// (see [`Self::versioned_entry_names`]) and falling back to the
-    /// unversioned entry.
+    /// Reads the selected resource path from this archive's immutable release index.
     fn read_versioned_entry(&self, entry_name: &str) -> Result<Option<Vec<u8>>, ClassPathError> {
-        for versioned_entry_name in self.versioned_entry_names(entry_name) {
-            self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
-            if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
-                return Ok(Some(bytes));
-            }
-        }
-
+        let versioned;
+        let path = if let Some(version) = self.packages.overrides.get(entry_name) {
+            versioned = format!("META-INF/versions/{version}/{entry_name}");
+            &versioned
+        } else {
+            entry_name
+        };
         self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(self.archive.read_entry(entry_name)?)
+        Ok(self.archive.read_entry(path)?)
     }
 }
 
@@ -218,31 +187,14 @@ impl ClassPathEntry for JarClassPath {
         if !super::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        let path = package.join("/");
-        let base_prefix = if path.is_empty() {
-            String::new()
-        } else {
-            format!("{path}/")
-        };
-        if self.archive.contains_package(&base_prefix) {
-            return Ok(true);
-        }
-        if self.multi_release {
-            for version in MIN_VERSIONED_DIRECTORY..=self.release_version {
-                let prefix = format!("META-INF/versions/{version}/{base_prefix}");
-                if self.archive.contains_package(&prefix) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        Ok(self.packages.direct.contains(&package.join("/")))
     }
 
     fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         if !super::class_path::safe_package_segments(package) {
             return Ok(false);
         }
-        Ok(self.package_prefixes.contains(&package.join("/")))
+        Ok(self.packages.prefixes.contains(&package.join("/")))
     }
 }
 
@@ -353,6 +305,31 @@ pub(crate) mod tests {
         let path = std::env::temp_dir().join(format!("dotty_classloader_jar_{unique_name}.jar"));
         std::fs::write(&path, bytes).unwrap();
         path
+    }
+
+    #[test]
+    fn selects_versioned_class_only_for_a_main_section_declaration() {
+        let name = BinaryName::from_internal("Item");
+        for (manifest, expected) in [
+            (
+                &b"Manifest-Version: 1.0\r\n\r\nName: Item.class\r\nMulti-Release: true\r\n"[..],
+                &b"base"[..],
+            ),
+            (
+                &b"Manifest-Version: 1.0\rMulti-Release: true\r\r"[..],
+                &b"v17"[..],
+            ),
+        ] {
+            let jar = minimal_stored_zip(&[
+                (MANIFEST_ENTRY_NAME, manifest),
+                ("Item.class", b"base"),
+                ("META-INF/versions/17/Item.class", b"v17"),
+            ]);
+            let path = write_temp_jar("main_section_selection", &jar);
+            let entry = JarClassPath::new(&path, 21).unwrap();
+            assert_eq!(entry.find_class(&name).unwrap().unwrap().bytes(), expected);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
@@ -543,6 +520,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_cold_miss_checks_one_zip_path_per_format_at_any_release() {
+        for release in [8, 17, 21, u16::MAX] {
+            let jar = JarClassPath::new(
+                fixture_path("tests/fixtures/multi_release_jar/mr_sample.jar"),
+                release,
+            )
+            .unwrap();
+            assert!(
+                jar.find_class(&BinaryName::from_internal("absent/Item"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(jar.resource_profile().zip_entry_reads, 2);
+        }
+    }
+
+    #[test]
     fn multi_release_package_prefixes_respect_manifest_and_target_release() {
         let entries = [
             (
@@ -551,17 +545,26 @@ pub(crate) mod tests {
             ),
             ("META-INF/versions/11/a/b/FromV11.class", b"v11".as_slice()),
             ("META-INF/versions/17/x/y/FromV17.tasty", b"v17".as_slice()),
+            ("META-INF/versions/17/Root.class", b"root".as_slice()),
         ];
         let jar_path = write_temp_jar("package_prefix_mr", &minimal_stored_zip(&entries));
 
         let below = JarClassPath::new(&jar_path, 10).unwrap();
+        assert!(!below.contains_package(&["a", "b"]).unwrap());
+        assert!(!below.contains_package(&[]).unwrap());
         assert!(!below.contains_package_prefix(&["a"]).unwrap());
         assert!(!below.contains_package_prefix(&["x"]).unwrap());
         let at_v11 = JarClassPath::new(&jar_path, 11).unwrap();
+        assert!(!at_v11.contains_package(&["a"]).unwrap());
+        assert!(at_v11.contains_package(&["a", "b"]).unwrap());
+        assert!(!at_v11.contains_package(&["x", "y"]).unwrap());
         assert!(at_v11.contains_package_prefix(&["a"]).unwrap());
         assert!(at_v11.contains_package_prefix(&["a", "b"]).unwrap());
         assert!(!at_v11.contains_package_prefix(&["x"]).unwrap());
         let at_v17 = JarClassPath::new(&jar_path, 17).unwrap();
+        assert!(at_v17.contains_package(&["a", "b"]).unwrap());
+        assert!(at_v17.contains_package(&["x", "y"]).unwrap());
+        assert!(at_v17.contains_package(&[]).unwrap());
         assert!(at_v17.contains_package_prefix(&["x"]).unwrap());
         assert!(at_v17.contains_package_prefix(&["x", "y"]).unwrap());
 
@@ -587,6 +590,7 @@ pub(crate) mod tests {
             let jar_path = write_temp_jar(name, &minimal_stored_zip(&entries));
             let class_path = JarClassPath::new(&jar_path, 21).unwrap();
 
+            assert!(!class_path.contains_package(&["a", "b"]).unwrap());
             assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
 
             std::fs::remove_file(&jar_path).unwrap();

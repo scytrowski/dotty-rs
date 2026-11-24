@@ -628,6 +628,173 @@ fn method_rhs(unit: &NamedUnit, store: &SemanticStore, name: &str) -> (SymbolId,
         .unwrap_or_else(|| panic!("source should define method {name}"))
 }
 
+fn methods_classpath(label: &str) -> TemporaryDirectory {
+    let root = TemporaryDirectory::new(label);
+    write_stub_class(root.path(), "java/lang/Object", None, 0x0021);
+    let package = root.path().join("me/cytrowski/tastyfixtures/semantic");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("Methods.tasty"),
+        include_bytes!("../crates/dotty-tasty-unpickler/tests/fixtures/semantic/Methods.tasty"),
+    )
+    .unwrap();
+    root
+}
+
+fn with_classpath_client(
+    root: &Path,
+    source: &str,
+    check: impl FnOnce(&NamedUnit, &mut SourceTyper<'_>, Definitions),
+) {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(source, SourceId::from_index(0), &mut store, &mut packages);
+    let resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(root),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    check(&unit, &mut typer, definitions);
+}
+
+#[test]
+fn tasty_empty_clause_method_requires_parentheses_in_an_int_context() {
+    let root = methods_classpath("empty-clause");
+    with_classpath_client(
+        root.path(),
+        "import me.cytrowski.tastyfixtures.semantic.Methods
+         def omitted(m: Methods): Int = m.empty
+         def called(m: Methods): Int = m.empty()",
+        |unit, typer, definitions| {
+            let (method, rhs) = method_rhs(unit, typer.store(), "called");
+            let context = typer.expression_context_for(method).unwrap();
+            let call = typer
+                .type_expression_expected(rhs, context, definitions.int)
+                .unwrap();
+            assert!(matches!(
+                typer.typed_ast().get(call).kind,
+                TreeKind::Apply(_)
+            ));
+
+            let (method, rhs) = method_rhs(unit, typer.store(), "omitted");
+            let context = typer.expression_context_for(method).unwrap();
+            let error = typer
+                .type_expression_expected(rhs, context, definitions.int)
+                .unwrap_err();
+            assert!(matches!(error,
+                TyperError::ExpectedExpressionConformanceUnsupported { source, tree_index, expected, .. }
+                    if source == unit.source && tree_index == rhs.index() && expected == definitions.int
+            ));
+        },
+    );
+}
+
+#[test]
+fn tasty_curried_method_accepts_two_successive_applications() {
+    let root = methods_classpath("curried");
+    with_classpath_client(
+        root.path(),
+        "import me.cytrowski.tastyfixtures.semantic.Methods
+         def called(m: Methods, y: Any): Boolean = m.curried(1)(y)
+         def flat(m: Methods, y: Any): Boolean = m.curried(1, y)",
+        |unit, typer, definitions| {
+            let (method, rhs) = method_rhs(unit, typer.store(), "called");
+            let context = typer.expression_context_for(method).unwrap();
+            let call = typer
+                .type_expression_expected(rhs, context, definitions.boolean)
+                .unwrap();
+            let TreeKind::Apply(outer) = &typer.typed_ast().get(call).kind else {
+                panic!("second application")
+            };
+            assert_eq!(outer.args.len(), 1);
+            assert!(
+                matches!(&typer.typed_ast().get(outer.function).kind, TreeKind::Apply(inner) if inner.args.len() == 1)
+            );
+
+            let (method, rhs) = method_rhs(unit, typer.store(), "flat");
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::ApplicationArityMismatch {
+                    expected: 1,
+                    actual: 2,
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
+fn java_generic_method_checks_the_declared_upper_bound() {
+    let root = TemporaryDirectory::new("java-method-bounds");
+    write_stub_class(root.path(), "java/lang/Object", None, 0x0021);
+    write_stub_class(
+        root.path(),
+        "java/lang/Number",
+        Some("java/lang/Object"),
+        0x0421,
+    );
+    let package = root.path().join("example");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("Bounded.class"),
+        include_bytes!("../crates/dotty-classloader/tests/fixtures/bounded_method/Bounded.class"),
+    )
+    .unwrap();
+    with_classpath_client(
+        root.path(),
+        "def ok(v: example.Bounded, x: java.lang.Number): java.lang.Number =
+           v.ident[java.lang.Number](x)
+         def tooWide(v: example.Bounded, x: java.lang.Number): java.lang.Object =
+           v.ident[java.lang.Object](x)",
+        |unit, typer, _| {
+            let (method, rhs) = method_rhs(unit, typer.store(), "ok");
+            let context = typer.expression_context_for(method).unwrap();
+            let call = typer.type_expression(rhs, context).unwrap();
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(number),
+                ..
+            } = typer.store().types.get(typer.typed_ast().get(call).ty)
+            else {
+                panic!("the instantiated result should be java.lang.Number");
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*number).name.text()),
+                "Number"
+            );
+
+            let (method, rhs) = method_rhs(unit, typer.store(), "tooWide");
+            let context = typer.expression_context_for(method).unwrap();
+            let error = typer.type_expression(rhs, context).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    TyperError::ExplicitTypeArgumentBoundViolation {
+                        parameter_index: 0,
+                        side: dotty_typer::TypeArgumentBoundSide::Upper,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        },
+    );
+}
+
 #[derive(Default)]
 struct ResolutionLog {
     packages: Vec<(Vec<String>, SymbolId)>,

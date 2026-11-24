@@ -135,7 +135,7 @@ fn units() -> Vec<Unit> {
         );
         let lookup = match id.as_str() {
             "animal" => "me/cytrowski/tastyfixtures/Animal",
-            "dog" => "Dog",
+            "dog" => "me/cytrowski/tastyfixtures/Dog",
             "fields-body" => "me/cytrowski/tastyfixtures/fields/Body",
             "fields-p" => "me/cytrowski/tastyfixtures/fields/P",
             "fields-q" => "me/cytrowski/tastyfixtures/fields/Q",
@@ -859,8 +859,8 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .collect::<Vec<_>>();
     assert_eq!(
         changed.len(),
-        20,
-        "the selected Option member, canonical Boolean identity, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
+        23,
+        "only the Dog identity and error context, Option member and flags, canonical Boolean identity, and the newly loadable Some and Tuple2 rows may change"
     );
 
     let mut some_fields = HashSet::new();
@@ -868,13 +868,26 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     let mut boolean_identity_delta = false;
     for (current, frozen) in changed {
         match (current[0].as_str(), current[1].as_str()) {
+            ("dog", "identity" | "member_signatures") => {
+                let mut expected = frozen.clone();
+                if current[1] == "identity" {
+                    expected[3] = "me.cytrowski.tastyfixtures.Dog|Class|Dog".to_owned();
+                    expected[10] = "equal".to_owned();
+                } else {
+                    expected[3] = frozen[3].replace(
+                        "class Dog failed",
+                        "class me/cytrowski/tastyfixtures/Dog failed",
+                    );
+                }
+                assert_eq!(*current, expected);
+            }
             ("tuple2", field) => {
                 assert_eq!(current[4], "", "Tuple2 {field} loads from its fixture");
                 assert_eq!(current[5], frozen[5], "Tuple2 {field} fixture provenance");
                 let (outcome, value) = match field {
                     "identity" => ("MATCH", "scala.Tuple2|Class|Tuple2"),
                     "visibility" => ("MATCH", "public"),
-                    "flags" => ("MATCH", "final"),
+                    "flags" => ("MATCH", "final,case"),
                     "hierarchy" => (
                         "MATCH",
                         "scala.$times$colon&scala.Product2[scala.Tuple2.T1,scala.Tuple2.T2]&scala.Product&java.io.Serializable",
@@ -922,7 +935,7 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 let (outcome, value, delta) = match field {
                     "identity" => ("MATCH", "scala.Some|Class|Some", "equal"),
                     "visibility" => ("MATCH", "public", "equal"),
-                    "flags" => ("MATCH", "final", "different"),
+                    "flags" => ("MATCH", "final,case", "equal"),
                     "hierarchy" => (
                         "MATCH",
                         "scala.Option[scala.Some.A]&scala.Product&java.io.Serializable",
@@ -973,6 +986,12 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 assert_eq!(current[3], value, "Some {field} value");
                 assert_eq!(current[10], delta, "Some {field} comparison");
             }
+            ("option", "flags") => {
+                let mut expected = frozen.clone();
+                assert_eq!(expected[3], "abstract");
+                expected[3] = "abstract,sealed".to_owned();
+                assert_eq!(*current, expected);
+            }
             ("option", "member_signatures") => option_member_delta = Some((current, frozen)),
             key => panic!("unexpected frozen parity delta {key:?}"),
         }
@@ -1021,7 +1040,14 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     ));
     let normalized_current_members = current[3].replace("Boolean", "scala.Boolean");
     let current_members = normalized_current_members.split(';').collect::<Vec<_>>();
-    let frozen_members = frozen[3].split(';').collect::<Vec<_>>();
+    // Only the legacy implicit overload is private[Option]. Its corrected
+    // visibility places it before the public parameterless overload in the report.
+    let expected_visibility = frozen[3].replace(
+        "orNull:Method:public:[A1:None:bounds(scala.Option.A,Any)]",
+        "orNull:Method:private:[A1:None:bounds(scala.Option.A,Any)]",
+    );
+    let mut frozen_members = expected_visibility.split(';').collect::<Vec<_>>();
+    frozen_members.sort_unstable();
     assert_eq!(current_members.len(), frozen_members.len());
     let changed_members = current_members
         .iter()
@@ -1031,7 +1057,13 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     let mut changes = Vec::new();
     for (current, frozen) in changed_members {
         let (name, _) = current.split_once(':').unwrap();
-        if name != "getOrElse" {
+        if name == "fold" {
+            // def fold[B](ifEmpty: => B)(f: A => B): B has two plain clauses.
+            assert_eq!(
+                *current,
+                frozen.replace(",scala.Function1[", ")Plain:(scala.Function1[")
+            );
+        } else if name != "getOrElse" {
             // These four Option signatures each have a single legacy implicit
             // clause in the pinned Scala library. Freeze the entire rest of the row.
             assert_eq!(*current, frozen.replace(")Plain:", ")Implicit:"));
@@ -1040,7 +1072,7 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     }
     assert_eq!(
         changes,
-        ["flatten", "getOrElse", "orNull", "unzip3", "unzip"]
+        ["flatten", "fold", "getOrElse", "orNull", "unzip3", "unzip"]
     );
 }
 
@@ -2353,7 +2385,8 @@ fn malformed_and_missing_dependency_failures_preserve_store_and_allow_retry() {
             definitions,
             session,
         );
-        let result = loader.load_class(&BinaryName::from_internal("Dog"));
+        let result =
+            loader.load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"));
         session = loader.into_session();
         result
     };

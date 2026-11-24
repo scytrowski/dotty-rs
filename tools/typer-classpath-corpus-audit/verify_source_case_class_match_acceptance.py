@@ -48,27 +48,8 @@ PREDEF_CHAR_AT_HISTORICAL_BLOCKER = (
 )
 PREDEF_CHAR_AT_LIVE_RESULT = "Char"
 ARRAY_BUFFER_VIEW_APPLY_IDENTITY = "library/src/scala/collection/mutable/ArrayBuffer.scala#tree=1537"
-ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER = (
-    "blocked::TermNameNotFound { source: SourceId(0), tree_index: 1534, "
-    "name: Name { text: NameId(224), namespace: Term }, position: "
-    "Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 15157, end: 15167 }, point: None } }) }"
-)
-ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER = (
-    'blocked::MemberLookup(SourceClassCompletion { symbol: SymbolId(43), '
-    'error: SymbolResolution { source: SourceId(0), tree_index: 43, error: Malformed { '
-    'reason: "class scala/collection/mutable/IndexedBuffer failed to load because '
-    'scala/collection/mutable/IndexedSeq failed: invalid .tasty file for '
-    'scala/collection/mutable/IndexedSeq: unresolved supertype reference at parent 2: '
-    'shape=applied, semantic_reference=true, reference_prefix=true, '
-    'names=[\\"IndexedSeq\\", \\"collection\\", \\"scala\\"], raw=AppliedType(tycon=NatAst(tag=113, '
-    'child=NatAst(tag=112, child=Leaf(tag=61))), arguments=1)" } } })'
-)
 SORTED_MAP_UNSORTED_IDENTITY = "library/src/scala/collection/immutable/SortedMap.scala#tree=51"
-SORTED_MAP_UNSORTED_BLOCKER = (
-    "blocked::ExpectedExpressionConformanceUnsupported {{ source: SourceId(0), tree_index: 50, "
-    "actual: TypeId({actual}), expected: TypeId({expected}), "
-    "error: ClassInfoUnavailable {{ symbol: SymbolId(43), state: Missing }} }}"
-)
+CLASSLOADER_COHORT = Path("docs/classloader-ordinary-cohort-3.9.0.tsv")
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1398,19 +1379,32 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
             + ", ".join(changed)
         )
 
+    # Reconcile the measured classloader changes against the immutable receipt.
+    # A return to either historical lookup failure is a regression.
+    change_header, changes = read_tsv(root / CLASSLOADER_COHORT)
+    classloader_rows = {row["identity"]: row for row in changes}
+    if (change_header != ["identity", "historical_status", "current_status", "current_result"]
+            or len(changes) != len(classloader_rows)
+            or set(classloader_rows) != {
+                "library/src/scala/Enumeration.scala#tree=700", SORTED_MAP_UNSORTED_IDENTITY,
+                "library/src/scala/collection/immutable/VectorMap.scala#tree=81",
+                ARRAY_BUFFER_VIEW_APPLY_IDENTITY,
+            }):
+        raise ReceiptError("classloader cohort must identify the four measured roots exactly")
     differences = []
     for wanted, found in zip(expected, recorded_rows, strict=True):
+        change = classloader_rows.get(wanted["identity"])
+        if change is not None:
+            if (found["first_status"] != change["historical_status"]
+                    or found["second_status"] != change["historical_status"]
+                    or found["actual_result"] != "not_available"
+                    or wanted != {**found, "first_status": change["current_status"],
+                                  "second_status": change["current_status"],
+                                  "actual_result": change["current_result"]}):
+                differences.append((wanted, found))
+            continue
         if wanted == found:
             continue
-        if wanted["identity"] == SORTED_MAP_UNSORTED_IDENTITY:
-            # Both sessions still compare SortedMap.this with Map[K, V]. Only
-            # these two arena slots moved after contextual argument support.
-            old = SORTED_MAP_UNSORTED_BLOCKER.format(actual=1714, expected=1713)
-            new = SORTED_MAP_UNSORTED_BLOCKER.format(actual=1718, expected=1717)
-            if found["first_status"] == found["second_status"] == old and wanted == {
-                **found, "first_status": new, "second_status": new
-            }:
-                continue
         if wanted["identity"] == EITHER_SWAP_IDENTITY:
             # Keep the checked-in 2026-09 receipt immutable. Permit only the
             # measured pinned Either.swap completion, while requiring every
@@ -1496,27 +1490,6 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
                 and wanted["two_pass_equal"] == "true"
             )
             if completed and historical == found:
-                continue
-        if wanted["identity"] == ARRAY_BUFFER_VIEW_APPLY_IDENTITY:
-            # This is blocker advancement, not method completion: #2354 lets
-            # ArrayBufferView.apply reach the parameter's call, then class
-            # completion stops at the frozen IndexedSeq TASTy hierarchy gap.
-            historical = dict(wanted)
-            historical["first_status"] = ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER
-            historical["second_status"] = ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER
-            historical["actual_result"] = "not_available"
-            advanced = (
-                wanted["cohort"] == "analysis"
-                and wanted["source_tree"] == "1537"
-                and wanted["baseline_status"] == "not_protected"
-                and wanted["gate"] == "observe"
-                and wanted["first_status"] == ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER
-                and wanted["second_status"] == ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER
-                and wanted["actual_result"] == "not_available"
-                and wanted["protected_success"] == "false"
-                and wanted["two_pass_equal"] == "true"
-            )
-            if advanced and historical == found:
                 continue
         differences.append((wanted, found))
     if differences:

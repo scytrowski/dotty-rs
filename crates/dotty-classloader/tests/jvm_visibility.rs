@@ -176,3 +176,76 @@ fn the_corpus_exercises_every_java_visibility() {
         assert!(!seen.contains("qualified"));
     }
 }
+
+fn load_nested_fixture(
+    store: &mut SemanticStore,
+    nested: &str,
+    shell_first: bool,
+) -> (SymbolId, Vec<SymbolId>) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nested_access");
+    let mut loader = ClassLoader::new(CorpusWithStubs(DirectoryClassPath::new(path)), store);
+    let name = BinaryName::from_internal(format!("example/visibility/NestedAccess${nested}"));
+    let shell = shell_first.then(|| loader.ensure_class_identity(&name).unwrap());
+    let class = loader.load_class(&name).unwrap();
+    if let Some(shell) = shell {
+        assert_eq!(class, shell);
+    }
+    let metadata = loader.metadata(class).unwrap();
+    let members = metadata
+        .fields
+        .iter()
+        .map(|field| field.symbol())
+        .chain(metadata.methods.iter().filter_map(|method| method.symbol()))
+        .collect();
+    (class, members)
+}
+
+#[test]
+fn javac_member_class_visibility_is_independent_of_load_order() {
+    for (name, expected) in [
+        ("Hidden", Visibility::Private),
+        ("Sub", Visibility::Protected),
+    ] {
+        for shell_first in [false, true] {
+            let mut store = SemanticStore::new();
+            let (class, _) = load_nested_fixture(&mut store, name, shell_first);
+            assert_eq!(
+                store.symbols.get(class).visibility,
+                expected,
+                "{name}, shell first: {shell_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn javac_package_private_members_of_a_nested_class_use_the_declaring_package() {
+    for shell_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let (class, members) = load_nested_fixture(&mut store, "Hidden", shell_first);
+        let outer = store.symbols.get(class).owner.unwrap();
+        let package = store.symbols.get(outer).owner.unwrap();
+        assert_eq!(
+            store.symbols.get(package).kind,
+            dotty_core::SymbolKind::Package
+        );
+        assert_eq!(
+            store.names.resolve(store.symbols.get(package).name.text()),
+            "visibility"
+        );
+        let mut names = Vec::new();
+        for member in members {
+            let member = store.symbols.get(member);
+            names.push(store.names.resolve(member.name.text()));
+            assert_eq!(member.owner, Some(class));
+            assert_eq!(
+                member.visibility,
+                Visibility::Package(package),
+                "{}",
+                names.last().unwrap()
+            );
+        }
+        names.sort_unstable();
+        assert_eq!(names, ["<init>", "field", "method"]);
+    }
+}

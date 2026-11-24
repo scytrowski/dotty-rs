@@ -12174,7 +12174,7 @@ mod tests {
         let mut candidate_term_symbols = 0usize;
         let mut candidate_term_missing = 0usize;
         let mut candidate_term_errors = 0usize;
-        let mut candidate_type_symbols = 0usize;
+        let mut type_symbols = std::collections::BTreeMap::new();
         let mut candidate_type_missing = 0usize;
         let mut candidate_type_errors = 0usize;
         let mut candidate_package_paths = 0usize;
@@ -12221,6 +12221,7 @@ mod tests {
                     "absent"
                 }
             );
+            let mut term_symbol = None;
             let prefix = store
                 .types
                 .alloc(Type::type_ref(definitions.no_prefix, package));
@@ -12245,10 +12246,39 @@ mod tests {
                     Err(_) => "error".to_owned(),
                 };
                 match (namespace, &result) {
-                    (Namespace::Term, Ok(Some(_))) => candidate_term_symbols += 1,
+                    (Namespace::Term, Ok(Some(id))) => {
+                        candidate_term_symbols += 1;
+                        term_symbol = Some(*id);
+                        let declaration = store.symbols.get(*id);
+                        assert_eq!(declaration.name, member_name, "{candidate}");
+                        assert_eq!(declaration.owner, Some(package), "{candidate}");
+                    }
                     (Namespace::Term, Ok(None)) => candidate_term_missing += 1,
                     (Namespace::Term, Err(_)) => candidate_term_errors += 1,
-                    (Namespace::Type, Ok(Some(_))) => candidate_type_symbols += 1,
+                    (Namespace::Type, Ok(Some(id))) => {
+                        let declaration = store.symbols.get(*id);
+                        assert_eq!(declaration.name, member_name, "{candidate}");
+                        assert_eq!(declaration.owner, Some(package), "{candidate}");
+                        assert!(type_symbols.insert(candidate, declaration.kind).is_none());
+                        if matches!(
+                            candidate,
+                            "dotty.tools.dotc.reporting.Diagnostic"
+                                | "dotty.tools.dotc.semanticdb.SymbolInformation"
+                                | "dotty.tools.dotc.transform.MegaPhase"
+                        ) {
+                            let object =
+                                term_symbol.expect("the Scala companion term resolves first");
+                            assert_ne!(object, *id);
+                            assert_eq!(declaration.links.companion, Some(object));
+                            assert_eq!(store.symbols.get(object).links.companion, Some(*id));
+                            assert!(matches!(
+                                declaration.origin,
+                                dotty_core::SymbolOrigin::Tasty(_)
+                            ));
+                            assert!(matches!(declaration.info, SymbolInfo::Complete(ty)
+                                if matches!(store.types.get(ty), Type::ClassInfo(info) if info.class == *id)));
+                        }
+                    }
                     (Namespace::Type, Ok(None)) => candidate_type_missing += 1,
                     (Namespace::Type, Err(_)) => candidate_type_errors += 1,
                 }
@@ -12262,6 +12292,7 @@ mod tests {
                 );
             }
         }
+        let candidate_type_symbols = type_symbols.len();
         println!(
             "cohort_candidate_term_requests={candidate_term_requests} term_symbols={candidate_term_symbols} term_missing={candidate_term_missing} term_errors={candidate_term_errors} cohort_candidate_type_requests={candidate_type_requests} type_symbols={candidate_type_symbols} type_missing={candidate_type_missing} type_errors={candidate_type_errors}"
         );
@@ -12273,9 +12304,23 @@ mod tests {
         assert_eq!(candidate_term_missing, 92);
         assert_eq!(candidate_term_errors, 0);
         assert_eq!(candidate_type_requests, 118);
-        assert_eq!(candidate_type_symbols, 4);
+        assert_eq!(
+            type_symbols,
+            std::collections::BTreeMap::from([
+                ("dotty.tools.dotc.reporting.Action", SymbolKind::Class),
+                ("dotty.tools.dotc.reporting.Diagnostic", SymbolKind::Class),
+                (
+                    "dotty.tools.dotc.semanticdb.SymbolInformation",
+                    SymbolKind::Class
+                ),
+                ("dotty.tools.dotc.transform.MegaPhase", SymbolKind::Class),
+                ("java.lang.Character", SymbolKind::Class),
+                ("scala.collection.concurrent.INodeBase", SymbolKind::Class),
+                ("scala.reflect.Manifest", SymbolKind::Trait),
+            ])
+        );
         assert_eq!(candidate_type_missing, 91);
-        assert_eq!(candidate_type_errors, 23);
+        assert_eq!(candidate_type_errors, 20);
         assert_eq!(candidate_package_paths, 118);
         assert_eq!(candidate_package_hits, 1);
 
@@ -12329,6 +12374,21 @@ mod tests {
                         space: MemberSpace::Prefix,
                     },
                 );
+                let member = member_result
+                    .as_ref()
+                    .expect("selected member lookup")
+                    .expect("declared term member");
+                let declaration = store.symbols.get(member);
+                assert_eq!(declaration.name, member_name);
+                let SymbolInfo::Complete(object_type) = store.symbols.get(*object).info else {
+                    panic!("expected completed {target} object");
+                };
+                let module_class = store.types.get(object_type).reference_symbol().unwrap();
+                assert_eq!(
+                    declaration.owner,
+                    Some(module_class),
+                    "{target}.{selected_member}"
+                );
                 println!(
                     "  selected_member={} result={member_result:?}",
                     selected_member
@@ -12362,8 +12422,14 @@ mod tests {
         assert_eq!(profile.package_term_requests, 123);
         assert_eq!(profile.package_term_successes, 30);
         assert_eq!(profile.package_term_errors, 0);
-        assert_eq!(profile.completed_module_classes.len(), 2);
-        assert_eq!(profile.module_member_successes, 2);
+        assert_eq!(
+            profile.completed_module_classes,
+            targets
+                .into_iter()
+                .map(|(package, name, _)| format!("{package}/{name}"))
+                .collect()
+        );
+        assert_eq!(profile.module_member_successes, targets.len() as u64);
         assert_eq!(profile.member_targets.len(), 5);
     }
 

@@ -23,6 +23,15 @@ historical lexical package list did not include default imports; the Scala
 3.9 oracle and pinned JDK 21.0.8 classpath confirm `Character` as
 `java.lang.Character`.
 
+The frozen resolver TSV records four successful package type candidates.
+The current pinned test resolves seven. `Diagnostic` and `SymbolInformation`
+now complete with their own class identities and reciprocal companion links.
+Their historical errors were a circular self-reference and a missing
+`scala/Serializable` parent, respectively. `MegaPhase` also completes
+after loading its nested `Phases$Phase` parent. The test verifies the seven
+qualified names and declaration kinds across the original 118 requests.
+It also resolves all five selected term members on their owning module classes.
+
 ## Confirmed compiler object roots
 
 The pinned Scala 3.9.0 compiler oracle successfully compiled direct imports

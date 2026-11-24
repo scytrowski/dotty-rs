@@ -1,6 +1,6 @@
 use crate::binary_name::BinaryName;
 use crate::error::ClassLoadFailure;
-use dotty_core::SymbolId;
+use dotty_core::{SemanticStore, SymbolId, SymbolInfo};
 use std::collections::HashMap;
 
 /// A class's state in a [`ClassRepository`].
@@ -46,6 +46,22 @@ impl ClassEntry {
             ClassEntry::Failed(symbol, _) => *symbol,
         }
     }
+
+    fn survives_rollback(&mut self, store: &SemanticStore) -> bool {
+        match self {
+            Self::Loaded(id) => {
+                store.symbols.contains(*id)
+                    && matches!(store.symbols.get(*id).info, SymbolInfo::Complete(info) if store.types.contains(info))
+            }
+            Self::Loading(_) => false,
+            Self::Failed(id, _) => {
+                if id.is_some_and(|id| !store.symbols.contains(id)) {
+                    *id = None;
+                }
+                true
+            }
+        }
+    }
 }
 
 /// A cache of [`ClassEntry`] state keyed by [`BinaryName`], crate-private
@@ -53,13 +69,15 @@ impl ClassEntry {
 #[derive(Debug, Default)]
 pub(crate) struct ClassRepository {
     entries: HashMap<BinaryName, ClassEntry>,
+    touched_symbols: Vec<BinaryName>,
+    transaction_depth: usize,
+    #[cfg(test)]
+    pub(crate) rollback_visits: usize,
 }
 
 impl ClassRepository {
     pub(crate) fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// The class's current entry, or `None` if it is missing (never seen).
@@ -67,32 +85,52 @@ impl ClassRepository {
         self.entries.get(name)
     }
 
-    /// Drops positive entries invalidated by a matching store/session rollback.
-    /// Negative results keep their artifact context but never retain freed IDs.
-    pub(crate) fn discard_rolled_back_symbols(&mut self, store: &dotty_core::SemanticStore) {
-        self.entries.retain(|_, entry| match entry {
-            ClassEntry::Loaded(id) => {
-                store.symbols.contains(*id) && {
-                    matches!(store.symbols.get(*id).info, dotty_core::SymbolInfo::Complete(info)
-                    if store.types.contains(info))
-                }
+    /// Starts tracking symbol-bearing writes for the paired store transaction.
+    pub(crate) fn begin_transaction(&mut self) -> usize {
+        self.transaction_depth += 1;
+        self.touched_symbols.len()
+    }
+
+    pub(crate) fn finish_transaction(&mut self) {
+        self.transaction_depth -= 1;
+        if self.transaction_depth == 0 {
+            self.touched_symbols.clear();
+        }
+    }
+
+    /// Checks only entries written since this checkpoint. Retained errors
+    /// keep their provenance. An enclosing rollback must still check symbols
+    /// that survive the inner transaction.
+    pub(crate) fn rollback(&mut self, checkpoint: usize, store: &SemanticStore) {
+        for name in &self.touched_symbols[checkpoint..] {
+            #[cfg(test)]
+            {
+                self.rollback_visits += 1;
             }
-            ClassEntry::Loading(_) => false,
-            ClassEntry::Failed(id, _) => {
-                if id.is_some_and(|id| !store.symbols.contains(id)) {
-                    *id = None;
-                }
-                true
+            if self
+                .entries
+                .get_mut(name)
+                .is_some_and(|entry| !entry.survives_rollback(store))
+            {
+                self.entries.remove(name);
             }
-        });
+        }
+        self.finish_transaction();
+    }
+
+    fn set(&mut self, name: BinaryName, entry: ClassEntry) {
+        if self.transaction_depth > 0 && entry.symbol().is_some() {
+            self.touched_symbols.push(name.clone());
+        }
+        self.entries.insert(name, entry);
     }
 
     pub(crate) fn mark_loading(&mut self, name: BinaryName, symbol: SymbolId) {
-        self.entries.insert(name, ClassEntry::Loading(symbol));
+        self.set(name, ClassEntry::Loading(symbol));
     }
 
     pub(crate) fn mark_loaded(&mut self, name: BinaryName, symbol: SymbolId) {
-        self.entries.insert(name, ClassEntry::Loaded(symbol));
+        self.set(name, ClassEntry::Loaded(symbol));
     }
 
     pub(crate) fn mark_failed(
@@ -101,7 +139,7 @@ impl ClassRepository {
         symbol: Option<SymbolId>,
         error: ClassLoadFailure,
     ) {
-        self.entries.insert(name, ClassEntry::Failed(symbol, error));
+        self.set(name, ClassEntry::Failed(symbol, error));
     }
 }
 
@@ -220,5 +258,34 @@ mod tests {
             }
             other => panic!("expected Failed(Some, CircularInheritance), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn outer_rollback_clears_a_failed_id_that_survived_an_inner_rollback() {
+        let mut repository = ClassRepository::new();
+        let mut store = SemanticStore::new();
+        let name = BinaryName::from_internal("Broken");
+        let outer_store = store.checkpoint();
+        let outer = repository.begin_transaction();
+        let shell = some_symbol_id(&mut store, "Broken");
+        let inner = repository.begin_transaction();
+        repository.mark_failed(
+            name.clone(),
+            Some(shell),
+            ClassLoadFailure {
+                error: ClassLoadError::CircularInheritance(name.clone()),
+                origin: None,
+                format: None,
+            },
+        );
+        repository.rollback(inner, &store);
+        assert_eq!(repository.get(&name).unwrap().symbol(), Some(shell));
+        store.rollback_to(outer_store);
+        repository.rollback(outer, &store);
+        assert!(
+            matches!(repository.get(&name), Some(ClassEntry::Failed(None, failure))
+            if matches!(&failure.error, ClassLoadError::CircularInheritance(n) if n == &name))
+        );
+        assert!(repository.touched_symbols.is_empty());
     }
 }

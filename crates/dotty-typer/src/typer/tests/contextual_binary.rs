@@ -388,6 +388,40 @@ pub(super) fn library_resolver(
 }
 
 #[test]
+fn partial_binary_given_only_blocks_search_for_a_related_constructor() {
+    let text = "import partialbinary.Providers.partialTC
+        trait Evidence[A]
+        class C {
+          def unrelated(using x: Evidence[Int]): Int = 1
+          def related(using x: structural.TC[Int]): Int = 1
+          def first: Int = unrelated
+          def second: Int = related
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let resolver = contextual_fixture_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    for name in ["first", "second"] {
+        let (method, _) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let err = typer.type_method_definition(tree).unwrap_err();
+        if name == "first" {
+            assert!(
+                matches!(err, TyperError::MissingContextualArgument { .. }),
+                "{err:?}"
+            );
+        } else {
+            assert!(
+                matches!(err, TyperError::ExpectedExpressionConformanceUnsupported { ref error, .. } if matches!(**error, TypeRelationError::UnsupportedType { .. })),
+                "{err:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn library_not_given_inverts_each_search_and_selects_the_real_value_method() {
     let text = "import scala.util.NotGiven; class Ev; class C { def need(using m: NotGiven[Ev]): Int = 1; def free: Int = need; def present(using a: Ev): Int = need; def ambiguous(using a: Ev,b: Ev): Int = need }; object Other { class NotGiven[A]; def ordinary(using m: NotGiven[Int]): Int = 7; def shadow(using instance: NotGiven[Int]): Int = ordinary }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);

@@ -2,6 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::{ClassPathEntry, ClassPathError, ClassResource};
 use crate::jdk_module_catalog::{JdkModuleCatalog, JdkModuleCatalogError};
 use crate::jmod_class_path::JmodClassPath;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// A [`ClassPathEntry`] backed by a `$JAVA_HOME/jmods`-shaped directory:
@@ -13,11 +14,13 @@ use std::path::Path;
 /// Every `.jmod` file is opened (its ZIP central directory parsed) once,
 /// eagerly, in [`JdkClassPath::new`]. JMOD payloads remain file-backed and
 /// class entries are read on demand; only archive metadata is indexed at
-/// construction time.
+/// construction time. Class lookups visit only modules indexed for the direct
+/// package, in lexical JMOD filename order.
 pub struct JdkClassPath {
     // Keep the opened concrete entries so explicit module metadata requests
     // can use the same file-backed archives without reopening every JMOD.
     jmods: Vec<JmodClassPath>,
+    package_modules: HashMap<String, Vec<usize>>,
 }
 
 impl JdkClassPath {
@@ -39,7 +42,20 @@ impl JdkClassPath {
             .map(JmodClassPath::new)
             .collect::<Result<Vec<_>, ClassPathError>>()?;
 
-        Ok(Self { jmods })
+        let mut package_modules = HashMap::<String, Vec<usize>>::new();
+        for (index, jmod) in jmods.iter().enumerate() {
+            for package in jmod.direct_packages() {
+                package_modules
+                    .entry(package.to_owned())
+                    .or_default()
+                    .push(index);
+            }
+        }
+
+        Ok(Self {
+            jmods,
+            package_modules,
+        })
     }
 
     /// Reads and validates `classes/module-info.class` from each opened JMOD
@@ -54,8 +70,14 @@ impl JdkClassPath {
 
 impl ClassPathEntry for JdkClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
-        for jmod in &self.jmods {
-            if let Some(resource) = jmod.find_class(name)? {
+        if !name.is_path_safe() {
+            return Err(ClassPathError::invalid_binary_name(name.clone()));
+        }
+        let Some(candidates) = self.package_modules.get(name.package_path()) else {
+            return Ok(None);
+        };
+        for &index in candidates {
+            if let Some(resource) = self.jmods[index].find_class(name)? {
                 return Ok(Some(resource));
             }
         }
@@ -63,12 +85,8 @@ impl ClassPathEntry for JdkClassPath {
     }
 
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-        for jmod in &self.jmods {
-            if jmod.contains_package(package)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(crate::class_path::safe_package_segments(package)
+            && self.package_modules.contains_key(&package.join("/")))
     }
 
     fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
@@ -208,6 +226,51 @@ mod tests {
             .unwrap();
 
         assert!(resource.is_none());
+    }
+
+    #[test]
+    fn direct_package_index_limits_candidates_and_preserves_split_packages() {
+        let temp = TemporaryDirectory::new("package-candidates");
+        write_jmod(
+            temp.path(),
+            "a.jmod",
+            &[("classes/split/First.class", b"first")],
+        );
+        write_jmod(
+            temp.path(),
+            "b.jmod",
+            &[("classes/elsewhere/Only.class", b"unrelated")],
+        );
+        write_jmod(
+            temp.path(),
+            "c.jmod",
+            &[
+                ("classes/split/Last.class", b"last"),
+                ("classes/Root.class", b"root"),
+            ],
+        );
+        let cp = JdkClassPath::new(temp.path()).unwrap();
+        assert_eq!(cp.package_modules["split"], [0, 2]);
+        assert_eq!(cp.package_modules[""], [2]);
+        assert!(!cp.package_modules.contains_key("absent"));
+        for (name, expected) in [("split/Last", b"last"), ("Root", b"root")] {
+            assert_eq!(
+                cp.find_class(&BinaryName::from_internal(name))
+                    .unwrap()
+                    .unwrap()
+                    .bytes(),
+                expected
+            );
+        }
+        assert!(
+            cp.find_class(&BinaryName::from_internal("split/Missing"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cp.find_class(&BinaryName::from_internal("absent//X"))
+                .is_err()
+        );
     }
 
     #[test]

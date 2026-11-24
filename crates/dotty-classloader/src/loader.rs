@@ -11,7 +11,8 @@ use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::{
-    ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
+    ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ClassAccessFlags, FieldAccessFlags,
+    MethodAccessFlags,
 };
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
@@ -40,6 +41,19 @@ use std::rc::Rc;
 use std::time::Instant;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
+
+// Classes, fields and methods share the same three JVM visibility bits.
+fn jvm_visibility(access: u16, package: SymbolId) -> Visibility {
+    if access & ACC_PRIVATE != 0 {
+        Visibility::Private
+    } else if access & ACC_PROTECTED != 0 {
+        Visibility::Protected
+    } else if access & ACC_PUBLIC != 0 {
+        Visibility::Public
+    } else {
+        Visibility::Package(package)
+    }
+}
 
 pub(crate) struct CachedDecodedModule {
     pub(crate) resource: ClassResource,
@@ -292,7 +306,8 @@ impl TastyAliasResolutionError {
     }
 }
 
-/// Resolves an alias in a package object's TASTy and accepts its target only
+/// Resolves a direct nested class in a named object's TASTy, or a type alias
+/// in a package object. For package aliases, accepts the target only
 /// when exactly one plausible binary name is present on the configured
 /// classpath. Bare names in alias RHS trees can be relative to the defining
 /// package, so both the decoded name and that package-qualified name are
@@ -312,6 +327,34 @@ fn resolve_tasty_alias_with_probes<E: ClassPathEntry>(
     probes: Option<&RefCell<Vec<String>>>,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
     let callback_key = probes.map(|_| format!("alias|{}|{alias}", owner.as_internal()));
+    if !matches!(owner.simple_name(), "package" | "package$") {
+        // A stable term prefix alone does not prove that a selected type is
+        // a nested JVM class. Require the top-level module pair and its own
+        // direct class/trait declaration, excluding aliases and nested objects.
+        let resource = profiled_tasty_find_class(
+            class_path,
+            owner,
+            "alias",
+            callback_key.as_deref().unwrap_or_default(),
+            probes,
+        )
+        .map_err(|e| TastyAliasResolutionError::ClassPath(owner.clone(), e))?;
+        let Some(resource) = resource.filter(|r| r.format() == ClassFormat::Tasty) else {
+            return Ok(None);
+        };
+        let identity =
+            tasty_symbol::decode_module_identity(resource.bytes(), owner).map_err(|e| {
+                TastyAliasResolutionError::InvalidTasty(
+                    owner.clone(),
+                    e,
+                    resource.origin().clone(),
+                    resource.format(),
+                )
+            })?;
+        return Ok(identity
+            .filter(|module| module.nested_classes.contains(alias))
+            .map(|_| BinaryName::from_internal(format!("{}${alias}", owner.as_internal()))));
+    }
     let Some((target_owner, candidate)) =
         follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
             resolve_tasty_alias_target_with_probes(
@@ -885,6 +928,13 @@ fn error_binary_name(error: &ClassLoadError) -> Option<&BinaryName> {
     }
 }
 
+fn has_scala_marker(class_file: &ClassFile<'_>) -> bool {
+    class_file.attributes.iter().any(|a| {
+        matches!(a, Attribute::Other(raw)
+        if raw.bytes.is_empty() && class_file.constant_pool.utf8(raw.name_index) == Ok("Scala"))
+    })
+}
+
 impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Convenience for the common case: one `ClassLoader` for the whole
     /// lifetime of `store`. Bootstraps its own [`Definitions`], which is
@@ -1051,6 +1101,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             selection.field_address = address;
         }
         let aliases_before = self.snapshot_open_builtin_aliases();
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = self.project_immutable_header_field_transaction(
@@ -1070,6 +1121,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.header_field_tasty_loaded.insert(name.clone(), field);
                 self.header_field_tasty_formals.insert(name.clone(), formal);
                 self.header_field_tasty_scopes.insert(name.clone(), scope);
+                self.repository.finish_transaction();
                 Ok(field)
             }
             Err((error, entered_class)) => {
@@ -1079,7 +1131,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.rollback_to(self.store, session_checkpoint);
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -1445,6 +1497,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })
             .collect::<Result<Vec<_>, SemanticTastyLoadError>>()?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let package_segments = requested
@@ -1684,6 +1737,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.repository.mark_loaded(name.clone(), symbol);
                     self.semantic_tasty_loaded.insert(name, symbol);
                 }
+                self.repository.finish_transaction();
                 Ok(self.semantic_tasty_loaded[requested])
             }
             Err(error) => {
@@ -1694,7 +1748,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2204,6 +2258,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .values()
             .copied()
             .collect::<HashSet<_>>();
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let object_before = self
@@ -2353,6 +2408,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.semantic_tasty_generic_symbols
                         .insert(name.clone(), symbols);
                 }
+                self.repository.finish_transaction();
                 Ok(class)
             }
             Err(error) => {
@@ -2368,7 +2424,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2452,6 +2508,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SemanticTastyLoadError::for_pair_unit(&base_name, &base_resource, error)
         })?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let pair_package_scope_before = self.snapshot_pair_package_scope();
@@ -2481,6 +2538,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.repository.mark_loaded(name.clone(), symbol);
                     self.semantic_tasty_loaded.insert(name.clone(), symbol);
                 }
+                self.repository.finish_transaction();
                 Ok(if requested == &base_name {
                     base
                 } else {
@@ -2495,7 +2553,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -2544,6 +2602,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })?;
         Self::validate_option_get_or_else_unit_shape(&file, &name)?;
 
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let package_scope_before = self.snapshot_option_package_scope();
@@ -2601,6 +2660,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session
                     .record_origin(method, resource.origin().clone());
                 self.option_get_or_else_tasty_loaded = Some((root, method));
+                self.repository.finish_transaction();
                 Ok(method)
             }
             Err(error) => {
@@ -2608,7 +2668,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.rollback_to(self.store, session_checkpoint);
                 self.restore_open_builtin_aliases(aliases_before);
                 self.store.rollback_to(store_checkpoint);
-                self.repository.discard_rolled_back_symbols(self.store);
+                self.repository.rollback(repository_checkpoint, self.store);
                 Err(error)
             }
         }
@@ -5432,7 +5492,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Member signature references establish identities only; they do not
     /// recursively complete the referenced classes. Repeated calls in a
     /// shared loading session return the same module identity without adding
-    /// another declarations scope.
+    /// another declarations scope. Completing a missing shell from a different
+    /// classpath origin returns [`ClassLoadError::IdentityConflict`].
     pub fn complete_module(&mut self, name: &BinaryName) -> Result<ModuleIdentity, ClassLoadError> {
         self.complete_module_with_tasty_cache(name, &mut HashMap::new())
             .0
@@ -5463,20 +5524,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .active_load_profile
             .as_ref()
             .map_or(0, |profile| profile.nested_tasty_decode_ns);
-        let store_checkpoint = self.store.checkpoint();
-        let session_checkpoint = self.session.checkpoint();
         self.resource_observations.clear();
         self.resource_observations_complete = true;
         let was_collecting_resources = self.collect_resource_observations;
         self.collect_resource_observations = true;
         let mut decoded_cache_hit = false;
-        let result = self.complete_module_inner(name, decoded_cache, &mut decoded_cache_hit);
+        let mut ancestry = vec![BinaryName::from_internal(format!(
+            "{}$",
+            name.as_internal()
+        ))];
+        let result = self.complete_module_dependencies(
+            name,
+            decoded_cache,
+            &mut decoded_cache_hit,
+            &mut ancestry,
+            None,
+        );
         self.collect_resource_observations = was_collecting_resources;
-        if result.is_err() {
-            self.session.rollback_to(self.store, session_checkpoint);
-            self.store.rollback_to(store_checkpoint);
-            self.repository.discard_rolled_back_symbols(self.store);
-        }
         if let (Some(started), Some(profile)) = (profile_started, self.active_load_profile.as_mut())
         {
             let elapsed_ns = started.elapsed().as_nanos();
@@ -5513,11 +5577,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         )
     }
 
+    fn complete_module_dependencies(
+        &mut self,
+        name: &BinaryName,
+        decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
+        decoded_cache_hit: &mut bool,
+        ancestry: &mut Vec<BinaryName>,
+        selected_resource: Option<ClassResource>,
+    ) -> Result<ModuleIdentity, ClassLoadError> {
+        let repository_checkpoint = self.repository.begin_transaction();
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.complete_module_inner(
+            name,
+            decoded_cache,
+            decoded_cache_hit,
+            ancestry,
+            selected_resource,
+        );
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+            self.repository.rollback(repository_checkpoint, self.store);
+        } else {
+            self.repository.finish_transaction();
+        }
+        result
+    }
+
     fn complete_module_inner(
         &mut self,
         name: &BinaryName,
         decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
         decoded_cache_hit: &mut bool,
+        ancestry: &mut Vec<BinaryName>,
+        selected_resource: Option<ClassResource>,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let identity = self.ensure_module_identity_inner(name)?;
         match self.store.symbols.get(identity.module_class).info {
@@ -5580,16 +5674,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SymbolInfo::Missing => {}
         }
 
-        let lookup_started = self.collect_load_profiles.then(Instant::now);
-        let lookup_result = self.class_path.find_class(name);
-        self.record_resource_lookup(lookup_started, &lookup_result);
-        let resource = lookup_result
-            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
-            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+        let resource = match selected_resource {
+            Some(resource) => resource,
+            None => {
+                let lookup_started = self.collect_load_profiles.then(Instant::now);
+                let lookup_result = self.class_path.find_class(name);
+                self.record_resource_lookup(lookup_started, &lookup_result);
+                lookup_result
+                    .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
+                    .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?
+            }
+        };
         if resource.format() != ClassFormat::Tasty {
             return Err(ClassLoadError::IdentityConflict {
                 name: name.clone(),
                 reason: "a classfile cannot complete a Scala module class".to_owned(),
+            });
+        }
+        if self.session.origins.get(&identity.module_class) != Some(resource.origin()) {
+            return Err(ClassLoadError::IdentityConflict {
+                name: identity.module_class_name,
+                reason: "the Scala module pair belongs to a different origin".to_owned(),
             });
         }
         if self.collect_resource_observations {
@@ -5720,39 +5825,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.symbols.get_mut(identity.module_class).visibility = visibility;
         }
 
-        let mut ancestry = vec![identity.module_class_name.clone()];
-        let super_class = self.load_dependency(
-            &identity.module_class_name,
-            decoded.super_class,
-            &mut ancestry,
-        )?;
-        let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
-        for dependency in decoded.interfaces {
-            interfaces.push(self.load_dependency(
-                &identity.module_class_name,
-                dependency,
-                &mut ancestry,
-            )?);
-        }
+        let parents =
+            self.load_tasty_parents(&identity.module_class_name, &decoded, &[], ancestry)?;
 
         let origin = self.store.symbols.get(identity.module_class).origin;
+        let package = self
+            .session
+            .packages
+            .resolve(self.store, &identity.module_class_name);
         for field in &decoded.fields {
             let resolved_type = self
                 .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
             let symbol = self.enter_field(
-                identity.module_class,
+                package,
                 declarations,
                 &field.name,
                 field.flags,
                 resolved_type,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                &identity.module_class_name,
+                field.visibility.as_ref(),
+                field.contextual_flags
+                    | decoded
+                        .semantic_flags
+                        .intersection(SymbolFlags::JAVA_DEFINED),
+            );
         }
         self.enter_tasty_methods(
             &identity.module_class_name,
-            identity.module_class,
+            package,
             declarations,
             &decoded.methods,
             &[],
@@ -5835,12 +5939,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .enter(name, alias_symbol);
         }
 
-        self.complete_class(
-            identity.module_class,
-            declarations,
-            Some(super_class),
-            interfaces,
-        );
+        self.complete_class_with_parent_types(identity.module_class, declarations, parents);
         let object_type = self.type_ref(identity.module_class);
         self.session
             .record_symbol_update(self.store, identity.object);
@@ -5889,6 +5988,86 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 reason: "the TASTy file does not prove a top-level object and module class"
                     .to_owned(),
             })?;
+        self.publish_module_identity(name, &resource, decoded)
+    }
+
+    // A JVM module class can be requested before or after its Scala object.
+    // Only the same classpath origin and a proven TASTy object/class pair may
+    // redirect the binary spelling to a semantic module.
+    fn paired_module_identity(
+        &mut self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+        origin: &ClassOrigin,
+    ) -> Result<Option<(ModuleIdentity, ClassResource)>, ClassLoadError> {
+        let Some(stem) = name.as_internal().strip_suffix('$') else {
+            return Ok(None);
+        };
+        if !has_scala_marker(class_file) {
+            return Ok(None);
+        }
+        let descriptor = format!("L{};", name.as_internal());
+        if !class_file.fields.iter().any(|field| {
+            field.access_flags.is_static()
+                && class_file.constant_pool.utf8(field.name_index) == Ok("MODULE$")
+                && class_file.constant_pool.utf8(field.descriptor_index) == Ok(descriptor.as_str())
+        }) {
+            return Ok(None);
+        }
+        let object = BinaryName::from_internal(stem);
+        let lookup_started = self.collect_load_profiles.then(Instant::now);
+        let lookup = self.class_path.find_class(&object);
+        self.record_resource_lookup(lookup_started, &lookup);
+        let Some(resource) = lookup.map_err(|e| ClassLoadError::Io(object.clone(), Rc::new(e)))?
+        else {
+            if self.collect_resource_observations {
+                self.resource_observations_complete = false;
+            }
+            return Ok(None);
+        };
+        if self.collect_resource_observations {
+            self.resource_observations
+                .insert(object.clone(), resource.clone());
+        }
+        if resource.format() != ClassFormat::Tasty || resource.origin() != origin {
+            return Ok(None);
+        }
+        if let Some(identity) = self.session.modules.get(&object) {
+            if self.session.origins.get(&identity.module_class) == Some(origin)
+                && self.module_identity_is_valid(&object, identity)
+            {
+                return Ok(Some((identity.clone(), resource)));
+            }
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "the Scala module pair belongs to a different origin or store".to_owned(),
+            });
+        }
+        let Some(decoded) = tasty_symbol::decode_module_identity(resource.bytes(), &object)
+            .map_err(|e| {
+                self.dependency_failure_context =
+                    Some((object.clone(), origin.clone(), ClassFormat::Tasty));
+                ClassLoadError::InvalidTastyFile(object.clone(), e)
+            })?
+        else {
+            return Ok(None);
+        };
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.publish_module_identity(&object, &resource, decoded);
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+        }
+        result.map(|identity| Some((identity, resource)))
+    }
+
+    fn publish_module_identity(
+        &mut self,
+        name: &BinaryName,
+        resource: &ClassResource,
+        decoded: tasty_symbol::DecodedTastyModuleIdentity,
+    ) -> Result<ModuleIdentity, ClassLoadError> {
         let package = self.session.packages.resolve(self.store, name);
         let object_name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Term);
         let module_name = Name::new(
@@ -6221,7 +6400,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         let origin = resource.origin().clone();
         let header = (|| -> Result<_, ClassLoadError> {
-            Ok(match resource.format() {
+            Ok(std::ops::ControlFlow::Continue(match resource.format() {
                 ClassFormat::Class => {
                     let mut reader = Reader::new(resource.bytes());
                     let decode_started = self.collect_load_profiles.then(Instant::now);
@@ -6242,22 +6421,46 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                             actual,
                         });
                     }
+                    if let Some((identity, _)) =
+                        self.paired_module_identity(name, &class_file, &origin)?
+                    {
+                        return Ok(std::ops::ControlFlow::Break(identity.module_class));
+                    }
                     let owner = self.semantic_owner_name(name, &class_file)?;
                     let visibility = self.semantic_class_visibility_flags(name, &class_file)?;
-                    (class_file.access_flags, None, visibility, owner)
+                    (
+                        class_file.access_flags,
+                        SymbolFlags::JAVA_DEFINED,
+                        None,
+                        visibility,
+                        owner,
+                    )
                 }
                 ClassFormat::Tasty => {
                     let identity = tasty_symbol::decode_identity(resource.bytes(), name)
                         .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
-                    (identity.flags, identity.visibility, None, None)
+                    (
+                        identity.flags,
+                        identity.semantic_flags,
+                        identity.visibility,
+                        None,
+                        None,
+                    )
                 }
-            })
+            }))
         })();
-        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
-            header.inspect_err(|_| {
+        let header = header.inspect_err(|error| {
+            if error_binary_name(error.root_cause()) == Some(name) {
                 self.dependency_failure_context =
                     Some((name.clone(), origin.clone(), resource.format()));
-            })?;
+            }
+        })?;
+
+        let (flags, base_flags, tasty_visibility, classfile_visibility, semantic_owner) =
+            match header {
+                std::ops::ControlFlow::Continue(header) => header,
+                std::ops::ControlFlow::Break(symbol) => return Ok(symbol),
+            };
 
         let semantic_owner = semantic_owner
             .map(|owner| {
@@ -6375,14 +6578,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         let visibility = match tasty_visibility {
             Some(visibility) => self.tasty_visibility(name, &visibility),
-            None => match classfile_visibility.unwrap_or(flags) {
-                visibility if visibility.contains(ACC_PRIVATE) => Visibility::Private,
-                visibility if visibility.contains(ACC_PROTECTED) => Visibility::Protected,
-                visibility if visibility.is_public() => Visibility::Public,
-                _ => Visibility::Package(package),
-            },
+            None => jvm_visibility(classfile_visibility.unwrap_or(flags).0, package),
         };
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = base_flags;
         if flags.is_abstract() {
             symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
         }
@@ -6432,6 +6630,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// resource context.
     pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
         self.dependency_failure_context = None;
+        let repository_checkpoint = self.repository.begin_transaction();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = if self.collect_load_profiles {
@@ -6453,7 +6652,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
-            self.repository.discard_rolled_back_symbols(self.store);
+            self.repository.rollback(repository_checkpoint, self.store);
+        } else {
+            self.repository.finish_transaction();
         }
         result
     }
@@ -6567,6 +6768,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             None => {}
         }
 
+        if inheritance_ancestry.contains(name) {
+            return Err(ClassLoadError::CircularInheritance(name.clone()));
+        }
         if inheritance_ancestry.len() >= MAX_INHERITANCE_DEPTH {
             return Err(ClassLoadError::InheritanceDepthExceeded(name.clone()));
         }
@@ -6760,38 +6964,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn enter_class(
         &mut self,
         name: &BinaryName,
+        package: SymbolId,
         flags: ClassAccessFlags,
+        base_flags: SymbolFlags,
+        visibility: Visibility,
         origin: SymbolOrigin,
     ) -> Result<(SymbolId, ScopeId, SymbolOrigin), ClassLoadError> {
-        let owner = self.session.packages.resolve(self.store, name);
-
         let text = self.store.names.intern(name.simple_name());
         let symbol_name = Name::new(text, Namespace::Type);
-
-        // A JVM class file's own access_flags carry no ACC_PRIVATE/
-        // ACC_PROTECTED bit (JVMS §4.1 Table 4.1-A) -- those only appear on
-        // a *member* class's InnerClasses entry, not here -- so a top-level
-        // class is only ever public or package-private. `flags` is shaped
-        // exactly like a real `.class` file's access_flags for both
-        // callers (`load_uncached_class` and, via
-        // `tasty_symbol::decode_flags`, `load_uncached_tasty`), so this is
-        // correct and complete for `.class` but not the final word for
-        // `.tasty` -- see `load_uncached_tasty`'s own visibility patch,
-        // right after it calls this, for where a `.tasty` class's real
-        // (potentially more restrictive) `private`/`protected` visibility
-        // is corrected in.
         let kind = if flags.is_interface() {
             SymbolKind::Trait
         } else {
             SymbolKind::Class
         };
-        let visibility = if flags.is_public() {
-            Visibility::Public
-        } else {
-            Visibility::Package(owner)
-        };
 
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        let mut symbol_flags = base_flags;
         if flags.is_abstract() {
             symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
         }
@@ -6847,12 +7034,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             } else {
                 existing_symbol.origin
             };
-            let semantic_owner = existing_symbol.owner.unwrap_or(owner);
-            let visibility = if builtin_object {
-                visibility
-            } else {
-                existing_symbol.visibility
-            };
+            let semantic_owner = existing_symbol.owner.unwrap_or(package);
+            let links = existing_symbol.links;
             self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
                 name: symbol_name,
@@ -6864,13 +7047,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 origin: class_origin,
                 annotations: Vec::new(),
                 position: None,
-                links: SymbolLinks::default(),
+                links,
             };
             (symbol, class_origin)
         } else {
             let symbol = self.store.symbols.alloc(Symbol {
                 name: symbol_name,
-                owner: Some(owner),
+                owner: Some(package),
                 kind,
                 flags: symbol_flags,
                 visibility,
@@ -6884,32 +7067,44 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.session
             .packages
-            .enter_class(self.store, owner, symbol_name, class_symbol);
+            .enter_class(self.store, package, symbol_name, class_symbol);
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
         Ok((class_symbol, declarations, class_origin))
     }
 
-    /// Resolves `super_class`/`interfaces` into `Type::TypeRef`s and
-    /// completes `class_symbol`'s `SymbolInfo`. `declarations` was already
-    /// allocated by [`Self::enter_class`] and populated (for a `.class`
-    /// symbol) by the field/method decode loop by the time this runs.
-    fn complete_class(
+    fn load_tasty_parents(
         &mut self,
-        class_symbol: SymbolId,
-        declarations: ScopeId,
-        super_class: Option<SymbolId>,
-        interfaces: Vec<SymbolId>,
-    ) {
-        let mut parents = Vec::with_capacity(interfaces.len() + 1);
-        if let Some(parent) = super_class {
-            parents.push(self.type_ref(parent));
+        name: &BinaryName,
+        decoded: &tasty_symbol::DecodedTastyClass,
+        class_type_parameters: &[TypeId],
+        ancestry: &mut Vec<BinaryName>,
+    ) -> Result<Vec<TypeId>, ClassLoadError> {
+        let names = std::iter::once(&decoded.super_class).chain(&decoded.interfaces);
+        let mut symbols = Vec::with_capacity(1 + decoded.interfaces.len());
+        for parent in names {
+            symbols.push(self.load_dependency(name, parent.clone(), ancestry)?);
         }
-        for parent in interfaces {
-            parents.push(self.type_ref(parent));
-        }
-
-        self.complete_class_with_parent_types(class_symbol, declarations, parents);
+        Ok(symbols
+            .into_iter()
+            .enumerate()
+            .map(|(i, symbol)| {
+                if let Some(Some(tasty_symbol::DecodedTastyType::Applied { arguments, .. })) =
+                    decoded.parent_types.get(i)
+                {
+                    let tycon = self.type_ref(symbol);
+                    let args = arguments
+                        .iter()
+                        .map(|argument| {
+                            self.lower_tasty_type(name, Some(argument), &[], class_type_parameters)
+                        })
+                        .collect();
+                    self.store.types.alloc(Type::Applied { tycon, args })
+                } else {
+                    self.type_ref(symbol)
+                }
+            })
+            .collect())
     }
 
     fn complete_class_with_parent_types(
@@ -6943,33 +7138,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// resolved, so it is allocated already `SymbolInfo::Complete`.
     fn enter_field(
         &mut self,
-        class_symbol: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         field_name: &str,
         flags: FieldAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
     ) -> SymbolId {
-        // Unlike a top-level class's access_flags, a field's *can* carry
-        // ACC_PRIVATE/ACC_PROTECTED (JVMS §4.5 Table 4.5-A), so all four
-        // Java visibilities are distinguishable here.
-        let visibility = if flags.is_private() {
-            Visibility::Private
-        } else if flags.is_protected() {
-            Visibility::Protected
-        } else if flags.is_public() {
-            Visibility::Public
+        let visibility = jvm_visibility(flags.0, package);
+        let owner = self.store.scopes.get(declarations).owner;
+        let mut symbol_flags = if matches!(origin, SymbolOrigin::Classfile(_)) {
+            SymbolFlags::JAVA_DEFINED
         } else {
-            let owner = self
-                .store
-                .symbols
-                .get(class_symbol)
-                .owner
-                .expect("a loaded class always has a package owner");
-            Visibility::Package(owner)
+            SymbolFlags::EMPTY
         };
-
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
         if flags.is_static() {
             symbol_flags = symbol_flags | SymbolFlags::STATIC;
         }
@@ -6987,7 +7169,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let field_symbol = self.store.symbols.alloc(Symbol {
             name: symbol_name,
-            owner: Some(class_symbol),
+            owner,
             kind: SymbolKind::Field,
             flags: symbol_flags,
             visibility,
@@ -7526,23 +7708,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let decoded =
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
-        let (class_symbol, declarations, origin) = self.enter_class(name, decoded.flags, origin)?;
+        let package = self.session.packages.resolve(self.store, name);
+        let visibility = match &decoded.visibility {
+            Some(declared) => self.tasty_visibility(name, declared),
+            None => jvm_visibility(decoded.flags.0, package),
+        };
+        let (class_symbol, declarations, origin) = self.enter_class(
+            name,
+            package,
+            decoded.flags,
+            decoded.semantic_flags,
+            visibility,
+            origin,
+        )?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
-
-        // `enter_class` derives visibility from `ClassAccessFlags` alone,
-        // which (correctly, for `.class` — see its own doc comment) can
-        // only ever produce `Public`/`Package` here. `.tasty` actually
-        // knows the real, more restrictive `private`/`protected`
-        // distinction (see `tasty_symbol::DeclaredVisibility`'s doc
-        // comment for why `flags` itself can't carry it), so patch it in
-        // now — the same "allocate first, correct once known" pattern
-        // `resolve_semantic_owner`'s owner patch (`.class`'s nested-class
-        // path) already uses.
-        if let Some(declared) = &decoded.visibility {
-            let visibility = self.tasty_visibility(name, declared);
-            self.store.symbols.get_mut(class_symbol).visibility = visibility;
-        }
 
         let class_type_parameters = self.enter_tasty_class_type_parameters(
             name,
@@ -7551,41 +7731,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             origin,
         );
 
-        let super_class =
-            self.load_dependency(name, decoded.super_class.clone(), inheritance_ancestry)?;
-        let mut parents = Vec::with_capacity(decoded.interfaces.len() + 1);
-        let mut parent_symbols = Vec::with_capacity(decoded.interfaces.len() + 1);
-        parent_symbols.push(super_class);
-        for dependency in decoded.interfaces.iter().cloned() {
-            parent_symbols.push(self.load_dependency(name, dependency, inheritance_ancestry)?);
-        }
-        for (index, parent) in decoded
-            .parent_types
-            .iter()
-            .take(parent_symbols.len())
-            .enumerate()
-        {
-            let fallback = parent_symbols.get(index).copied();
-            let parent_type = parent
-                .as_ref()
-                .map(|parent| {
-                    self.lower_tasty_type(name, Some(parent), &[], &class_type_parameters)
-                })
-                .filter(|parent_type| !matches!(self.store.types.get(*parent_type), Type::Error(_)))
-                .or_else(|| fallback.map(|symbol| self.type_ref(symbol)));
-            if let Some(parent_type) = parent_type {
-                parents.push(parent_type);
-            }
-        }
-        if parents.len() != parent_symbols.len() {
-            parents.extend(
-                parent_symbols
-                    .iter()
-                    .skip(parents.len())
-                    .copied()
-                    .map(|symbol| self.type_ref(symbol)),
-            );
-        }
+        let parents =
+            self.load_tasty_parents(name, &decoded, &class_type_parameters, inheritance_ancestry)?;
 
         // `.tasty` annotation decoding is not built yet (unlike `.class`'s
         // `resolve_annotations`/`enter_annotations`), so every field/method
@@ -7598,19 +7745,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 &class_type_parameters,
             );
             let symbol = self.enter_field(
-                class_symbol,
+                package,
                 declarations,
                 &field.name,
                 field.flags,
                 resolved_type,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                name,
+                field.visibility.as_ref(),
+                field.contextual_flags
+                    | decoded
+                        .semantic_flags
+                        .intersection(SymbolFlags::JAVA_DEFINED),
+            );
         }
         self.enter_tasty_methods(
             name,
-            class_symbol,
+            package,
             declarations,
             &decoded.methods,
             &class_type_parameters,
@@ -7621,10 +7775,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         Ok(class_symbol)
     }
 
+    fn apply_tasty_member_modifiers(
+        &mut self,
+        symbol: SymbolId,
+        class: &BinaryName,
+        declared: Option<&tasty_symbol::DeclaredVisibility>,
+        flags: SymbolFlags,
+    ) {
+        let visibility = declared.map(|v| self.tasty_visibility(class, v));
+        let member = self.store.symbols.get_mut(symbol);
+        member.flags = member.flags | flags;
+        if let Some(visibility) = visibility {
+            member.visibility = visibility;
+        }
+    }
+
     fn enter_tasty_methods(
         &mut self,
         class_name: &BinaryName,
-        owner: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         methods: &[tasty_symbol::DecodedTastyMethod],
         class_parameters: &[TypeId],
@@ -7645,15 +7814,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let info =
                 self.lower_tasty_method_with_class_parameters(class_name, method, class_parameters);
             let symbol = self.enter_method(
-                owner,
+                package,
                 declarations,
                 &method.name,
                 method.flags,
                 info,
                 origin,
             );
-            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
+            self.apply_tasty_member_modifiers(
+                symbol,
+                class_name,
+                method.visibility.as_ref(),
+                method.semantic_flags,
+            );
             if endpoints.contains(&method.offset) {
                 entries.insert(method.offset, (symbol, info, method));
             }
@@ -8218,6 +8391,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
         }
 
+        if let Some((identity, resource)) =
+            self.paired_module_identity(name, &class_file, &resource_origin)?
+        {
+            return self
+                .complete_module_dependencies(
+                    &identity.object_name,
+                    &mut HashMap::new(),
+                    &mut false,
+                    inheritance_ancestry,
+                    Some(resource),
+                )
+                .inspect_err(|error| {
+                    if matches!(error.root_cause(), ClassLoadError::InvalidTastyFile(failing, _) if failing == name) {
+                        self.dependency_failure_context = Some((name.clone(), resource_origin.clone(), ClassFormat::Tasty));
+                    }
+                })
+                .map(|module| module.module_class);
+        }
+
         // Entered before any recursive resolution below, so a legitimate
         // mutual member-type reference back to `name` (see
         // `ensure_dependency_identity`) can reuse this same `SymbolId`. A genuine
@@ -8225,8 +8417,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // ancestry threaded through `resolve_dependency`; a dependency cycle
         // that reaches this shell outside that ancestry may reuse it.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
-        let (class_symbol, declarations, origin) =
-            self.enter_class(name, class_file.access_flags, origin)?;
+        let access = self
+            .semantic_class_visibility_flags(name, &class_file)?
+            .unwrap_or(class_file.access_flags);
+        let package = self.session.packages.resolve(self.store, name);
+        let (class_symbol, declarations, origin) = self.enter_class(
+            name,
+            package,
+            class_file.access_flags,
+            SymbolFlags::JAVA_DEFINED,
+            jvm_visibility(access.0, package),
+            origin,
+        )?;
         self.session
             .record_origin(class_symbol, resource_origin.clone());
         self.repository.mark_loading(name.clone(), class_symbol);
@@ -8285,11 +8487,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             // Scala may add erased JVM interfaces (e.g. Comparator or Serializable)
             // before or after its declared generic parents. Match the signature
             // as an ordered subsequence, keeping each JVM-only interface raw.
-            let scala_interfaces = class_file.attributes.iter().any(|attr| {
-                matches!(attr,
-                Attribute::Other(raw) if raw.bytes.is_empty() &&
-                    class_file.constant_pool.utf8(raw.name_index) == Ok("Scala"))
-            });
+            let scala_interfaces = has_scala_marker(&class_file);
             let mut signatures = std::iter::once(&signature.superclass)
                 .chain(&signature.superinterfaces)
                 .map(|sig| (class_type_signature_binary_name(sig), sig))
@@ -8361,7 +8559,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.resolve_annotations(name, &field.attributes, &class_file.constant_pool)?;
 
             let field_symbol = self.enter_field(
-                class_symbol,
+                package,
                 declarations,
                 &field_name,
                 field.access_flags,
@@ -8413,7 +8611,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     method.access_flags.is_varargs(),
                 )?;
                 let method_symbol = self.enter_method(
-                    class_symbol,
+                    package,
                     declarations,
                     &method_name,
                     method.access_flags,
@@ -9132,10 +9330,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     Ok(self.store.types.alloc(Type::And { left, right }))
                 },
             )?;
+            let bounds = self.store.types.alloc(Type::Bounds {
+                low: self.definitions.nothing_type,
+                high,
+            });
             let text = self.store.names.intern(&parameter.name);
             type_params.push(TypeParam {
                 name: TypeName::new(text),
-                bounds: high,
+                bounds,
                 declared_variance: None,
             });
         }
@@ -9222,30 +9424,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// becomes `SymbolKind::Method`.
     fn enter_method(
         &mut self,
-        class_symbol: SymbolId,
+        package: SymbolId,
         declarations: ScopeId,
         method_name: &str,
         flags: MethodAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
     ) -> SymbolId {
-        let visibility = if flags.is_private() {
-            Visibility::Private
-        } else if flags.is_protected() {
-            Visibility::Protected
-        } else if flags.is_public() {
-            Visibility::Public
+        let visibility = jvm_visibility(flags.0, package);
+        let owner = self.store.scopes.get(declarations).owner;
+        let mut symbol_flags = if matches!(origin, SymbolOrigin::Classfile(_)) {
+            SymbolFlags::JAVA_DEFINED
         } else {
-            let owner = self
-                .store
-                .symbols
-                .get(class_symbol)
-                .owner
-                .expect("a loaded class always has a package owner");
-            Visibility::Package(owner)
+            SymbolFlags::EMPTY
         };
-
-        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
         if flags.is_static() {
             symbol_flags = symbol_flags | SymbolFlags::STATIC;
         }
@@ -9270,7 +9462,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let method_symbol = self.store.symbols.alloc(Symbol {
             name: symbol_name,
-            owner: Some(class_symbol),
+            owner,
             kind,
             flags: symbol_flags,
             visibility,
@@ -16978,8 +17170,16 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
         let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let package = loader.session.packages.resolve(loader.store, &class_name);
         let (class_symbol, declarations, origin) = loader
-            .enter_class(&class_name, decoded.flags, origin)
+            .enter_class(
+                &class_name,
+                package,
+                decoded.flags,
+                decoded.semantic_flags,
+                Visibility::Public,
+                origin,
+            )
             .expect("Option class identity should be enterable without loading its parents");
         let class_type_parameters = loader.enter_tasty_class_type_parameters(
             &class_name,
@@ -16993,7 +17193,7 @@ mod tests {
             &class_type_parameters,
         );
         let method_symbol = loader.enter_method(
-            class_symbol,
+            package,
             declarations,
             &method.name,
             method.flags,
@@ -17010,7 +17210,7 @@ mod tests {
         );
         assert_eq!(
             loader.store.symbols.get(method_symbol).flags,
-            SymbolFlags::JAVA_DEFINED | SymbolFlags::FINAL
+            SymbolFlags::FINAL
         );
 
         let Type::Poly(poly) = loader.store.types.get(method_type_id) else {
@@ -17072,6 +17272,50 @@ mod tests {
     }
 
     #[test]
+    fn set_ops_impure_function_parent_keeps_its_class_parameter_and_boolean_result() {
+        let set_ops = BinaryName::from_internal("scala/collection/SetOps");
+        let function = BinaryName::from_internal("scala/Function1");
+        let origin = ClassOrigin::Directory("fixture".into());
+        let mut resources = HashMap::new();
+        for name in [&set_ops, &function] {
+            let bytes =
+                dotty_tasty_fixture_bytes(&format!("scala3-library/{}.tasty", name.as_internal()));
+            resources.insert(name.clone(), (bytes, ClassFormat::Tasty, origin.clone()));
+        }
+        for dependency in [
+            "java/lang/Object",
+            "scala/collection/IterableOps",
+            "scala/caps/Pure",
+        ] {
+            resources.insert(
+                BinaryName::from_internal(dependency),
+                (
+                    synthetic_class(dependency, None),
+                    ClassFormat::Class,
+                    origin.clone(),
+                ),
+            );
+        }
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        let set_ops = loader.load_class(&set_ops).unwrap();
+        let function = loader.load_class(&function).unwrap();
+        let parameter = type_parameter_symbol(loader.store, set_ops, "A");
+        assert_eq!(loader.store.symbols.get(parameter).owner, Some(set_ops));
+        let parent = class_info(loader.store, set_ops).parents[2];
+        let Type::Applied { tycon, args } = loader.store.types.get(parent) else {
+            panic!("expected Function1[A, Boolean]");
+        };
+        assert_eq!(parent_symbol(loader.store, *tycon), function);
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            loader.store.types.get(args[0]).reference_symbol(),
+            Some(parameter)
+        );
+        assert_eq!(args[1], loader.definitions.boolean);
+    }
+
+    #[test]
     fn lowers_scala39_some_value_to_its_canonical_class_parameter() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -17090,8 +17334,16 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
         let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let package = loader.session.packages.resolve(loader.store, &class_name);
         let (class_symbol, declarations, origin) = loader
-            .enter_class(&class_name, decoded.flags, origin)
+            .enter_class(
+                &class_name,
+                package,
+                decoded.flags,
+                decoded.semantic_flags,
+                Visibility::Public,
+                origin,
+            )
             .expect("Some class identity should be entered");
         let class_type_parameters = loader.enter_tasty_class_type_parameters(
             &class_name,
@@ -17385,6 +17637,10 @@ mod tests {
         assert!(empty.has_term_clause);
         assert!(one.has_term_clause);
         assert!(!type_only.has_term_clause);
+        assert_eq!(
+            method("curried").term_clauses.as_deref(),
+            Some([(MethodKind::Plain, 1); 2].as_slice())
+        );
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
@@ -17632,6 +17888,342 @@ mod tests {
                 },
                 superinterfaces: vec![],
             })
+        );
+    }
+
+    #[test]
+    fn scala_class_and_field_flags_follow_tasty_in_shells_and_completed_symbols() {
+        let name = BinaryName::from_internal("audits/Ledger");
+        let entries = HashMap::from([
+            (
+                name.clone(),
+                (
+                    include_bytes!("../tests/fixtures/member_access/audits/Ledger.tasty").to_vec(),
+                    ClassFormat::Tasty,
+                ),
+            ),
+            (
+                BinaryName::from_internal("java/lang/Object"),
+                (
+                    synthetic_class("java/lang/Object", None),
+                    ClassFormat::Class,
+                ),
+            ),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            ResourceClassPath(
+                entries
+                    .into_iter()
+                    .map(|(n, (bytes, format))| {
+                        (n, (bytes, format, ClassOrigin::Directory("fixture".into())))
+                    })
+                    .collect(),
+            ),
+            &mut store,
+        );
+        let shell = loader.ensure_class_identity(&name).unwrap();
+        assert!(
+            loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::SEALED)
+        );
+        assert!(
+            !loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::JAVA_DEFINED)
+        );
+        assert_eq!(loader.load_class(&name).unwrap(), shell);
+        assert!(
+            loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::SEALED)
+        );
+        assert!(
+            !loader
+                .store
+                .symbols
+                .get(shell)
+                .flags
+                .contains(SymbolFlags::JAVA_DEFINED)
+        );
+        let scope = class_info(loader.store, shell).declarations;
+        let fields: Vec<_> = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .filter(|s| loader.store.symbols.get(*s).kind == SymbolKind::Field)
+            .collect();
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            assert!(
+                !loader
+                    .store
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::JAVA_DEFINED)
+            );
+        }
+    }
+
+    #[test]
+    fn paired_scala_module_keeps_one_identity_in_both_lookup_orders() {
+        let binary = BinaryName::from_internal("audits/Single$");
+        let object = BinaryName::from_internal("audits/Single");
+        let origin = ClassOrigin::Jar("library.jar".into());
+        for (object_first, same_origin) in [(true, true), (false, true), (false, false)] {
+            let mut resources = resources_for_module_pair(&object, &binary, &origin);
+            if !same_origin {
+                resources.get_mut(&object).unwrap().2 = ClassOrigin::Jar("other.jar".into());
+            }
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+            let shell = if object_first {
+                loader.ensure_module_identity(&object).unwrap().module_class
+            } else {
+                loader.load_class(&binary).unwrap()
+            };
+            assert_eq!(loader.ensure_class_identity(&binary).unwrap(), shell);
+            let loaded = loader.load_class(&binary).unwrap();
+            assert_eq!(loaded, shell);
+            if same_origin {
+                let pair = loader.complete_module(&object).unwrap();
+                assert_eq!(pair.module_class, loaded);
+                assert_eq!(
+                    loader.store.symbols.get(loaded).kind,
+                    SymbolKind::ModuleClass
+                );
+                assert_eq!(class_info(loader.store, loaded).class, loaded);
+                let SymbolInfo::Complete(object_type) = loader.store.symbols.get(pair.object).info
+                else {
+                    panic!("the companion term must be complete");
+                };
+                assert_eq!(
+                    loader.store.types.get(object_type).reference_symbol(),
+                    Some(loaded)
+                );
+            } else {
+                assert_eq!(loader.store.symbols.get(loaded).kind, SymbolKind::Class);
+                assert!(matches!(
+                    loader.store.symbols.get(loaded).origin,
+                    SymbolOrigin::Classfile(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn module_completion_rejects_a_different_origin_and_can_retry() {
+        let object = BinaryName::from_internal("audits/Single");
+        let binary = BinaryName::from_internal("audits/Single$");
+        let first = ClassOrigin::Jar("first.jar".into());
+        let path = |origin: &ClassOrigin| {
+            ResourceClassPath(resources_for_module_pair(&object, &binary, origin))
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            path(&first),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let pair = loader.ensure_module_identity(&object).unwrap();
+        let session = loader.into_session();
+        let mut other = ClassLoader::with_definitions(
+            path(&ClassOrigin::Jar("second.jar".into())),
+            &mut store,
+            definitions,
+            session,
+        );
+        assert!(matches!(other.complete_module(&object),
+            Err(ClassLoadError::IdentityConflict { name, .. }) if name == binary));
+        assert_eq!(other.origin(pair.module_class), Some(&first));
+        assert_eq!(
+            other.store.symbols.get(pair.module_class).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            other.store.symbols.get(pair.object).info,
+            SymbolInfo::Missing
+        );
+        let session = other.into_session();
+        let mut retry =
+            ClassLoader::with_definitions(path(&first), &mut store, definitions, session);
+        assert_eq!(retry.complete_module(&object).unwrap(), pair);
+    }
+
+    #[test]
+    fn paired_module_failure_identifies_the_malformed_tasty_resource() {
+        let binary = BinaryName::from_internal("audits/Single$");
+        let object = BinaryName::from_internal("audits/Single");
+        let origin = ClassOrigin::Jar("broken.jar".into());
+        let mut resources = resources_for_module_pair(&object, &binary, &origin);
+        resources.get_mut(&object).unwrap().0.clear();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        let failure = loader.load_class_detailed(&binary).unwrap_err();
+        assert!(
+            matches!(failure.root_cause(), ClassLoadError::InvalidTastyFile(name, _) if name == &object)
+        );
+        assert_eq!(failure.origin, Some(origin));
+        assert_eq!(failure.format, Some(ClassFormat::Tasty));
+    }
+
+    fn resources_for_module_pair(
+        object: &BinaryName,
+        binary: &BinaryName,
+        origin: &ClassOrigin,
+    ) -> HashMap<BinaryName, (Vec<u8>, ClassFormat, ClassOrigin)> {
+        let mut resources = HashMap::from([
+            (
+                binary.clone(),
+                (
+                    include_bytes!("../tests/fixtures/scala_module_parents/Single$.class").to_vec(),
+                    ClassFormat::Class,
+                    origin.clone(),
+                ),
+            ),
+            (
+                object.clone(),
+                (
+                    include_bytes!("../tests/fixtures/scala_module_parents/Single.tasty").to_vec(),
+                    ClassFormat::Tasty,
+                    origin.clone(),
+                ),
+            ),
+        ]);
+        for dependency in [
+            "java/lang/Object",
+            "audits/Base",
+            "java/io/Serializable",
+            "java/lang/String",
+        ] {
+            resources.insert(
+                BinaryName::from_internal(dependency),
+                (
+                    synthetic_class(dependency, None),
+                    ClassFormat::Class,
+                    origin.clone(),
+                ),
+            );
+        }
+        resources
+    }
+
+    #[test]
+    fn module_parent_retains_its_type_argument_through_both_entry_points() {
+        let name = BinaryName::from_internal("parents/AppliedModule");
+        let binary = BinaryName::from_internal("parents/AppliedModule$");
+        let origin = ClassOrigin::Jar("library.jar".into());
+        for binary_first in [false, true] {
+            let mut resources = HashMap::from([
+                (
+                    name.clone(),
+                    (
+                        include_bytes!(
+                            "../tests/fixtures/scala_module_parents/AppliedModule.tasty"
+                        )
+                        .to_vec(),
+                        ClassFormat::Tasty,
+                        origin.clone(),
+                    ),
+                ),
+                (
+                    binary.clone(),
+                    (
+                        include_bytes!(
+                            "../tests/fixtures/scala_module_parents/AppliedModule$.class"
+                        )
+                        .to_vec(),
+                        ClassFormat::Class,
+                        origin.clone(),
+                    ),
+                ),
+            ]);
+            for dep in ["java/lang/Object", "parents/Carrier", "parents/Element"] {
+                resources.insert(
+                    BinaryName::from_internal(dep),
+                    (
+                        synthetic_class(dep, None),
+                        ClassFormat::Class,
+                        origin.clone(),
+                    ),
+                );
+            }
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+            let id = if binary_first {
+                loader.load_class(&binary).unwrap()
+            } else {
+                loader.complete_module(&name).unwrap().module_class
+            };
+            let carrier = loader
+                .ensure_class_identity(&BinaryName::from_internal("parents/Carrier"))
+                .unwrap();
+            let element = loader
+                .ensure_class_identity(&BinaryName::from_internal("parents/Element"))
+                .unwrap();
+            let parents = &class_info(loader.store, id).parents;
+            assert_eq!(parents.len(), 2);
+            let Type::Applied { tycon, args } = loader.store.types.get(parents[1]) else {
+                panic!("expected Carrier[Element]")
+            };
+            assert_eq!(parent_symbol(loader.store, *tycon), carrier);
+            assert_eq!(args.len(), 1);
+            assert_eq!(parent_symbol(loader.store, args[0]), element);
+        }
+    }
+
+    #[test]
+    fn scala_module_keeps_its_applied_superclass_and_runtime_serializable_interface() {
+        let name = BinaryName::from_internal("audits/Single$");
+        let mut classes = HashMap::from([(
+            name.clone(),
+            include_bytes!("../tests/fixtures/scala_module_parents/Single$.class").to_vec(),
+        )]);
+        for dependency in [
+            "java/lang/Object",
+            "audits/Base",
+            "java/io/Serializable",
+            "java/lang/String",
+            "scala/runtime/ModuleSerializationProxy",
+        ] {
+            classes.insert(
+                BinaryName::from_internal(dependency),
+                synthetic_class(dependency, None),
+            );
+        }
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let class = loader.load_class(&name).unwrap();
+        let parents = &class_info(loader.store, class).parents;
+        assert_eq!(parents.len(), 2);
+        let Type::Applied { tycon, args } = loader.store.types.get(parents[0]) else {
+            panic!("expected Base[String]")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+            "Base"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "String"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, parents[1])),
+            "Serializable"
         );
     }
 
@@ -18679,6 +19271,50 @@ mod tests {
     }
 
     #[test]
+    fn completing_a_class_preserves_companion_links_in_both_load_orders() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        for module_first in [false, true] {
+            let mut store = SemanticStore::new();
+            let path = CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    name.clone(),
+                    semantic_unpickler_fixture_bytes("Both.tasty"),
+                )]))),
+                Box::new(InMemoryClassPath(HashMap::from([(
+                    BinaryName::from_internal("java/lang/Object"),
+                    synthetic_class("java/lang/Object", None),
+                )]))),
+            ]);
+            let mut loader = ClassLoader::new(path, &mut store);
+            let initial = module_first.then(|| loader.ensure_module_identity(&name).unwrap());
+            let class = loader.load_class(&name).unwrap();
+            let module = loader.ensure_module_identity(&name).unwrap();
+            if let Some(initial) = initial {
+                assert_eq!(module, initial);
+            }
+            assert_eq!(module.companion_class, Some(class));
+            assert_eq!(class_info(loader.store, class).class, class);
+            assert_eq!(
+                loader.store.symbols.get(class).links.companion,
+                Some(module.object)
+            );
+            assert_eq!(
+                loader.store.symbols.get(module.object).links.companion,
+                Some(class)
+            );
+            assert_eq!(
+                loader
+                    .store
+                    .symbols
+                    .get(module.module_class)
+                    .links
+                    .companion,
+                None
+            );
+        }
+    }
+
+    #[test]
     fn ensure_module_identity_accepts_a_standalone_object_without_inventing_a_companion() {
         let name = BinaryName::from_internal("scala/jdk/CollectionConverters");
         let bytes =
@@ -19383,6 +20019,21 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+    }
+
+    #[test]
+    fn missing_classes_do_not_revisit_cached_symbols_on_rollback() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        for i in 0..64 {
+            let name = BinaryName::from_internal(format!("absent/C{i}"));
+            for _ in 0..2 {
+                assert!(
+                    matches!(loader.load_class(&name), Err(ClassLoadError::NotFound(missing)) if missing == name)
+                );
+            }
+        }
+        assert_eq!(loader.repository.rollback_visits, 0);
     }
 
     #[test]
@@ -20735,7 +21386,7 @@ mod tests {
 
     #[test]
     fn ensure_tasty_class_identity_does_not_resolve_tasty_parents() {
-        let name = BinaryName::from_internal("Dog");
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog");
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(
             InMemoryTastyClassPath(HashMap::from([(
@@ -21179,6 +21830,54 @@ mod tests {
     }
 
     #[test]
+    fn tasty_class_selection_checks_the_package_and_immediate_owner() {
+        let bytes = include_bytes!("../tests/fixtures/tasty_identity/Shadow.tasty").to_vec();
+        for (path, valid) in [("identity/Shadow", true), ("different/Shadow", false)] {
+            let name = BinaryName::from_internal(path);
+            for shell_first in [false, true] {
+                let mut store = SemanticStore::new();
+                let mut loader = ClassLoader::new(
+                    CompositeClassPath::new(vec![
+                        Box::new(InMemoryTastyClassPath(HashMap::from([(
+                            name.clone(),
+                            bytes.clone(),
+                        )]))),
+                        Box::new(InMemoryClassPath(HashMap::from([(
+                            BinaryName::from_internal("java/lang/Object"),
+                            synthetic_class("java/lang/Object", None),
+                        )]))),
+                    ]),
+                    &mut store,
+                );
+                if valid {
+                    let shell = shell_first.then(|| loader.ensure_class_identity(&name).unwrap());
+                    let class = loader.load_class(&name).unwrap();
+                    assert_eq!(shell.unwrap_or(class), class);
+                    member_type_id(loader.store, class, "topLevel");
+                } else {
+                    if shell_first {
+                        assert!(matches!(
+                            loader.ensure_class_identity(&name),
+                            Err(ClassLoadError::InvalidTastyFile(
+                                _,
+                                tasty_symbol::TastyDecodeError::MissingTypeDef
+                            ))
+                        ));
+                    }
+                    assert!(matches!(
+                        loader.load_class(&name),
+                        Err(ClassLoadError::InvalidTastyFile(
+                            _,
+                            tasty_symbol::TastyDecodeError::MissingTypeDef
+                        ))
+                    ));
+                    assert!(!loader.session.identified.contains_key(&name));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn invalid_tasty_file_when_the_bytes_do_not_decode() {
         let mut classes = HashMap::new();
         classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
@@ -21224,7 +21923,7 @@ mod tests {
     fn dependency_failure_when_a_tasty_classes_super_class_cannot_be_found() {
         let mut classes = HashMap::new();
         classes.insert(
-            BinaryName::from_internal("Dog"),
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"),
             own_fixture_bytes("tasty_sample/Dog.tasty"),
         );
         // Deliberately omit java/lang/Object (and Animal) so resolving
@@ -21234,12 +21933,12 @@ mod tests {
 
         let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
         let error = loader
-            .load_class(&BinaryName::from_internal("Dog"))
+            .load_class(&BinaryName::from_internal("me/cytrowski/tastyfixtures/Dog"))
             .unwrap_err();
         assert!(matches!(
             error,
             ClassLoadError::DependencyFailure { owner, dependency, source }
-                if owner.as_internal() == "Dog"
+                if owner.as_internal() == "me/cytrowski/tastyfixtures/Dog"
                     && dependency.as_internal() == "java/lang/Object"
                     && matches!(*source, ClassLoadError::NotFound(_))
         ));
@@ -21258,7 +21957,7 @@ mod tests {
     fn enters_a_real_tasty_case_classs_fields_and_methods_into_the_class_declarations_scope() {
         let mut point = HashMap::new();
         point.insert(
-            BinaryName::from_internal("Point"),
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/Point"),
             dotty_tasty_fixture_bytes("case_class/Point.tasty"),
         );
 
@@ -21293,7 +21992,9 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
         let point = loader
-            .load_class(&BinaryName::from_internal("Point"))
+            .load_class(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/Point",
+            ))
             .expect("Point should load from its real .tasty fixture");
         drop(loader);
 
@@ -21388,69 +22089,19 @@ mod tests {
         assert!(message.contains("could not reduce the declared type tree to a supported shape"));
     }
 
-    /// `tasty_symbol::decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class`
-    /// already proves, at the decode level, that `tasty_symbol::decode`
-    /// preserves `scala3-library/scala/math/Ordering.tasty`'s real
-    /// private nested `Reverse`'s `PRIVATE_TAG` — this used to prove the
-    /// *loader* actually uses that too, by loading `Reverse` for real
-    /// (which also loads `Ordering` itself, `Reverse`'s declared
-    /// interface). `Ordering` itself mixes in a synthetic `Serializable`
-    /// — the same unresolvable implicit-import reference as `BigInt`'s
-    /// own `Serializable`
-    /// (`tasty_symbol::decoding_fails_when_one_of_several_mixins_is_an_unresolvable_implicit_import_reference`)
-    /// — so loading `Ordering` (and therefore `Reverse`) through a real
-    /// `ClassLoader` now fails with `UnresolvedSupertype` instead of
-    /// silently widening or narrowing any visibility, per the same
-    /// explicit-unresolved-over-misleading-guess reasoning. Asserts that
-    /// failure explicitly; this crate has no other real `.tasty` fixture
-    /// with a non-public top-level class and no unresolvable implicit-
-    /// import mixin anywhere in its dependency chain, so the loader-level
-    /// (as opposed to `tasty_symbol::decode`-level, still covered by the
-    /// `tasty_symbol` test named above) proof that
-    /// `load_uncached_tasty`'s visibility patch is actually wired up is
-    /// lost along with this fixture's usability, until either a suitable
-    /// fixture is found or real scope/import resolution (issue #7)
-    /// closes the underlying gap.
     #[test]
-    fn loading_a_private_tasty_class_fails_when_its_own_interface_has_an_unresolved_mixin() {
-        let mut tasty = HashMap::new();
-        tasty.insert(
-            BinaryName::from_internal("Reverse"),
-            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
-        );
-        tasty.insert(
-            BinaryName::from_internal("Ordering"),
-            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
-        );
-
-        let mut classes = HashMap::new();
-        for stub in [
-            "java/lang/Object",
-            "Comparator",
-            "java/util/Comparator",
-            "PartialOrdering",
-            "scala/PartialOrdering",
-            "scala/math/PartialOrdering",
-            "Serializable",
-            "scala/Serializable",
-            "java/io/Serializable",
-        ] {
-            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
-        }
-
-        let class_path = CompositeClassPath::new(vec![
-            Box::new(InMemoryTastyClassPath(tasty)),
-            Box::new(InMemoryClassPath(classes)),
-        ]);
-
+    fn a_nested_tasty_definition_is_rejected_before_its_dependencies_are_loaded() {
+        let name = BinaryName::from_internal("scala/math/Reverse");
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(class_path, &mut store);
-        let error = loader
-            .load_class(&BinaryName::from_internal("Reverse"))
-            .expect_err("Reverse should fail to load, via Ordering's own unresolved mixin");
-        drop(loader);
-
-        assert!(matches!(error, ClassLoadError::DependencyFailure { .. }));
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
+            )])),
+            &mut store,
+        );
+        assert!(matches!(loader.load_class(&name),
+            Err(ClassLoadError::InvalidTastyFile(requested, tasty_symbol::TastyDecodeError::MissingTypeDef)) if requested == name));
     }
 
     /// The generic `Iterator` mixin in `Source.tasty` is an alias owned by
@@ -21460,7 +22111,7 @@ mod tests {
     fn loading_source_tasty_resolves_iterator_through_package_alias() {
         let mut tasty = HashMap::new();
         tasty.insert(
-            BinaryName::from_internal("Source"),
+            BinaryName::from_internal("scala/io/Source"),
             dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
         );
         tasty.insert(
@@ -21485,7 +22136,7 @@ mod tests {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
         let source = loader
-            .load_class(&BinaryName::from_internal("Source"))
+            .load_class(&BinaryName::from_internal("scala/io/Source"))
             .expect("Source should load through its package-object Iterator alias");
         assert!(matches!(
             loader
@@ -21573,7 +22224,7 @@ mod tests {
     fn loading_source_reports_a_malformed_package_alias_tasty_file() {
         let resources = HashMap::from([
             (
-                BinaryName::from_internal("Source"),
+                BinaryName::from_internal("scala/io/Source"),
                 (
                     dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
                     ClassFormat::Tasty,
@@ -21594,7 +22245,7 @@ mod tests {
         let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
         loader.set_load_profile_collection(true);
         let failure = loader
-            .load_class_detailed(&BinaryName::from_internal("Source"))
+            .load_class_detailed(&BinaryName::from_internal("scala/io/Source"))
             .expect_err("malformed package alias TASTy should be reported");
         assert!(matches!(
             failure.error,
@@ -21611,7 +22262,7 @@ mod tests {
         let profile = loader
             .take_load_profiles()
             .into_iter()
-            .find(|profile| profile.root == "Source")
+            .find(|profile| profile.root == "scala/io/Source")
             .expect("failed profiled TASTy load should publish counters");
         assert_eq!(profile.tasty_decode_counters["callback_errors"], 1);
         assert_eq!(
@@ -21635,13 +22286,13 @@ mod tests {
             (
                 BinaryName::from_internal("Owner"),
                 (
-                    synthetic_class("Owner", Some("Source")),
+                    synthetic_class("Owner", Some("scala/io/Source")),
                     ClassFormat::Class,
                     ClassOrigin::Directory(PathBuf::from("/owner")),
                 ),
             ),
             (
-                BinaryName::from_internal("Source"),
+                BinaryName::from_internal("scala/io/Source"),
                 (
                     dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
                     ClassFormat::Tasty,
@@ -21683,7 +22334,7 @@ mod tests {
         assert_eq!(failure.format, Some(ClassFormat::Tasty));
 
         let calls_after_initial_failure = calls.load(Ordering::Relaxed);
-        for name in ["Owner", "Source"] {
+        for name in ["Owner", "scala/io/Source"] {
             let cached = loader
                 .load_class_detailed(&BinaryName::from_internal(name))
                 .expect_err("cached failures must retain the alias provenance");
@@ -22360,6 +23011,7 @@ mod tests {
         let class_symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample"))
             .expect("NestedSample should load");
+        let nothing = loader.definitions.nothing_type;
         drop(loader);
 
         let max_type = member_type_id(&mut store, class_symbol, "max");
@@ -22374,7 +23026,11 @@ mod tests {
         // T's bound is the implicit Object intersected with its one
         // interface bound, Comparable[T] -- same shape as a class-level
         // F-bounded type parameter (`class_bound: None` means Object).
-        let Type::And { left, right } = store.types.get(type_param.bounds) else {
+        let Type::Bounds { low, high } = store.types.get(type_param.bounds) else {
+            panic!("expected the bounds of T");
+        };
+        assert_eq!(*low, nothing);
+        let Type::And { left, right } = store.types.get(*high) else {
             panic!("expected T's bound to be an intersection with the implicit Object bound");
         };
         assert_eq!(symbol_name(&store, parent_symbol(&store, *left)), "Object");
