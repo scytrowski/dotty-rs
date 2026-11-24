@@ -113,7 +113,7 @@ impl SignatureCycle {
         &'a self,
         store: &'a SemanticStore,
     ) -> impl Iterator<Item = (SymbolId, Option<SourceSpan>)> + 'a {
-        self.path[..self.path.len() - 1].iter().map(|&id| {
+        self.participants().iter().map(|&id| {
             let position = store
                 .symbols
                 .contains(id)
@@ -125,6 +125,10 @@ impl SignatureCycle {
                 });
             (id, position)
         })
+    }
+
+    pub(crate) fn participants(&self) -> &[SymbolId] {
+        &self.path[..self.path.len() - 1]
     }
 
     /// Closed path in dependency order. The first and last symbols are equal.
@@ -214,6 +218,14 @@ impl SignatureDependencies {
     pub fn record_failure(&mut self, symbol: SymbolId) {
         self.detach(symbol);
         self.failed.insert(symbol);
+    }
+
+    /// Classifies the observed wait for one symbol without changing the graph
+    /// or releasing retries. A symbol without an outgoing wait yields `None`.
+    /// Use [`Self::blockages`] to share traversal when querying several roots.
+    pub fn blockage(&self, symbol: SymbolId) -> Option<SignatureBlockage> {
+        self.waiting_on(symbol)?;
+        Some(self.trace(symbol, &mut HashMap::new()))
     }
 
     /// Classifies still-blocked roots in input order, omitting roots without a wait.
@@ -352,6 +364,26 @@ mod tests {
             assert_eq!(cycle.path(), [a, a]);
         }
     }
+    #[test]
+    fn point_queries_distinguish_the_cycle_and_preserve_retry_order() {
+        let d = Definitions::bootstrap(&mut SemanticStore::new());
+        let (leaf, a, b, other) = (d.any_class, d.object_class, d.null_class, d.nothing_class);
+        let mut graph = SignatureDependencies::new(SignaturePhase::Headers);
+        for (id, provider) in [(leaf, a), (a, b), (b, a)] {
+            graph.record(id, BlockedOn(provider));
+        }
+        assert!(
+            matches!(graph.blockage(leaf),Some(SignatureBlockage::DependsOnCycle(c)) if c.path()==[a,b,a])
+        );
+        for (id, path) in [(a, [a, b, a]), (b, [b, a, b])] {
+            assert!(
+                matches!(graph.blockage(id),Some(SignatureBlockage::CycleMember(c)) if c.path()==path)
+            );
+        }
+        assert_eq!(graph.blockage(other), None);
+        assert_eq!(graph.record(a, Complete(d.int)), [leaf, b]);
+    }
+
     #[test]
     fn wakes_only_current_waiters_once_in_registration_order() {
         let d = Definitions::bootstrap(&mut SemanticStore::new());

@@ -668,75 +668,83 @@ ranges from the previous version cannot identify declarations in the new one.
 
 ## Follow signature dependencies between source files
 
-Use [`SignatureDependencies`] with the outcomes of
-[`NamedClassSources::try_complete_class_header`] or
-[`NamedClassSources::try_complete_member_signature`]. Keep one tracker per phase for one set of
-named files. Record attempts in observation order. The tracker borrows no
-arenas, owns no worker threads, and leaves the choice of the next file to the
-client. Drop it on edits or renaming, since a fresh session can reuse symbol IDs.
+A compiler following one provider can query [`SignatureDependencies::blockage`]
+after each blocked attempt. The query follows the recorded path from that symbol
+and leaves the retry order intact. An editor that finishes the phase can use
+[`ClassHeaderReport::blockage_report`] or [`MemberSignatureReport::blockage_report`]
+to retain the causes and source positions together.
 
-This example tries `Leaf` before `Base`, then inspects a separate two-file cycle.
+This example retries `Leaf` after its base completes, then reports a separate
+two-file cycle after releasing the semantic store.
 
 ```rust
-use dotty::{NamedClassSources, SignatureBlockage, SignatureDependencies, SignaturePhase};
+use dotty::{ClassHeaderBindings, ClassHeaderPhase, NamedClassSources, SignatureBlockage};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
-use dotty::ClassHeaderBindings;
 use dotty::typer::SignatureCompletion;
 
-let files = [
-    ("Leaf.scala", "class Leaf(x: Int) extends Base(x)"),
-    ("Base.scala", "class Base(x: Int)"),
-    ("A.scala", "class A(x: Int) extends B(x)"),
-    ("B.scala", "class B(x: Int) extends A(x)"),
-];
-# let mut store = SemanticStore::new();
-# let defs = Definitions::bootstrap(&mut store);
-# let mut packages = Packages::new();
-# let mut units = Vec::new();
-# for (i, (filename, text)) in files.into_iter().enumerate() {
-#     let source = SourceId::from_index(i as u32);
-#     let parsed = dotty::parse_source(source, text, Default::default())?.bind(&mut store.names);
-#     let file = parsed.name(filename, &mut store, &mut packages)?.into_classes(&store)?;
-#     units.push(file);
-# }
-let sources = NamedClassSources::new(&units, &store)?;
-# for (_, class) in sources.classes() {
-#     sources.complete_constructor_signature(class.symbol, &mut store, defs, &packages)?;
-# }
-# let mut arena = AstArena::new();
-# let mut bindings = ClassHeaderBindings::default();
-let mut attempt = |symbol| {
-    sources.try_complete_class_header_reported(symbol, &mut store, defs, &packages, &mut arena, &mut bindings)
-};
-let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);
+let report = {
+    let files = [
+        ("Leaf.scala", "class Leaf(x: Int) extends Base(x)"),
+        ("Base.scala", "class Base(x: Int)"),
+        ("A.scala", "class A(x: Int) extends B(x)"),
+        ("B.scala", "class B(x: Int) extends A(x)"),
+    ];
+#     let mut store = SemanticStore::new();
+#     let defs = Definitions::bootstrap(&mut store);
+#     let mut packages = Packages::new();
+#     let mut units = Vec::new();
+#     for (i, (filename, text)) in files.into_iter().enumerate() {
+#         let source = SourceId::from_index(i as u32);
+#         let parsed = dotty::parse_source(source, text, Default::default())?.bind(&mut store.names);
+#         let file = parsed.name(filename, &mut store, &mut packages)?.into_classes(&store)?;
+#         units.push(file);
+#     }
+    let sources = NamedClassSources::new(&units, &store)?;
+#     let mut arena = AstArena::new();
+#     let mut bindings = ClassHeaderBindings::default();
+    let mut phase = ClassHeaderPhase::try_prepare(
+        &sources, &mut store, defs, &packages, &mut arena, &mut bindings,
+    )?;
+    let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);
 
-let outcome = attempt(leaf)?;
-assert_eq!(outcome, SignatureCompletion::BlockedOn(base));
-assert!(headers.record(leaf, outcome).is_empty());
-assert_eq!(headers.record(base, attempt(base)?), [leaf]);
-let retry = attempt(leaf)?;
-assert!(matches!(retry, SignatureCompletion::Complete(_)));
-headers.record(leaf, retry);
+    assert_eq!(phase.attempt(leaf).unwrap().completion, SignatureCompletion::BlockedOn(base));
+    assert_eq!(phase.attempt(base).unwrap().retry, [leaf]);
+    assert!(matches!(phase.attempt(leaf).unwrap().completion, SignatureCompletion::Complete(_)));
+    phase.attempt(a).unwrap();
+    phase.attempt(b).unwrap();
+    let Some(SignatureBlockage::CycleMember(cycle)) = phase.dependencies().blockage(a) else {
+        return Err("expected a header cycle".into());
+    };
+    assert_eq!(cycle.path(), [a, b, a]);
 
-headers.record(a, attempt(a)?);
-headers.record(b, attempt(b)?);
-let blocked = headers.blockages([a, b]);
-let SignatureBlockage::CycleMember(cycle) = &blocked[0].1 else {
-    return Err("expected a header cycle".into());
+    phase.finish().blockage_report(sources.declarations(), &store)
 };
-assert_eq!(cycle.path(), [a, b, a]);
+
+assert_eq!(report.waiters().len(), 2);
+let mut cycles = report.cycles();
+let (cycle, participants) = cycles.next().unwrap();
+assert!(cycles.next().is_none());
 assert_eq!(cycle.code(), "signature.header_cycle");
+let sites: Vec<_> = participants.map(|site| (site.name.as_deref(), site.location.unwrap().source())).collect();
+assert_eq!(sites, [(Some("A"), SourceId::from_index(2)), (Some("B"), SourceId::from_index(3))]);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-When an attempt returns an error, keep the original phase error under the
-attempted symbol and call [`SignatureDependencies::record_failure`]. A waiter
-can then identify that symbol through [`SignatureBlockage::Failed`]. At the end
-of a pass, query all waiting roots together to share traversal of common
-paths. Only [`SignatureBlockage::CycleMember`] identifies a declaration taking
-part in a cycle. [`SignatureCycle::declarations`] provides the optional source
-position of each participant for reporting.
+Finishing a phase classifies waiting roots together, sharing traversal of
+common paths. Capturing the report uses those results, visits each distinct
+cycle once and copies each referenced declaration's spelling once. The
+[`SignatureBlockageReport::cycles`] iterator visits each participant once per
+cycle. Its closed symbol path is shared with the waiter causes.
+[`SignatureBlockageReport::waiters`] distinguishes cycle participants, downstream
+waiters, pending providers and failed providers. For a failed provider, publish
+the direct diagnostic retained by the phase. A missing position supplies no
+source range. Retained positions refer to the captured document versions and
+symbol IDs belong to the original session.
+
+Clients driving the lower-level completion APIs directly can record each
+outcome in [`SignatureDependencies`] and each direct rejection with
+[`SignatureDependencies::record_failure`]. Use one tracker for each phase and
+set of named files.
 
 ## Preserve one-session identity and failure contracts
 
