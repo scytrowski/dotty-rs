@@ -61,6 +61,7 @@ impl Client {
         );
         assert_eq!(init["capabilities"]["positionEncoding"], encoding);
         assert_eq!(init["capabilities"]["definitionProvider"], true);
+        assert_eq!(init["capabilities"]["referencesProvider"], true);
         assert_eq!(init["capabilities"]["textDocumentSync"]["change"], 2);
         client.notify("initialized", json!({}));
         client
@@ -143,6 +144,22 @@ impl Client {
         );
     }
 
+    fn references(
+        &mut self,
+        uri: &str,
+        line: usize,
+        column: usize,
+        include_declaration: bool,
+    ) -> Value {
+        self.request(
+            "textDocument/references",
+            json!({
+                "textDocument":{"uri":uri}, "position":{"line":line,"character":column},
+                "context":{"includeDeclaration":include_declaration}
+            }),
+        )
+    }
+
     fn definition(&mut self, origin: usize, target_line: usize, declaration: &str) {
         let reply = self.request(
             "textDocument/definition",
@@ -207,6 +224,16 @@ fn exercise(encoding: &str, take_column: usize) {
     );
     client.diagnostics(B, 1, json!([]));
     client.definition(take_column, 1, INT_METHOD);
+
+    let caller = json!({"uri": B, "range":range(1,take_column,take_column+4)});
+    let integer = json!({"uri": A, "range":range(1,6,10)});
+    assert_eq!(
+        client.references(B, 1, take_column + 1, false),
+        json!([caller])
+    );
+    assert_eq!(client.references(A, 1, 7, true), json!([integer, caller]));
+    assert_eq!(client.references(A, 2, 7, false), json!([]));
+    assert_eq!(client.references(B, 1, take_column + 4, true), Value::Null);
 
     client.edit(B, 2, range(1, take_column + 5, take_column + 7), "false");
     client.diagnostics(B, 2, json!([]));

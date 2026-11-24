@@ -1,14 +1,13 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use dotty::SourceDiagnostic;
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
-use dotty_lsp::analysis::{Document, Documents, FileResult, Problem, analyze};
+use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, error::Error, sync::Arc, thread};
+use std::{error::Error, sync::Arc, thread};
 
-type Results = BTreeMap<String, FileResult>;
 type Job = (u64, Documents);
-type Completed = (u64, Results);
+type Completed = (u64, Analysis);
 
 fn wire_range(text: &DocumentText, r: TextRange, enc: PositionEncoding) -> Option<Value> {
     let (sl, sc) = text.position(r.start(), enc)?;
@@ -51,7 +50,7 @@ fn apply_changes(
 struct Workspace {
     docs: Documents,
     revision: u64,
-    ready: Option<Results>,
+    ready: Option<Analysis>,
 }
 
 impl Workspace {
@@ -114,28 +113,50 @@ impl Workspace {
         true
     }
 
-    fn definition(&self, p: &Value, enc: PositionEncoding, links: bool) -> Option<Value> {
+    fn navigation(
+        &self,
+        method: &str,
+        p: &Value,
+        enc: PositionEncoding,
+        links: bool,
+    ) -> Option<Value> {
         let uri = p["textDocument"]["uri"].as_str()?;
         let text = &self.docs.get(uri)?.text;
         let pos = offset(text, &p["position"], enc)?;
-        let file = self.ready.as_ref()?.get(uri)?;
-        let i = file.links.partition_point(|l| l.origin.end() <= pos);
-        let link = file.links.get(i).filter(|l| l.origin.contains(pos))?;
-        let target = &self.docs.get(&link.uri)?.text;
-        let name = wire_range(target, link.name, enc)?;
+        let analysis = self.ready.as_ref()?;
+        let source = analysis.source(uri)?;
+        if method == "textDocument/references" {
+            let (method, target) = analysis.calls.method_at(source, pos)?;
+            let location = |file, range| {
+                let uri = analysis.uri(file)?;
+                Some(json!({"uri":uri, "range":wire_range(&self.docs.get(uri)?.text, range, enc)?}))
+            };
+            let mut locations = Vec::new();
+            if p["context"]["includeDeclaration"].as_bool()? {
+                locations.push(location(target.source, target.name)?);
+            }
+            for site in analysis.calls.references_to(method) {
+                locations.push(location(site.source(), site.span().range())?);
+            }
+            return Some(Value::Array(locations));
+        }
+        let call = analysis.calls.call_at(source, pos)?;
+        let target_uri = analysis.uri(call.target.source)?;
+        let target = &self.docs.get(target_uri)?.text;
+        let name = wire_range(target, call.target.name, enc)?;
         if links {
             Some(
-                json!([{"originSelectionRange":wire_range(text,link.origin,enc)?,
-                "targetUri":link.uri,"targetRange":wire_range(target,link.declaration,enc)?,"targetSelectionRange":name}]),
+                json!([{"originSelectionRange":wire_range(text,call.origin.span().range(),enc)?,
+                "targetUri":target_uri,"targetRange":wire_range(target,call.target.declaration,enc)?,"targetSelectionRange":name}]),
             )
         } else {
-            Some(json!({"uri":link.uri,"range":name}))
+            Some(json!({"uri":target_uri,"range":name}))
         }
     }
 
     fn publish(&self, conn: &Connection, enc: PositionEncoding) -> Result<(), Box<dyn Error>> {
         if let Some(files) = &self.ready {
-            for (uri, file) in files {
+            for (uri, file) in &files.files {
                 let doc = &self.docs[uri];
                 let mut diagnostics = Vec::new();
                 for problem in &file.problems {
@@ -279,9 +300,9 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
         PositionEncoding::Utf16 => "utf-16",
         PositionEncoding::Utf8 => "utf-8",
     };
-    conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
+    conn.initialize_finish(id,json!({"capabilities":{"positionEncoding":encoding,"definitionProvider":true,"referencesProvider":true,"textDocumentSync":{"openClose":true,"change":2}}}))?;
     let mut ws = Workspace {
-        ready: Some(BTreeMap::new()),
+        ready: Some(Analysis::default()),
         ..Workspace::default()
     };
     let (send, jobs) = crossbeam_channel::bounded(1);
@@ -304,7 +325,11 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
                     ws.publish(conn, enc)?;
                     for req in pending.drain(..) {
                         conn.sender.send(
-                            Response::new_ok(req.id, ws.definition(&req.params, enc, links)).into(),
+                            Response::new_ok(
+                                req.id,
+                                ws.navigation(&req.method, &req.params, enc, links),
+                            )
+                            .into(),
                         )?;
                     }
                 }
@@ -314,13 +339,20 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
                     if conn.handle_shutdown(&req)? {
                         break;
                     }
-                    if req.method != "textDocument/definition" {
+                    if !matches!(
+                        req.method.as_str(),
+                        "textDocument/definition" | "textDocument/references"
+                    ) {
                         conn.sender.send(
                             Response::new_err(req.id, -32601, "Unsupported method".into()).into(),
                         )?;
                     } else if ws.ready.is_some() {
                         conn.sender.send(
-                            Response::new_ok(req.id, ws.definition(&req.params, enc, links)).into(),
+                            Response::new_ok(
+                                req.id,
+                                ws.navigation(&req.method, &req.params, enc, links),
+                            )
+                            .into(),
                         )?;
                     } else {
                         pending.push(req);
@@ -376,6 +408,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_lsp::analysis::FileResult;
+    use std::collections::BTreeMap;
 
     #[test]
     fn unlocated_problem_is_logged_without_a_document_marker() {
@@ -401,9 +435,10 @@ mod tests {
                     ),
                 )),
             })],
-            ..FileResult::default()
         };
-        assert!(ws.accept((ws.revision, [(uri.into(), file)].into())));
+        let mut analysis = Analysis::default();
+        analysis.files.insert(uri.into(), file);
+        assert!(ws.accept((ws.revision, analysis)));
         let (server, client) = Connection::memory();
         ws.publish(&server, enc).unwrap();
         let mut notifications: BTreeMap<_, _> = client
@@ -444,8 +479,10 @@ mod tests {
         assert!(ws.changed("textDocument/didChange", &edit, enc));
         assert_eq!(ws.docs[id].text.as_str(), "😀long!");
         assert!(!ws.changed("textDocument/didChange", &edit, enc));
-        assert!(ws.accept((2, [(id.into(), FileResult::default())].into())));
-        assert!(!ws.accept((1, BTreeMap::new())));
-        assert!(ws.ready.unwrap().contains_key(id));
+        let mut analysis = Analysis::default();
+        analysis.files.insert(id.into(), FileResult::default());
+        assert!(ws.accept((2, analysis)));
+        assert!(!ws.accept((1, Analysis::default())));
+        assert!(ws.ready.unwrap().files.contains_key(id));
     }
 }
