@@ -45,8 +45,10 @@ where
         let range = self.current().span;
         self.advance();
         let tree = self.alloc_from(mark, kind);
-        if matches!(self.ast.get(tree).kind, TreeKind::Select(_)) {
-            self.member_names.select(tree, range);
+        match self.ast.get(tree).kind {
+            TreeKind::Select(_) => self.member_names.term(tree, range, true),
+            TreeKind::Ident(_) => self.member_names.term(tree, range, false),
+            _ => {}
         }
         self.last_written_name = Some((tree, range));
         tree

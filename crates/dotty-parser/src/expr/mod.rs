@@ -503,8 +503,10 @@ where
             TreeKind::Assign(Assign { lhs, rhs }),
             Some(SourceSpan::new(self.source_id, Span::without_point(range))),
         );
-        if matches!(self.ast.get(lhs).kind, TreeKind::Select(_)) {
-            self.member_names.assign(lhs, tree);
+        match self.ast.get(lhs).kind {
+            TreeKind::Select(_) => self.member_names.assign(lhs, tree, true),
+            TreeKind::Ident(_) => self.member_names.assign(lhs, tree, false),
+            _ => {}
         }
         tree
     }
