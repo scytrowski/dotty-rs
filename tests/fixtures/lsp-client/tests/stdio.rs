@@ -619,10 +619,18 @@ fn implicit_clause_warning_survives_repair_of_an_independent_error() {
             "range": range(4, boolean, boolean + 5), "severity": 1, "source": "dotty",
             "code":"typer.application_argument_type_mismatch", "message": "Expected Int, found Boolean"
         });
+        let lookup = json!({"textDocument":{"uri":uri}, "position":{"line":3,"character":one-2}});
+        let target = json!([{"originSelectionRange":range(3,one-2,one-1),"targetUri":uri,
+            "targetSelectionRange":range(1,6,7), "targetRange":range(1,2,"  def f(implicit x: Int): Int = x".len())}]);
         client.open(uri, text);
         client.diagnostics(uri, 1, json!([warning, error]));
+        assert_eq!(
+            client.request("textDocument/definition", lookup.clone()),
+            target
+        );
         client.edit(uri, 2, range(4, boolean, boolean + 5), "42");
         client.diagnostics(uri, 2, json!([warning]));
+        assert_eq!(client.request("textDocument/definition", lookup), target);
         client.edit(uri, 3, range(3, one, one), "using ");
         client.diagnostics(uri, 3, json!([]));
         client.shutdown();
