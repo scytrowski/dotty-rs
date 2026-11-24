@@ -59,10 +59,13 @@ Ranges use UTF-8 byte offsets and include the delimiters on backquoted names.
 Entries are in source order and retain their tree IDs when a detached parse
 is bound to a session.
 
-`ParseResult::member_names` retains written selector tokens and names of simple
+`ParseResult::member_names` retains bare expression identifiers, selector tokens and names of simple
 value definitions and explicit constructor accessors. In `a.count = b.count`
 both tokens refer to their respective selection trees, and the left selection
-also refers to the assignment tree. The typer supplies the selected symbol.
+also refers to the assignment tree. Likewise, in `count = count + n` the
+first identifier records its assignment and the second records the read site.
+`selections()` stays selector-only. `term_names()` visits identifiers and
+selectors in written order. The typer supplies the referenced symbol.
 
 Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
 standalone source pattern through the real pattern productions, requires the

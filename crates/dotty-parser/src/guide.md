@@ -35,7 +35,8 @@ parse result when reproducing dialect-dependent behavior.
 
 
 For navigation, `ParseResult::member_names` exposes half-open UTF-8 name
-tokens for written selections and simple value declarations, including
-explicit constructor accessors. A selection on the left of a direct assignment
-also identifies its enclosing assignment tree. Resolve field identity against
+tokens for bare expression identifiers, explicit selections and simple value
+declarations, including explicit constructor accessors. A bare identifier
+or selector on the left of a direct assignment identifies its assignment tree.
+[`SourceMemberNames::term_names`] visits both expression forms in token order. Resolve field identity against
 the committed typed bindings for the same parse.

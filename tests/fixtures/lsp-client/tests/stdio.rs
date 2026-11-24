@@ -967,6 +967,32 @@ fn own_and_external_field_navigation_share_declarations_in_both_encodings() {
                 }])
             );
         }
+        let parameter = col(3, "other");
+        let use_site = col(3, "count");
+        // Equal-length replacement keeps the written usage at exactly the same position.
+        for (version, replacement) in [(2, "count"), (3, "other")] {
+            client.edit(A, version, range(3, parameter, parameter + 5), replacement);
+            client.diagnostics(A, version, json!([]));
+            let (expected_sites, expected_definition) = if version == 2 {
+                (json!([keep, get]), Value::Null)
+            } else {
+                (
+                    json!([read, keep, get]),
+                    json!([{
+                        "originSelectionRange":read["range"], "targetUri":A,
+                        "targetSelectionRange":count["range"], "targetRange":range(1,2,lines[1].len())
+                    }]),
+                )
+            };
+            assert_eq!(
+                client.references(A, 4, col(4, "count"), false),
+                expected_sites
+            );
+            assert_eq!(
+                client.request("textDocument/definition", lookup(3, use_site)),
+                expected_definition
+            );
+        }
         client.shutdown();
     }
 }
