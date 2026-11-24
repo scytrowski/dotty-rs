@@ -535,3 +535,66 @@ fn direct_phase_reports_capture_constructor_and_parent_argument_sites() {
         assert_eq!(r.len(), 5);
     }
 }
+
+#[test]
+fn cycle_report_groups_disjoint_cycles_even_when_the_first_root_is_a_dependent() {
+    let mut store = SemanticStore::new();
+    let mut packages = Packages::new();
+    let unit = named(
+        3,
+        "class Leaf; class A; class B; class Solo",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&unit], &store).unwrap();
+    let [leaf, a, b, solo] = unit.classes() else {
+        panic!()
+    };
+    for phase in [
+        crate::SignaturePhase::Headers,
+        crate::SignaturePhase::Members,
+    ] {
+        let mut graph = crate::SignatureDependencies::new(phase);
+        for (root, provider) in [(leaf, a), (a, b), (b, a), (solo, solo)] {
+            graph.record(root.symbol, SignatureCompletion::BlockedOn(provider.symbol));
+        }
+        let blockages = graph.blockages([leaf.symbol, solo.symbol, b.symbol, a.symbol]);
+        let report = match phase {
+            crate::SignaturePhase::Headers => crate::ClassHeaderReport {
+                ready: vec![],
+                failures: vec![],
+                remaining: vec![],
+                blockages,
+            }
+            .blockage_report(sources.declarations(), &store),
+            crate::SignaturePhase::Members => crate::MemberSignatureReport {
+                ready: vec![],
+                failures: vec![],
+                remaining: vec![],
+                blockages,
+            }
+            .blockage_report(sources.declarations(), &store),
+        };
+        let mut cycles = report.cycles();
+        assert_eq!(cycles.len(), 2);
+        let (cycle, sites) = cycles.next().unwrap();
+        assert_eq!(cycle.phase(), phase);
+        assert_eq!(cycle.path(), [a.symbol, b.symbol, a.symbol]);
+        assert_eq!(
+            sites
+                .map(|s| s.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        let (cycle, sites) = cycles.next().unwrap();
+        assert_eq!(cycle.path(), [solo.symbol, solo.symbol]);
+        assert_eq!(sites.map(|s| s.symbol).collect::<Vec<_>>(), [solo.symbol]);
+        assert_eq!(
+            cycle.code(),
+            match phase {
+                crate::SignaturePhase::Headers => "signature.header_cycle",
+                crate::SignaturePhase::Members => "signature.member_cycle",
+            }
+        );
+    }
+}

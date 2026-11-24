@@ -48,6 +48,9 @@ pub use class_field_signatures::{
     ClassFieldSignatureCompletion, ClassFieldSignatureError, try_complete_class_field_signatures,
 };
 
+mod signature_blockage_report;
+pub use signature_blockage_report::SignatureBlockageReport;
+
 mod signature_dependencies;
 pub use signature_dependencies::{
     SignatureAttempt, SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,

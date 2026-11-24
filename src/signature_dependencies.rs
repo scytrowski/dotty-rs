@@ -113,7 +113,7 @@ impl SignatureCycle {
         &'a self,
         store: &'a SemanticStore,
     ) -> impl Iterator<Item = (SymbolId, Option<SourceSpan>)> + 'a {
-        self.path[..self.path.len() - 1].iter().map(|&id| {
+        self.participants().iter().map(|&id| {
             let position = store
                 .symbols
                 .contains(id)
@@ -125,6 +125,10 @@ impl SignatureCycle {
                 });
             (id, position)
         })
+    }
+
+    pub(crate) fn participants(&self) -> &[SymbolId] {
+        &self.path[..self.path.len() - 1]
     }
 
     /// Closed path in dependency order. The first and last symbols are equal.
