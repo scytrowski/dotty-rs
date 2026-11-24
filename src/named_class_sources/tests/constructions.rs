@@ -159,5 +159,14 @@ fn partial_bodies_publish_only_successful_method_and_field_constructions() {
             expected.push(site.origin);
         }
     }
+    for (pos, _) in text.match_indices("(): Base") {
+        expected.push(
+            index
+                .method_type_at(caller.source(), pos as u32 + 4)
+                .unwrap()
+                .origin,
+        );
+    }
+    expected.sort_by_key(|s| s.span().range().start());
     assert_eq!(index.references_to(base.classes()[0].symbol), expected);
 }
