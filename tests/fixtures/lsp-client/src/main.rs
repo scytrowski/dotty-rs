@@ -140,10 +140,7 @@ impl Workspace {
                 let mut diagnostics = Vec::new();
                 for problem in &file.problems {
                     let report = match problem {
-                        Problem::Typing(error) => &error.render(),
-                        Problem::Header(error) => &unlocated_error(error),
-                        Problem::MemberSignature(error) => &unlocated_error(error),
-                        Problem::Body(error) => &unlocated_error(error),
+                        Problem::Semantic(diagnostic) => &render_semantic(diagnostic),
                         Problem::Preparation(d) => &d.render(),
                         Problem::Sources(error) => &unlocated_error(error),
                         Problem::Scan(error) => &unlocated_error(error),
@@ -165,9 +162,6 @@ impl Workspace {
                             severity: DiagnosticSeverity::Error,
                             message: format!("Waiting for the signature of '{name}'"),
                         },
-                        Problem::TyperWarning { source, diagnostic } => {
-                            &SourceDiagnostic::from_typer_warning(*source, diagnostic)
-                        }
                     };
                     publish_problem(conn, uri, &doc.text, enc, report, &mut diagnostics)?;
                 }
@@ -175,6 +169,26 @@ impl Workspace {
             }
         }
         Ok(())
+    }
+}
+
+fn render_semantic(report: &dotty::SemanticDiagnostic) -> SourceDiagnostic {
+    match &report.issue {
+        dotty::SemanticIssue::Typing(error) => error.render(),
+        dotty::SemanticIssue::Warning { source, diagnostic } => {
+            SourceDiagnostic::from_typer_warning(*source, diagnostic)
+        }
+        dotty::SemanticIssue::InvalidClass(id)
+            if report.phase == dotty::SemanticPhase::ClassBody =>
+        {
+            unlocated_error(&dotty::ClassBodyError::InvalidClass(*id))
+        }
+        dotty::SemanticIssue::InvalidClass(id) => {
+            unlocated_error(&dotty::ClassHeaderError::InvalidClass(*id))
+        }
+        dotty::SemanticIssue::InvalidMember(id) => {
+            unlocated_error(&dotty::MemberSignatureError::InvalidMember(*id))
+        }
     }
 }
 
@@ -371,15 +385,22 @@ mod tests {
         let open = json!({"textDocument":{"uri":uri,"version":1,"text":"class A {}"}});
         assert!(ws.changed("textDocument/didOpen", &open, enc));
         let file = FileResult {
-            problems: vec![Problem::Typing(dotty::ReportedTyperError::from_typer(
-                dotty::typer::TyperError::ApplicationArityMismatch {
-                    source: dotty::core::SourceId::from_index(0),
-                    tree_index: 0,
-                    expected: 0,
-                    actual: 1,
-                },
-                |_| None,
-            ))],
+            problems: vec![Problem::Semantic(dotty::SemanticDiagnostic {
+                phase: dotty::SemanticPhase::MemberSignature,
+                class: None,
+                owner_source: None,
+                issue: dotty::SemanticIssue::Typing(Box::new(
+                    dotty::ReportedTyperError::from_typer(
+                        dotty::typer::TyperError::ApplicationArityMismatch {
+                            source: dotty::core::SourceId::from_index(0),
+                            tree_index: 0,
+                            expected: 0,
+                            actual: 1,
+                        },
+                        |_| None,
+                    ),
+                )),
+            })],
             ..FileResult::default()
         };
         assert!(ws.accept((ws.revision, [(uri.into(), file)].into())));

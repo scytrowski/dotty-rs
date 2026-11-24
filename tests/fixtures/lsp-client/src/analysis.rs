@@ -6,12 +6,10 @@ use dotty::core::{
     AstArena, Definitions, DocumentText, NoResolver, Packages, SemanticStore, SourceId, SourceSpan,
     SymbolId, TextRange, Typed,
 };
-use dotty::typer::TyperDiagnostic;
 use dotty::{
-    CheckedClassBodies, ClassBodyError, ClassHeaderBindings, ClassHeaderError, ClassHeaderPhase,
-    MemberSignatureError, MemberSignatureFailure, MemberSignaturePhase, NamedClassSource,
-    NamedClassSources, NamedClassSourcesError, PreparationDiagnostic, ReportedTyperError,
-    SignatureBlockage, SignatureCycle, SourceDeclarationIndex,
+    CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
+    NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
+    SemanticDiagnostic, SignatureBlockage, SignatureCycle, SourceDeclarationIndex,
 };
 
 #[derive(Clone)]
@@ -23,10 +21,7 @@ pub struct Document {
 pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
-    Typing(ReportedTyperError),
-    Header(ClassHeaderError),
-    MemberSignature(MemberSignatureError),
-    Body(ClassBodyError),
+    Semantic(SemanticDiagnostic),
     Sources(NamedClassSourcesError),
     Scan(dotty::lexer::RawLexerError),
     Preparation(PreparationDiagnostic),
@@ -39,24 +34,17 @@ pub enum Problem {
         name: String,
         location: Option<SourceSpan>,
     },
-    TyperWarning {
-        source: SourceId,
-        diagnostic: TyperDiagnostic,
-    },
 }
 
-fn typing_problem(owner: SourceId, report: ReportedTyperError) -> (SourceId, Problem) {
-    (
-        report.location().map_or(owner, |span| span.source()),
-        Problem::Typing(report),
-    )
-}
-
-fn header_problem(owner: SourceId, error: ClassHeaderError) -> (SourceId, Problem) {
-    match error {
-        ClassHeaderError::Typing(report) => typing_problem(owner, *report),
-        invalid @ ClassHeaderError::InvalidClass(_) => (owner, Problem::Header(invalid)),
-    }
+fn record_semantic(results: &mut HashMap<SourceId, FileResult>, diagnostic: SemanticDiagnostic) {
+    let source = diagnostic
+        .source()
+        .expect("only indexed declarations were scheduled");
+    results
+        .get_mut(&source)
+        .expect("open source document")
+        .problems
+        .push(Problem::Semantic(diagnostic));
 }
 
 pub struct Link {
@@ -192,12 +180,9 @@ fn analyze_sources(
     }
     let headers = phase.finish();
     for failure in headers.failures {
-        let owner = failure.source.expect("attempted an indexed class");
-        let (source, problem) = header_problem(owner, failure.error);
-        results.get_mut(&source).unwrap().problems.push(problem);
+        record_semantic(results, failure.into_semantic_diagnostic());
     }
     report_blockages(headers.blockages, sources.declarations(), store, results);
-    let ast_for = |id: SourceId| sources.file(id).map(NamedClassSource::ast);
     let selection = sources
         .member_signatures(headers.ready.iter().copied(), store)
         .expect("classes from this session's header report");
@@ -210,43 +195,14 @@ fn analyze_sources(
     }
     let (signatures, work) = signatures.finish_with_body_work();
     for failure in signatures.failures {
-        let (file, problem) = match failure {
-            MemberSignatureFailure::Typing {
-                declaration,
-                report,
-            } => typing_problem(declaration.source, *report),
-            MemberSignatureFailure::InvalidMember(id) => {
-                let owner = sources
-                    .declarations()
-                    .get(id)
-                    .expect("selected member")
-                    .source;
-                (
-                    owner,
-                    Problem::MemberSignature(MemberSignatureError::InvalidMember(id)),
-                )
-            }
-        };
-        results.get_mut(&file).unwrap().problems.push(problem);
+        record_semantic(results, failure.into_semantic_diagnostic(sources));
     }
     report_blockages(signatures.blockages, sources.declarations(), store, results);
     let mut bodies = CheckedClassBodies::default();
     for symbol in headers.ready {
-        let source = sources.class(symbol).unwrap().0.source();
         let (body, report) = work.check(symbol, store, defs, packages, &mut arena, NoResolver);
-        for (source, diagnostic) in report.diagnostics {
-            results
-                .get_mut(&source)
-                .unwrap()
-                .problems
-                .push(Problem::TyperWarning { source, diagnostic });
-        }
-        for error in report.errors {
-            let (file, problem) = match error.into_reported_error(ast_for) {
-                Ok(report) => typing_problem(source, report),
-                Err(invalid) => (source, Problem::Body(invalid)),
-            };
-            results.get_mut(&file).unwrap().problems.push(problem);
+        for diagnostic in report.into_semantic_diagnostics(sources) {
+            record_semantic(results, diagnostic);
         }
         bodies.record(body).expect("one check per ready class");
     }
@@ -284,6 +240,7 @@ fn analyze_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty::SemanticIssue;
     use dotty::typer::TyperError;
     use dotty::{SyntaxDiagnostic, source_declarations::DeclarationDiagnostic};
 
@@ -357,7 +314,10 @@ mod tests {
         assert!(cycle["Leaf.scala"].problems.is_empty());
         let [
             Problem::Cycle { cycle: a, .. },
-            Problem::Typing(independent),
+            Problem::Semantic(SemanticDiagnostic {
+                issue: SemanticIssue::Typing(independent),
+                ..
+            }),
         ] = cycle["Consumer.scala"].problems.as_slice()
         else {
             panic!("expected one participant and one independent call")
@@ -372,7 +332,13 @@ mod tests {
         let failed = check("class Provider { def value(): Int = 1; val seed = value(1) }");
         assert!(failed["Leaf.scala"].problems.is_empty());
         for file in ["Consumer.scala", "Provider.scala"] {
-            let [Problem::Typing(call)] = failed[file].problems.as_slice() else {
+            let [
+                Problem::Semantic(SemanticDiagnostic {
+                    issue: SemanticIssue::Typing(call),
+                    ..
+                }),
+            ] = failed[file].problems.as_slice()
+            else {
                 panic!("expected only the original call in {file}")
             };
             assert_eq!(call.code(), Some("typer.application_arity_mismatch"));
@@ -388,7 +354,14 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let files = analyze(&[(uri.into(), doc)].into());
-        let [Problem::TyperWarning { source, diagnostic }] = files[uri].problems.as_slice() else {
+        let [
+            Problem::Semantic(SemanticDiagnostic {
+                issue: SemanticIssue::Warning { source, diagnostic },
+                phase: dotty::SemanticPhase::ClassBody,
+                ..
+            }),
+        ] = files[uri].problems.as_slice()
+        else {
             panic!("expected one typed warning");
         };
         assert_eq!(*source, SourceId::from_index(0));
@@ -441,7 +414,13 @@ mod tests {
         };
         let results = analyze(&[(uri.to_owned(), doc)].into());
         let file = &results[uri];
-        let [Problem::Typing(error)] = file.problems.as_slice() else {
+        let [
+            Problem::Semantic(SemanticDiagnostic {
+                issue: SemanticIssue::Typing(error),
+                ..
+            }),
+        ] = file.problems.as_slice()
+        else {
             panic!("expected only the Bad constructor error");
         };
         assert!(matches!(error.error(), TyperError::TypeNameNotFound { .. }));
@@ -462,7 +441,13 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
-        let [Problem::Typing(problem)] = files[uri].problems.as_slice() else {
+        let [
+            Problem::Semantic(SemanticDiagnostic {
+                issue: SemanticIssue::Typing(problem),
+                ..
+            }),
+        ] = files[uri].problems.as_slice()
+        else {
             panic!("expected one constructor diagnostic");
         };
         let range = problem
@@ -494,7 +479,11 @@ mod tests {
         let problems = &files[uri].problems;
         assert_eq!(problems.len(), 2);
         for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
-            let Problem::Typing(problem) = problem else {
+            let Problem::Semantic(SemanticDiagnostic {
+                issue: SemanticIssue::Typing(problem),
+                ..
+            }) = problem
+            else {
                 panic!("expected an error")
             };
             let range = problem.location().unwrap().span().range();
@@ -529,7 +518,11 @@ mod tests {
         let files = analyze(&docs);
         let caller = &files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
-        let Problem::Typing(d) = &caller.problems[0] else {
+        let Problem::Semantic(SemanticDiagnostic {
+            issue: SemanticIssue::Typing(d),
+            ..
+        }) = &caller.problems[0]
+        else {
             panic!("expected a type error")
         };
         let range = d.location().expect("argument position").span().range();

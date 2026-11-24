@@ -67,16 +67,17 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                 bodies.record(body).unwrap();
                 continue;
             }
-            let errors = report.errors;
-            assert!(!errors.is_empty());
-            if errors.len() == class.members.len() {
+            assert!(!report.errors.is_empty());
+            if report.errors.len() == class.members.len() {
                 assert_eq!(store.checkpoint(), before);
                 assert_eq!(resolver.checkpoint(), resolver_before);
             }
-            for failure in errors {
-                let call = failure
-                    .into_reported_error(|source| sources.file(source).map(|unit| unit.ast()))
-                    .unwrap();
+            for diagnostic in report.into_semantic_diagnostics(&sources) {
+                assert_eq!(diagnostic.phase, dotty::SemanticPhase::ClassBody);
+                assert_eq!(diagnostic.owner_source, Some(b));
+                let dotty::SemanticIssue::Typing(call) = diagnostic.issue else {
+                    panic!("body typing failure")
+                };
                 let member = call.member().unwrap();
                 let declaration = sources.declarations().member(member).unwrap();
                 assert_eq!(declaration.class, class.symbol);

@@ -35,19 +35,47 @@ impl ClassBodyError {
         self,
         ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
     ) -> Result<crate::ReportedTyperError, Self> {
-        let Self::Member {
-            class,
-            member,
-            error,
-        } = self
-        else {
-            return Err(self);
+        self.capture(ast_for).map_err(Self::InvalidClass)
+    }
+
+    /// Captures a fail-fast body rejection against its original named sources.
+    /// Its class and member remain available if the source lookup has no AST.
+    pub fn into_semantic_diagnostic(
+        self,
+        sources: &crate::NamedClassSources<'_>,
+    ) -> crate::SemanticDiagnostic {
+        let class = match &self {
+            Self::InvalidClass(id) => *id,
+            Self::Member { class, .. } => *class,
         };
-        let (ClassMember::Field(decl) | ClassMember::Method(decl)) = member;
+        let issue = match self.capture(|id| sources.file(id).map(|file| file.ast())) {
+            Ok(error) => crate::SemanticIssue::Typing(Box::new(error)),
+            Err(id) => crate::SemanticIssue::InvalidClass(id),
+        };
+        crate::SemanticDiagnostic {
+            phase: crate::SemanticPhase::ClassBody,
+            owner_source: sources.declarations().get(class).map(|d| d.source),
+            class: Some(class),
+            issue,
+        }
+    }
+
+    fn capture<'a>(
+        self,
+        ast_for: impl FnMut(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::ReportedTyperError, SymbolId> {
+        let (class, member, error) = match self {
+            Self::Member {
+                class,
+                member,
+                error,
+            } => (class, member.symbol(), error),
+            Self::InvalidClass(class) => return Err(class),
+        };
         Ok(crate::ReportedTyperError::from_class(
             error,
             class,
-            Some(decl.symbol),
+            Some(member),
             ast_for,
         ))
     }
@@ -189,10 +217,40 @@ pub struct ClassBodyCheck {
 /// Owned diagnostics from one check, independent of the retained semantic data.
 #[derive(Debug)]
 pub struct ClassBodyReport {
+    class: SymbolId,
     /// One typed error per rejected member in declaration order, or one invalid class error.
     pub errors: Vec<ClassBodyError>,
     /// Committed typer diagnostics with their source IDs, in emission order.
     pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
+}
+
+impl ClassBodyReport {
+    /// Moves committed warnings in emission order, then direct member errors in
+    /// declaration order, into owned semantic diagnostics. Supply the named
+    /// files from this check's session to capture error ranges. Missing files
+    /// leave errors without a range. Skipped members produce no body diagnostic.
+    /// Each yielded item can outlive the iterator and the source arenas.
+    pub fn into_semantic_diagnostics(
+        self,
+        sources: &crate::NamedClassSources<'_>,
+    ) -> impl Iterator<Item = crate::SemanticDiagnostic> {
+        let class = self.class;
+        let owner_source = sources.declarations().get(class).map(|d| d.source);
+        let warnings = self
+            .diagnostics
+            .into_iter()
+            .map(move |(source, diagnostic)| crate::SemanticDiagnostic {
+                phase: crate::SemanticPhase::ClassBody,
+                owner_source,
+                class: Some(class),
+                issue: crate::SemanticIssue::Warning { source, diagnostic },
+            });
+        warnings.chain(
+            self.errors
+                .into_iter()
+                .map(move |error| error.into_semantic_diagnostic(sources)),
+        )
+    }
 }
 
 /// Committed mappings from a partially checked class, identified by its original symbol.
@@ -263,6 +321,7 @@ impl ClassBodyCheck {
         (
             body,
             ClassBodyReport {
+                class: self.class,
                 errors,
                 diagnostics: self.diagnostics,
             },

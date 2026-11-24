@@ -21,9 +21,9 @@ diagnostic. The test runs with UTF-8 and UTF-16 positions and an emoji before
 the call. A second scenario checks an inferred field in Consumer.scala against
 a method in Provider.scala in both file orders. Signature and body checking
 report one error at `provider.value(1)`. Editing it to `provider.value()`
-clears the diagnostic. The fixture uses
-`ReportedTyperError` for both call and ordinary typing failures. The member signature report supplies the enclosing class, member and captured
-byte range. Body errors provide the same context through `into_reported_error`.
+clears the diagnostic. The fixture routes direct semantic diagnostics by
+`SemanticDiagnostic::source`. It keeps the typed payload until publication,
+including warnings from successful members of a partial class.
 The fixture calls `finish_with_body_work` and checks signature-ready members.
 A rejected signature supplies its own marker. Independent checked methods
 retain their navigation bindings while a dependency is broken. The fixture

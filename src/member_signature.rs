@@ -27,6 +27,15 @@ pub enum MemberSignatureError {
 }
 
 impl MemberSignatureError {
+    /// Captures a direct failure using the original named sources. This is the
+    /// same diagnostic produced by moving a failure out of the phase report.
+    pub fn into_semantic_diagnostic(
+        self,
+        sources: &crate::NamedClassSources<'_>,
+    ) -> crate::SemanticDiagnostic {
+        crate::MemberSignatureFailure::capture(self, sources).into_semantic_diagnostic(sources)
+    }
+
     /// Captures the original typer error, its declaring class and member, and a
     /// validated source span. For an invalid declaration, returns the original
     /// phase failure without consulting the AST. Use files from the naming session.

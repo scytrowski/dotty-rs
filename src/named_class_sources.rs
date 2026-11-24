@@ -167,6 +167,7 @@ impl<'a> NamedClassSources<'a> {
             self.complete_constructor_signature(class, store, definitions, packages)
                 .map(|_| class)
                 .map_err(|error| crate::ClassHeaderFailure {
+                    phase: crate::SemanticPhase::Constructor,
                     class,
                     source: self.class(class).map(|(file, _)| file.source()),
                     error,
@@ -883,19 +884,31 @@ mod tests {
             )
             .into_parts();
         assert!(matches!(body, CheckedClassBody::Partial(_)));
-        let mut errors = report.errors.into_iter();
-        assert!(
-            matches!(errors.next(), Some(ClassBodyError::Member{error:TyperError::ApplicationArgumentTypeMismatch{actual,expected,..},..}) if actual == defs.boolean && expected == defs.int)
-        );
-        assert!(errors.next().is_none());
-        let [(id, warning)] = report.diagnostics.as_slice() else {
-            panic!("expected good call warning")
+        let diagnostics: Vec<_> = report.into_semantic_diagnostics(&sources).collect();
+        let [warning, error] = diagnostics.as_slice() else {
+            panic!("one warning and one body error")
         };
-        assert_eq!(
-            (*id, warning.issue()),
-            (file.source(), &TyperWarning::ImplicitClauseWithoutUsing)
+        for report in [warning, error] {
+            assert_eq!(
+                (report.phase, report.class, report.owner_source),
+                (
+                    crate::SemanticPhase::ClassBody,
+                    Some(class.symbol),
+                    Some(file.source())
+                )
+            );
+        }
+        assert!(
+            matches!(&warning.issue, crate::SemanticIssue::Warning {diagnostic,..} if diagnostic.issue() == &TyperWarning::ImplicitClauseWithoutUsing)
         );
-        drop(report.diagnostics);
+        assert!(
+            matches!(&error.issue, crate::SemanticIssue::Typing(e) if matches!(e.error(), TyperError::ApplicationArgumentTypeMismatch{actual,expected,..} if *actual == defs.boolean && *expected == defs.int))
+        );
+        for (report, token) in [(warning, "1"), (error, "false")] {
+            let r = report.location().unwrap().span().range();
+            assert_eq!(&text[r.start() as usize..r.end() as usize], token);
+        }
+        drop(diagnostics);
         let mut bodies = crate::CheckedClassBodies::default();
         bodies.record(body).unwrap();
         assert_eq!(

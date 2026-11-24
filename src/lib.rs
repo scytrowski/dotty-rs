@@ -78,6 +78,9 @@ pub use class_preparation::{ClassPreparation, PreparationDiagnostic};
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
 
+mod semantic_diagnostic;
+pub use semantic_diagnostic::{SemanticDiagnostic, SemanticIssue, SemanticPhase};
+
 mod reported_typer_error;
 pub use reported_typer_error::ReportedTyperError;
 

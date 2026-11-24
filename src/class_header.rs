@@ -40,12 +40,30 @@ impl std::error::Error for ClassHeaderError {
 /// The owner can differ from the site of a recursively encountered typer error.
 #[derive(Debug)]
 pub struct ClassHeaderFailure {
+    /// Operation which rejected the request, including constructor preparation.
+    pub phase: crate::SemanticPhase,
     /// Symbol supplied by the caller in this naming session.
     pub class: SymbolId,
     /// Declaring file if the requested symbol is an indexed ordinary class.
     pub source: Option<SourceId>,
     /// Original structural or typing failure, retaining any captured source range.
     pub error: ClassHeaderError,
+}
+
+impl ClassHeaderFailure {
+    /// Moves the original rejection into a semantic report. The requesting
+    /// class and its declaring file are retained independently of the error site.
+    pub fn into_semantic_diagnostic(self) -> crate::SemanticDiagnostic {
+        crate::SemanticDiagnostic {
+            phase: self.phase,
+            owner_source: self.source,
+            class: Some(self.class),
+            issue: match self.error {
+                ClassHeaderError::Typing(report) => crate::SemanticIssue::Typing(report),
+                ClassHeaderError::InvalidClass(id) => crate::SemanticIssue::InvalidClass(id),
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for ClassHeaderFailure {
