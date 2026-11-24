@@ -187,3 +187,98 @@ fn class_references_interleave_constructor_types_with_method_types_parents_and_a
         }
     }
 }
+
+#[test]
+fn constructor_annotations_follow_signature_success_independently_of_siblings_and_bodies() {
+    use crate::{ClassHeaderError, ResolvedMemberIndex};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let base = named(9, "class Base", &mut store, &mut packages);
+    let text = "class Good(x: Base) { def only(n: Int): Int = n; def broken(): Int = only(false) }; class Bad(a: Base, b: Missing)";
+    let file = named(3, text, &mut store, &mut packages);
+    let [good, bad] = file.classes() else {
+        panic!("two constructors")
+    };
+    let class = base.classes()[0].symbol;
+    let sources = NamedClassSources::new([&base, &file], &store).unwrap();
+    let mut arena = AstArena::new();
+    let mut bodies = crate::CheckedClassBodies::default();
+    let before = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    assert!(before.references_to(class).is_empty());
+    for id in [class, good.symbol] {
+        sources
+            .complete_constructor_signature(id, &mut store, defs, &packages)
+            .unwrap();
+    }
+    let ClassHeaderError::Typing(error) = sources
+        .complete_constructor_signature(bad.symbol, &mut store, defs, &packages)
+        .unwrap_err()
+    else {
+        panic!("typing error")
+    };
+    assert_eq!(
+        (error.class(), error.member()),
+        (Some(bad.symbol), Some(bad.constructor))
+    );
+    assert!(
+        matches!(error.error(), TyperError::TypeNameNotFound {source,..} if *source == file.source())
+    );
+    let pos = error.location().unwrap();
+    let range = pos.span().range();
+    assert_eq!(pos.source(), file.source());
+    assert_eq!(
+        &text[range.start() as usize..range.end() as usize],
+        "Missing"
+    );
+    let check = |index: ResolvedMemberIndex| {
+        let site = index
+            .constructor_type_at(file.source(), text.find("Base").unwrap() as u32)
+            .unwrap();
+        assert_eq!((site.constructor, site.class), (good.constructor, class));
+        assert_eq!(index.references_to(class), &[site.origin]);
+        for offset in [text.rfind("Base").unwrap() as u32, range.start()] {
+            assert!(index.symbol_at(file.source(), offset).is_none());
+        }
+    };
+    check(ResolvedMemberIndex::build(
+        &sources, &bodies, &arena, &store,
+    ));
+    let mut headers = ClassHeaderBindings::default();
+    for id in [class, good.symbol] {
+        assert!(matches!(
+            sources.try_complete_class_header(
+                id,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                &mut headers
+            ),
+            Ok(SignatureCompletion::Complete(_))
+        ));
+    }
+    for method in good.methods() {
+        assert!(matches!(
+            sources.try_complete_member_signature(method.symbol, &mut store, defs, &packages),
+            Ok(SignatureCompletion::Complete(_))
+        ));
+    }
+    let (body, report) = sources
+        .check_class_body(
+            good.symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(
+        matches!(report.errors.as_slice(),[crate::ClassBodyError::Member {member,error:TyperError::ApplicationArgumentTypeMismatch {argument_index:0,..},..}] if member.symbol()==good.methods().last().unwrap().symbol)
+    );
+    bodies.record(body).unwrap();
+    check(ResolvedMemberIndex::build(
+        &sources, &bodies, &arena, &store,
+    ));
+}
