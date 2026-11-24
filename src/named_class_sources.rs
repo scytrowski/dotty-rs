@@ -493,6 +493,7 @@ mod tests {
     mod members;
     mod own_fields;
     mod parameters;
+    mod parent_navigation;
 
     fn prepare_constructors(
         sources: &NamedClassSources<'_>,

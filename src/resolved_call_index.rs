@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug)]
 struct IndexedFile {
+    class_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     locals: Vec<(SymbolId, SourceMemberTarget)>,
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
     parameters: Vec<ParameterDeclaration>,
@@ -29,7 +30,7 @@ struct IndexedFile {
 pub struct SourceSymbolSite {
     /// Canonical identity to pass to [`ResolvedMemberIndex::references_to`].
     pub symbol: SymbolId,
-    /// Semantic category: method, field, parameter, or local.
+    /// Semantic category: class, method, field, parameter, or local.
     pub kind: SymbolKind,
     /// Declaration range and exact written name token.
     pub target: SourceMemberTarget,
@@ -55,7 +56,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
         .filter(|(span, _)| span.span().range().contains(offset))
 }
 
-/// Index of source methods, fields, named method and constructor parameters, and ordinary method locals in one session.
+/// Index of ordinary source classes, methods, fields, named method and constructor parameters, and ordinary method locals in one session.
 /// Usage sites require committed body or header bindings.
 /// The index owns its locations and borrows no arenas. Symbols and byte ranges
 /// are meaningful only for the original session and document versions.
@@ -112,8 +113,29 @@ impl ResolvedMemberIndex {
                     continue;
                 }
             };
+            let mut class_declarations = Vec::new();
             let mut field_declarations = Vec::new();
             for class in file.classes() {
+                if let Some(name) = file.named().syntax().member_names.class_name(class.tree) {
+                    // The navigation index has validated this canonical tree and its class range.
+                    let declaration = file.ast().get(class.tree).position.unwrap().span().range();
+                    if name.start() < declaration.start() || name.end() > declaration.end() {
+                        let error = crate::source_declarations::DeclarationError::InvalidBinding {
+                            source: file.source(),
+                            tree: class.tree,
+                        };
+                        index.diagnostics.push(error.diagnostic(file.ast()));
+                    } else {
+                        class_declarations.push((
+                            class.symbol,
+                            SourceMemberTarget {
+                                source: file.source(),
+                                declaration,
+                                name,
+                            },
+                        ));
+                    }
+                }
                 for field in class
                     .constructor_fields
                     .iter()
@@ -139,9 +161,15 @@ impl ResolvedMemberIndex {
             field_declarations.sort_unstable_by_key(|(_, target)| target.name.start());
             let parameters =
                 crate::source_parameters::declarations(file, store, &mut index.diagnostics);
-            valid_files.push((file, navigation, field_declarations, parameters));
+            valid_files.push((
+                file,
+                navigation,
+                class_declarations,
+                field_declarations,
+                parameters,
+            ));
         }
-        for (file, navigation, field_declarations, parameters) in valid_files {
+        for (file, navigation, class_declarations, field_declarations, parameters) in valid_files {
             let mut calls = Vec::new();
             // A target navigation error is reported once when visiting its file.
             for call in sources
@@ -210,6 +238,7 @@ impl ResolvedMemberIndex {
             index.files.insert(
                 file.source(),
                 IndexedFile {
+                    class_declarations,
                     locals,
                     local_uses,
                     parameters,
@@ -364,31 +393,34 @@ impl ResolvedMemberIndex {
         declaration_at(&self.files.get(&source)?.field_declarations, offset)
     }
 
-    /// Looks up a written method, field, ordinary parameter or method local by half-open
+    /// Looks up an ordinary class, method, field, parameter or method local by half-open
     /// UTF-8 byte offset. Local declarations and all usage sites require committed
     /// bindings from their phase. Other supported declarations are available before body checking.
     /// Unsupported declarations yield `None`. The result can be retained with the index.
     pub fn symbol_at(&self, source: SourceId, offset: u32) -> Option<SourceSymbolSite> {
         let file = self.files.get(&source)?;
-        let (symbol, kind, target, usage) = if let Some(c) = self.call_at(source, offset) {
-            (c.method, SymbolKind::Method, c.target, Some(c.origin))
-        } else if let Some(f) = self.field_at(source, offset) {
-            (f.field, SymbolKind::Field, f.target, Some(f.origin))
-        } else if let Some((origin, (slot, _))) = use_at(&file.local_uses, offset) {
-            let (id, target) = file.locals[slot];
-            (id, SymbolKind::Local, target, Some(origin))
-        } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
-            (id, SymbolKind::Local, target, None)
-        } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
-            (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
-        } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
-            (id, SymbolKind::Method, target, None)
-        } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
-            (id, SymbolKind::Field, target, None)
-        } else {
-            let p = self.parameter_declaration_at(source, offset)?;
-            (p.symbol(), SymbolKind::Parameter, p.target(), None)
-        };
+        let (symbol, kind, target, usage) =
+            if let Some((id, target)) = declaration_at(&file.class_declarations, offset) {
+                (id, SymbolKind::Class, target, None)
+            } else if let Some(c) = self.call_at(source, offset) {
+                (c.method, SymbolKind::Method, c.target, Some(c.origin))
+            } else if let Some(f) = self.field_at(source, offset) {
+                (f.field, SymbolKind::Field, f.target, Some(f.origin))
+            } else if let Some((origin, (slot, _))) = use_at(&file.local_uses, offset) {
+                let (id, target) = file.locals[slot];
+                (id, SymbolKind::Local, target, Some(origin))
+            } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
+                (id, SymbolKind::Local, target, None)
+            } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
+                (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
+            } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
+                (id, SymbolKind::Method, target, None)
+            } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
+                (id, SymbolKind::Field, target, None)
+            } else {
+                let p = self.parameter_declaration_at(source, offset)?;
+                (p.symbol(), SymbolKind::Parameter, p.target(), None)
+            };
         Some(SourceSymbolSite {
             symbol,
             kind,
