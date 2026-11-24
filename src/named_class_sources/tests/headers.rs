@@ -450,3 +450,88 @@ fn fail_fast_phase_stops_before_the_next_constructor() {
     ));
     assert_eq!(store.symbols.info(last.constructor), &SymbolInfo::Missing);
 }
+
+#[test]
+fn direct_phase_reports_capture_constructor_and_parent_argument_sites() {
+    use crate::{ClassHeaderPhase, SemanticIssue, SemanticPhase};
+    for reverse in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ctor_text = "class Bad(x: Missing)";
+        let child_text = "class Child(start: Boolean) extends Base(start)";
+        let bad = named(8, ctor_text, &mut store, &mut packages);
+        let child = named(3, child_text, &mut store, &mut packages);
+        let base = named(21, "class Base(start: Int)", &mut store, &mut packages);
+        let sources = NamedClassSources::new(
+            if reverse {
+                [&base, &child, &bad]
+            } else {
+                [&bad, &child, &base]
+            },
+            &store,
+        )
+        .unwrap();
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        let failure = ClassHeaderPhase::try_prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        )
+        .unwrap_err();
+        let d = failure.into_semantic_diagnostic();
+        assert_eq!(
+            (d.phase, d.class, d.member(), d.owner_source),
+            (
+                SemanticPhase::Constructor,
+                Some(bad.classes()[0].symbol),
+                Some(bad.classes()[0].constructor),
+                Some(bad.source())
+            )
+        );
+        let r = d.location().unwrap().span().range();
+        assert_eq!(&ctor_text[r.start() as usize..r.end() as usize], "Missing");
+        let mut phase = ClassHeaderPhase::prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        );
+        let mut queue: std::collections::VecDeque<_> =
+            sources.classes().map(|(_, c)| c.symbol).collect();
+        while let Some(id) = queue.pop_front() {
+            if let Ok(attempt) = phase.attempt(id) {
+                queue.extend(attempt.retry);
+            }
+        }
+        let reports: Vec<_> = phase
+            .finish()
+            .failures
+            .into_iter()
+            .map(|f| f.into_semantic_diagnostic())
+            .collect();
+        assert_eq!(reports.len(), 2);
+        let d = &reports[1];
+        assert_eq!(
+            (d.phase, d.class, d.member(), d.source()),
+            (
+                SemanticPhase::ClassHeader,
+                Some(child.classes()[0].symbol),
+                None,
+                Some(child.source())
+            )
+        );
+        assert!(
+            matches!(&d.issue, SemanticIssue::Typing(e) if matches!(e.error(), TyperError::ApplicationArgumentTypeMismatch{..}))
+        );
+        let r = d.location().unwrap().span().range();
+        assert_eq!(r.start() as usize, child_text.rfind("start").unwrap());
+        assert_eq!(r.len(), 5);
+    }
+}

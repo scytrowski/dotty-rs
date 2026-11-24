@@ -165,6 +165,7 @@ impl<'s, 'file> ClassHeaderPhase<'s, 'file> {
             Err(error) => {
                 let source = self.sources.class(class).map(|(file, _)| file.source());
                 let index = self.record_failure(ClassHeaderFailure {
+                    phase: crate::SemanticPhase::ClassHeader,
                     class,
                     source,
                     error,

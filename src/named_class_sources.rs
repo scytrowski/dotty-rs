@@ -167,6 +167,7 @@ impl<'a> NamedClassSources<'a> {
             self.complete_constructor_signature(class, store, definitions, packages)
                 .map(|_| class)
                 .map_err(|error| crate::ClassHeaderFailure {
+                    phase: crate::SemanticPhase::Constructor,
                     class,
                     source: self.class(class).map(|(file, _)| file.source()),
                     error,
