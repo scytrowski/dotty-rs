@@ -1910,3 +1910,51 @@ fn shadowing_a_bare_call_removes_signature_help_until_undo() {
         client.shutdown();
     }
 }
+
+#[test]
+fn changing_provider_visibility_refreshes_signature_help_in_an_unedited_document() {
+    const OPS: &str = "file:///fixture/Ops.scala";
+    let methods = format!("/* 😀 */ {PICK_OVERLOADS}");
+    let line = "  def run(ops: Ops): Int = /* 😀 */ ops.pick(1, true, 2, ";
+    let first = pick_signature("n: Int", "tail: Boolean");
+    let second = pick_signature("flag: Boolean", "tail: Int");
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![OPS]);
+        client.open(OPS, &methods);
+        client.open(B, &format!("class Use {{\n{line}\n}}"));
+        let edit = token_column(enc, &methods, "def pick");
+        let before_third = token_column(enc, line, "true,") + "true,".len();
+        let cursor = token_column(enc, line, "2, ") + "2, ".len();
+        for version in 1..=3 {
+            match version {
+                2 => client.edit(OPS, version, range(0, edit, edit), "private "),
+                3 => client.edit(OPS, version, range(0, edit, edit + "private ".len()), ""),
+                _ => {}
+            }
+            expect_missing_argument(&mut client, 1);
+            if version > 1 {
+                client.diagnostics(OPS, version, json!([]));
+            }
+            let accessible = if version == 2 {
+                vec![&second]
+            } else {
+                vec![&first, &second]
+            };
+            assert_eq!(
+                client.signature_help(B, 1, before_third),
+                json!({"signatures":accessible,"activeParameter":2})
+            );
+            let expected = if version == 2 {
+                Value::Null
+            } else {
+                json!({"signatures":[&first],"activeParameter":3})
+            };
+            assert_eq!(
+                client.signature_help(B, 1, cursor),
+                expected,
+                "{enc}, provider version {version}"
+            );
+        }
+        client.shutdown();
+    }
+}

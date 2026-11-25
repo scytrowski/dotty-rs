@@ -55,6 +55,13 @@ also exercises the same call inside `val result = …`. Completing the fourth
 argument and closing the call selects the predicted overload and clears the
 syntax diagnostic.
 
+Bare calls follow lexical shadowing. Adding `val pick = 0` before the call
+suppresses its signature help until undo. Member calls also follow access at
+the use site. Changing one overload in `Ops.scala` to `private` removes it
+from the other open document’s candidates. The other overload stays visible
+for compatible prefixes, and undo restores the original suggestions at the
+same cursor position.
+
 The references request accepts positions on direct calls, supported field accesses, method parameter
 reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,
 bare uses of the enclosing class’s fields, and its private body fields written
