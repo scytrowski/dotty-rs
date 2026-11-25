@@ -1116,7 +1116,22 @@ impl SourceTyper<'_> {
         if infer_result {
             self.inferred_method_results_in_progress.remove(&method);
         }
-        result
+        let signature = result?;
+        // A caller in another file owns neither the parameter AST nor its lexical context.
+        // Publish first-clause getter signatures with the selected source method.
+        if definition.type_params.is_empty()
+            && let [clause] = definition.value_param_clauses.as_slice()
+            && matches!(self.store.types.get(signature), Type::Method(m) if m.kind == MethodKind::Plain)
+        {
+            for (ordinal, tree) in clause.iter().enumerate() {
+                if matches!(&self.arena.get(*tree).kind, TreeKind::ValDef(p) if p.rhs.is_some())
+                    && let Some(getter) = self.store.default_getter(method, ordinal)
+                {
+                    self.complete_signature_parameter(getter, info_journal)?;
+                }
+            }
+        }
+        Ok(signature)
     }
 
     pub(super) fn complete_method_signature_body(

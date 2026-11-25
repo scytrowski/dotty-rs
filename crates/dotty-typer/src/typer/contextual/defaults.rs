@@ -99,6 +99,26 @@ impl SourceTyper<'_> {
         Ok(getter)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::typer) fn apply_first_clause_default(
+        &mut self,
+        function: &mut TreeId<Typed>,
+        getter: SymbolId,
+        expected: TypeId,
+        shared: &mut Vec<TreeId<Typed>>,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let call = DefaultCall {
+            root: *function,
+            applications: Vec::new(),
+            getter,
+            expected,
+        };
+        self.apply_default_getter(call, function, shared, context, tree_index, journal)
+    }
+
     /// Fill omitted trailing arguments using the selected getter and its earlier clauses.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::typer) fn trailing_ordinary_defaults(

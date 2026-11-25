@@ -285,3 +285,43 @@ fn ordinary_named_arguments_retain_the_selected_formals_in_written_order() {
         );
     }
 }
+
+#[test]
+fn ordinary_calls_record_only_the_getters_used_by_each_call() {
+    let code = "class Ops {
+        def diff(left: Int = 9, right: Int = 4): Int = left - right
+        def three(a: Int, b: Int = 4, c: Int): Int = a - b + c
+        def all(): Int = diff()
+        def trailing(): Int = diff(9)
+        def first(): Int = diff(right = 4)
+        def middle(): Int = three(c = 3, a = 9)
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(code);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, target, written, omitted) in [
+        ("all", "diff", &[][..], &[0, 1][..]),
+        ("trailing", "diff", &[0], &[1]),
+        ("first", "diff", &[1], &[0]),
+        ("middle", "three", &[2, 0], &[1]),
+    ] {
+        client_result(&mut t, &parsed, site).unwrap();
+        let (method, _) = method_definition_and_rhs(&parsed, t.store(), t.index, source, target);
+        let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, site);
+        let binding = t
+            .typed_index
+            .named_call(t.typed_index.get(source, rhs).unwrap())
+            .unwrap();
+        assert_eq!(&*binding.written_to_formal, written);
+        assert_eq!(
+            binding
+                .defaulted
+                .iter()
+                .map(|a| (a.formal, t.store().default_getter_origin(a.getter)))
+                .collect::<Vec<_>>(),
+            omitted
+                .iter()
+                .map(|&i| (i, Some((method, i))))
+                .collect::<Vec<_>>()
+        );
+    }
+}
