@@ -348,26 +348,41 @@ impl LocalMethodIndex {
     }
 }
 
+struct LocalValueInitializer {
+    symbol: SymbolId,
+    name: TermName,
+    scope: ScopeId,
+    rhs: TreeId<Untyped>,
+    declared_type: Option<TypeId>,
+    entered: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ExpressionScopeStep<'a> {
+    Block(&'a [TreeId<Untyped>]),
+    Initializer(TreeId<Untyped>, &'a ValDef<Untyped>, Option<SourceSpan>),
+}
+
 // Keep back-pointers while walking so sibling expressions share their outer
 // prefix. Materialize only the path to the requested tree, outermost first.
-fn expression_block_prefixes(
+fn expression_scope_path(
     arena: &AstArena<Untyped>,
     root: TreeId<Untyped>,
     target: TreeId<Untyped>,
-) -> Option<Vec<&[TreeId<Untyped>]>> {
-    let mut paths: Vec<(Option<usize>, &[TreeId<Untyped>])> = Vec::new();
+) -> Option<Vec<ExpressionScopeStep<'_>>> {
+    let mut paths: Vec<(Option<usize>, ExpressionScopeStep<'_>)> = Vec::new();
     let mut work = vec![(root, None)];
     let mut visited = HashSet::new();
     while let Some((tree, mut path)) = work.pop() {
         if tree == target {
-            let mut prefixes = Vec::new();
+            let mut steps = Vec::new();
             while let Some(index) = path {
-                let (outer, stats) = paths[index];
-                prefixes.push(stats);
+                let (outer, step) = paths[index];
+                steps.push(step);
                 path = outer;
             }
-            prefixes.reverse();
-            return Some(prefixes);
+            steps.reverse();
+            return Some(steps);
         }
         if !visited.insert(tree) {
             continue;
@@ -397,8 +412,21 @@ fn expression_block_prefixes(
                     continue;
                 }
                 for (n, &child) in block.stats.iter().chain([&block.expr]).enumerate() {
-                    work.push((child, Some(paths.len())));
-                    paths.push((path, &block.stats[..n]));
+                    let block_path = Some(paths.len());
+                    paths.push((path, ExpressionScopeStep::Block(&block.stats[..n])));
+                    work.push((child, block_path));
+                    if n < block.stats.len() {
+                        let node = arena.try_get(child)?;
+                        if let TreeKind::ValDef(value) = &node.kind
+                            && let Some(rhs) = value.rhs
+                        {
+                            work.push((rhs, Some(paths.len())));
+                            paths.push((
+                                block_path,
+                                ExpressionScopeStep::Initializer(child, value, node.position),
+                            ));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1249,15 +1277,14 @@ impl SourceTyper<'_> {
         }
     }
 
-    pub(in crate::typer) fn type_local_value(
+    fn prepare_local_value_initializer(
         &mut self,
         tree: TreeId<Untyped>,
         definition: &dotty_core::ast::ValDef<Untyped>,
         position: Option<SourceSpan>,
         context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
-    ) -> Result<TreeId<Typed>, TyperError> {
+    ) -> Result<LocalValueInitializer, TyperError> {
         let symbol_flags =
             local_value_flags_or_defer(self.source, tree, &definition.metadata.modifiers, true)?;
         let contextual = !symbol_flags
@@ -1381,9 +1408,43 @@ impl SourceTyper<'_> {
             }
             self.initializing_local_symbols.insert(symbol);
         }
+        Ok(LocalValueInitializer {
+            symbol,
+            name: local_name,
+            scope,
+            rhs,
+            declared_type,
+            entered: enter_before_initializer,
+        })
+    }
+
+    pub(in crate::typer) fn type_local_value(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::ValDef<Untyped>,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let LocalValueInitializer {
+            symbol,
+            name,
+            scope,
+            rhs,
+            declared_type,
+            entered,
+        } = self.prepare_local_value_initializer(
+            tree,
+            definition,
+            position,
+            context,
+            info_journal,
+        )?;
+        let inferred = declared_type.is_none();
         let typed_rhs_result =
             self.type_value_expression_inner(rhs, context, info_journal, new_mappings);
-        if enter_before_initializer {
+        if entered {
             self.initializing_local_symbols.remove(&symbol);
         }
         let typed_rhs = typed_rhs_result?;
@@ -1425,8 +1486,11 @@ impl SourceTyper<'_> {
             .set_info(symbol, SymbolInfo::Complete(declared_type));
         // Contextual declarations become lexically visible only after the
         // initializer and type checks have succeeded, like inferred values.
-        if !enter_before_initializer {
-            self.store.scopes.get_mut(scope).enter(name, symbol);
+        if !entered {
+            self.store
+                .scopes
+                .get_mut(scope)
+                .enter(*name.as_name(), symbol);
         }
         self.local_symbols.insert((self.source, tree), symbol);
         self.local_scopes.insert((self.source, tree), scope);
@@ -1438,7 +1502,7 @@ impl SourceTyper<'_> {
         };
         Ok(self.typed_arena.alloc(Tree {
             kind: TreeKind::ValDef(ValDef {
-                name: local_name,
+                name,
                 tpt: typed_tpt,
                 rhs: Some(typed_rhs),
                 metadata: (),
@@ -2322,7 +2386,10 @@ impl SourceTyper<'_> {
     /// Inspects an expression in a source method without typing the target or the
     /// remainder of its body. Supply the canonical method and target tree from
     /// this file. The path may cross applications, selections, parentheses and
-    /// blocks containing ordinary eager local values, variables and expressions.
+    /// blocks containing ordinary eager local values, variables and expressions,
+    /// including the initializers of those values and variables. Inside an
+    /// initializer, an inferred local has not yet entered scope. A local with
+    /// an explicit type shadows outer names and is guarded against self-reference.
     /// A target outside that subset or outside the method yields `Ok(None)`.
     ///
     /// Each enclosing block introduces a lexical scope. Preceding statements
@@ -2348,7 +2415,7 @@ impl SourceTyper<'_> {
         let Some(root) = def.rhs.filter(|_| source == self.source) else {
             return Ok(None);
         };
-        let Some(prefixes) = expression_block_prefixes(self.arena, root, target) else {
+        let Some(path) = expression_scope_path(self.arena, root, target) else {
             return Ok(None);
         };
         let mut probe = SourceTyper::new(
@@ -2365,10 +2432,19 @@ impl SourceTyper<'_> {
             if let Some(scope) = typer.enclosing_method_type_scope(context)? {
                 typer.active_local_type_scopes.push(scope);
             }
-            for prefix in prefixes {
-                context = typer.enter_expression_block(context)?.1;
-                for &stat in prefix {
-                    typer.type_block_stat_expansion(stat, context, journal, mappings)?;
+            for step in path {
+                match step {
+                    ExpressionScopeStep::Block(prefix) => {
+                        context = typer.enter_expression_block(context)?.1;
+                        for &stat in prefix {
+                            typer.type_block_stat_expansion(stat, context, journal, mappings)?;
+                        }
+                    }
+                    ExpressionScopeStep::Initializer(tree, value, position) => {
+                        typer.prepare_local_value_initializer(
+                            tree, value, position, context, journal,
+                        )?;
+                    }
                 }
             }
             Ok(context)
