@@ -57,6 +57,11 @@ also exercises the same call inside `val result = …`. Completing the fourth
 argument and closing the call selects the predicted overload and clears the
 syntax diagnostic.
 
+For first-clause ordinary source defaults the fixture displays `= …` from the
+parameter's registered getter. The provider-edit stdio test removes a default,
+checks the missing required formal on the unchanged call and restores the
+signature by undoing the edit in either encoding.
+
 Bare calls follow lexical shadowing. Adding `val pick = 0` before the call
 suppresses its signature help until undo. Member calls also follow access at
 the use site. Changing one overload in `Ops.scala` to `private` removes it

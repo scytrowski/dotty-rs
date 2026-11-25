@@ -20,7 +20,14 @@ fn wire_range(text: &DocumentText, r: TextRange, enc: PositionEncoding) -> Optio
 fn parameter_labels(parameters: &[SourceSignatureParameter]) -> Vec<String> {
     parameters
         .iter()
-        .map(|p| format!("{}: {}", p.name, p.ty.name))
+        .map(|p| {
+            let default = if p.default_getter.is_some() {
+                " = …"
+            } else {
+                ""
+            };
+            format!("{}: {}{default}", p.name, p.ty.name)
+        })
         .collect()
 }
 
