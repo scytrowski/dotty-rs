@@ -88,7 +88,7 @@ mod semantic_diagnostic;
 pub use semantic_diagnostic::{SemanticDiagnostic, SemanticIssue, SemanticPhase};
 
 mod rejected_call;
-pub use rejected_call::OverloadCandidateTarget;
+pub use rejected_call::{OverloadCandidateTarget, RejectedCallArgument, ReportedOverloadCandidate};
 mod reported_typer_error;
 pub use reported_typer_error::ReportedTyperError;
 

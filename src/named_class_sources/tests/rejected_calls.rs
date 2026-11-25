@@ -1,6 +1,15 @@
 use super::*;
 
 fn reports(a: &str, b: &str, reverse: bool) -> Vec<crate::ReportedTyperError> {
+    reports_with_provider(a, b, reverse, true)
+}
+
+fn reports_with_provider(
+    a: &str,
+    b: &str,
+    reverse: bool,
+    include_provider: bool,
+) -> Vec<crate::ReportedTyperError> {
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
@@ -23,8 +32,13 @@ fn reports(a: &str, b: &str, reverse: bool) -> Vec<crate::ReportedTyperError> {
             crate::core::NoResolver,
         )
         .into_parts();
+    let caller_only = NamedClassSources::new([&caller], &store).unwrap();
     report
-        .into_semantic_diagnostics(&sources)
+        .into_semantic_diagnostics(if include_provider {
+            &sources
+        } else {
+            &caller_only
+        })
         .map(|d| match d.issue {
             crate::SemanticIssue::Typing(e) => *e,
             other => panic!("{other:?}"),
@@ -102,4 +116,65 @@ fn candidate_declarations_use_the_rejected_method_and_its_own_parameter() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn one_overload_report_pairs_each_cause_with_its_own_source_evidence() {
+    let a = "class Ops { def pick(right: Int): Int = right; def pick(flag: Boolean): Int = 1; def both(x: Int, y: Any): Int = 1; def both(x: Any, y: Int): Int = 2 }";
+    let b = "class Use { def bad(o: Ops): Int = o.pick(right = true); def tied(o: Ops): Int = o.both(1, 1); def ok(o: Ops): Int = o.pick(flag = true) }";
+    for reverse in [false, true] {
+        let result = reports(a, b, reverse);
+        assert_eq!(result.len(), 2);
+        let candidates = result[0].overload_candidates().collect::<Vec<_>>();
+        assert_eq!(candidates.len(), 2);
+        for (c, token) in candidates.iter().zip(["true", "right"]) {
+            let arg = c.argument.unwrap();
+            assert_eq!((arg.written, arg.label.as_deref()), (0, Some("right")));
+            assert_eq!(arg.location.source(), SourceId::from_index(3));
+            assert_eq!(
+                arg.location.span().range().start() as usize,
+                b.find(token).unwrap()
+            );
+            assert!(c.reason.is_some());
+        }
+        assert!(candidates[0].target.unwrap().parameter.is_some());
+        assert!(candidates[1].target.unwrap().parameter.is_none());
+        let tied = result[1].overload_candidates().collect::<Vec<_>>();
+        assert_eq!(tied.len(), 2);
+        assert!(
+            tied.iter()
+                .all(|c| c.reason.is_none() && c.argument.is_none() && c.target.is_some())
+        );
+    }
+}
+
+#[test]
+fn an_unindexed_provider_preserves_order_causes_and_caller_spans() {
+    let a = "class Ops { def pick(right: Int): Int = right; def pick(flag: Boolean): Int = 1 }";
+    let b = "class Use { def bad(o: Ops): Int = o.pick(right = true) }";
+    let result = reports_with_provider(a, b, false, false);
+    let candidates: Vec<_> = result[0].overload_candidates().collect();
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates
+            .iter()
+            .all(|c| c.reason.is_some() && c.target.is_none() && c.argument.is_some())
+    );
+}
+
+#[test]
+fn an_omitted_required_parameter_has_a_target_but_no_written_operand() {
+    let a = "class Ops { def pick(left: Int, right: Int = 9): Int = left; def pick(flag: Boolean): Int = 1 }";
+    let b = "class Use { def bad(o: Ops): Int = o.pick(right = 4) }";
+    let result = reports(a, b, false);
+    let first = result[0].overload_candidates().next().unwrap();
+    assert!(matches!(
+        first.reason,
+        Some(crate::typer::OverloadRejection::MissingRequiredArgument { parameter_index: 0 })
+    ));
+    assert!(first.argument.is_none());
+    assert_eq!(
+        first.target.unwrap().parameter.unwrap().target.name.start() as usize,
+        a.find("left:").unwrap()
+    );
 }

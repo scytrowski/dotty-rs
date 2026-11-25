@@ -1,7 +1,8 @@
 //! Source evidence retained for rejected ordinary calls.
-use crate::NamedClassSource;
-use crate::core::SourceSpan;
-use crate::parser::NamedCallArgument;
+use crate::core::{SourceDefinition, SourceSpan, Span, SymbolId, SymbolKind, TreeKind, Untyped};
+use crate::parser::{CallArgumentList, NamedCallArgument};
+use crate::typer::{NamedArgumentRejection, OverloadRejection, TyperError};
+use crate::{NamedClassSource, NamedClassSources, SourceMemberTarget, SourceMethodParameter};
 
 pub(crate) fn written_label(
     file: &NamedClassSource,
@@ -17,10 +18,6 @@ pub(crate) fn written_label(
         .iter()
         .find(|label| label.written == written)
 }
-
-use crate::core::{SourceDefinition, SymbolId, SymbolKind, TreeKind};
-use crate::typer::{NamedArgumentRejection, OverloadRejection};
-use crate::{NamedClassSources, SourceMemberTarget, SourceMethodParameter};
 
 /// Source declaration associated with an overload alternative in one naming revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +72,17 @@ fn candidate_parameter(
         return None;
     }
     let tree = match reason {
-        OverloadRejection::ArgumentNonConformance {parameter_index,..}
-        | OverloadRejection::MissingRequiredArgument {parameter_index} => *clause.get(*parameter_index)?,
-        OverloadRejection::NamedArgument {reason: NamedArgumentRejection::Duplicate(name),..} =>
-            *clause.iter().find(|&&tree| matches!(&file.ast().get(tree).kind, TreeKind::ValDef(p) if p.name.as_name() == name))?,
+        OverloadRejection::ArgumentNonConformance { parameter_index, .. }
+        | OverloadRejection::MissingRequiredArgument { parameter_index } => {
+            *clause.get(*parameter_index)?
+        }
+        OverloadRejection::NamedArgument {
+            reason: NamedArgumentRejection::Duplicate(name), ..
+        } => {
+            *clause.iter().find(|&&tree| {
+                matches!(&file.ast().get(tree).kind, TreeKind::ValDef(p) if p.name.as_name() == name)
+            })?
+        }
         _ => return None,
     };
     let node = file.ast().try_get(tree)?;
@@ -109,5 +113,123 @@ fn candidate_parameter(
             declaration,
             name,
         },
+    })
+}
+
+/// Written operand or label responsible for one candidate's rejection.
+#[derive(Debug)]
+pub struct RejectedCallArgument {
+    /// Index in the caller's written argument list, before named-argument reordering.
+    pub written: usize,
+    /// Value for nonconformance, label for binding errors, or misplaced positional operand.
+    pub location: SourceSpan,
+    /// Semantic spelling of a written label without backticks, retained after analysis.
+    pub label: Option<Box<str>>,
+}
+
+/// One candidate from the original overload error, paired with retained source evidence.
+#[derive(Debug)]
+pub struct ReportedOverloadCandidate<'a> {
+    /// Candidate symbol in the originating naming session.
+    pub method: SymbolId,
+    /// Original rejection. Ambiguous alternatives are applicable and carry no rejection.
+    pub reason: Option<&'a OverloadRejection>,
+    /// Written source argument when this candidate identifies a specific operand or label.
+    pub argument: Option<&'a RejectedCallArgument>,
+    /// Provider declaration when available in the indexed revision.
+    pub target: Option<OverloadCandidateTarget>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CandidateSites {
+    pub argument: Option<RejectedCallArgument>,
+    pub target: Option<OverloadCandidateTarget>,
+}
+
+pub(crate) fn candidates(
+    error: &TyperError,
+) -> impl Iterator<Item = (SymbolId, Option<&OverloadRejection>)> {
+    let (rejected, ambiguous) = match error {
+        TyperError::OverloadApplicationNoApplicable { candidates, .. } => {
+            (candidates.as_slice(), &[][..])
+        }
+        TyperError::AmbiguousOverloadApplication { candidates, .. } => {
+            (&[][..], candidates.as_slice())
+        }
+        _ => (&[][..], &[][..]),
+    };
+    rejected
+        .iter()
+        .map(|(method, reason)| (*method, Some(reason)))
+        .chain(ambiguous.iter().map(|&method| (method, None)))
+}
+
+pub(crate) fn capture(
+    sources: &NamedClassSources<'_>,
+    error: &TyperError,
+) -> Box<[CandidateSites]> {
+    let (source, tree_index) = match *error {
+        TyperError::OverloadApplicationNoApplicable {
+            source, tree_index, ..
+        }
+        | TyperError::AmbiguousOverloadApplication {
+            source, tree_index, ..
+        } => (source, tree_index),
+        _ => return Box::default(),
+    };
+    let caller = sources.file(source).and_then(|file| {
+        let (_, tree) = file.ast().iter().nth(tree_index as usize)?;
+        let TreeKind::Apply(call) = &tree.kind else {
+            return None;
+        };
+        let site = tree.position.filter(|p| p.source() == source)?;
+        let closing = site.span().range().end().checked_sub(1)?;
+        let list = file.named().syntax().call_arguments.at(closing)?;
+        (list.regular && list.callee.is_some() && list.arguments.len() == call.args.len())
+            .then_some((file, call, list))
+    });
+    candidates(error)
+        .map(|(method, reason)| {
+            let argument =
+                caller.and_then(|(file, call, list)| rejected_argument(file, call, list, reason?));
+            CandidateSites {
+                argument,
+                target: sources.overload_candidate_target(method, reason),
+            }
+        })
+        .collect()
+}
+
+fn rejected_argument(
+    file: &NamedClassSource,
+    call: &crate::core::ast::Apply<Untyped>,
+    list: &CallArgumentList,
+    reason: &OverloadRejection,
+) -> Option<RejectedCallArgument> {
+    let (written, label_only) = match reason {
+        OverloadRejection::ArgumentNonConformance { argument_index, .. } => {
+            (*argument_index, false)
+        }
+        OverloadRejection::NamedArgument { tree_index, reason } => (
+            call.args.iter().position(|t| t.index() == *tree_index)?,
+            !matches!(reason, NamedArgumentRejection::MisplacedPositional),
+        ),
+        _ => return None,
+    };
+    let arg = file.ast().try_get(*call.args.get(written)?)?;
+    let span = arg.position.filter(|span| span.source() == file.source())?;
+    if list.arguments.get(written) != Some(&span.span().range()) {
+        return None;
+    }
+    let label = list.named_arguments.iter().find(|l| l.written == written);
+    let range = match (label_only, label) {
+        (true, label) => label?.label,
+        (false, Some(label)) => label.value?,
+        (false, None) => span.span().range(),
+    };
+    Some(RejectedCallArgument {
+        written,
+        location: SourceSpan::new(file.source(), Span::without_point(range)),
+        label: label.map(|l| l.name.clone()),
     })
 }
