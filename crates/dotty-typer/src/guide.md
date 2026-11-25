@@ -45,6 +45,8 @@ let TreeKind::Block(body) = &parsed.ast.get(def.rhs.unwrap()).kind else { unreac
 let TreeKind::ValDef(result) = &parsed.ast.get(body.stats[1]).kind else { unreachable!() };
 let initializer = result.rhs.ok_or("expected initializer")?;
 let value_type = typer.inspect_method_expression(owner, initializer, |probe, ctx| {
+    let candidates = probe.lookup_identifier_candidates(initializer, ctx)?;
+    assert_eq!(candidates, [probe.local_symbol_at(source, body.stats[0]).unwrap()]);
     let result = probe.type_expression(initializer, ctx)?;
     probe.widen_expression_type(probe.typed_ast().get(result).ty)
 })?.ok_or("unsupported expression path")??;

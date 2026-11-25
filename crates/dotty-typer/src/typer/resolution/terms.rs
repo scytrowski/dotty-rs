@@ -3,6 +3,46 @@
 use super::super::*;
 
 impl SourceTyper<'_> {
+    /// Resolves a source term identifier to the declarations visible at its use
+    /// site, before argument applicability or overload selection. A nearer
+    /// value or parameter shadows methods from an enclosing scope. Candidates
+    /// are returned in the same lookup order as for an unqualified application.
+    ///
+    /// Supply the identifier tree from this driver's source and the lexical
+    /// context at that tree. Errors report unsupported trees, missing names,
+    /// invalid contexts, or deferred resolution. Lookup may complete symbols
+    /// in this session; failed lookup rolls back its semantic changes.
+    pub fn lookup_identifier_candidates(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let node = self
+            .arena
+            .try_get(tree)
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        let TreeKind::Ident(ident) = &node.kind else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: tree_kind_name(&node.kind),
+            });
+        };
+        let (name, position) = (ident.name, node.position);
+        self.run_atomic(|typer, journal| {
+            typer.expression_term_candidates_with_inherited(
+                name,
+                context,
+                tree.index(),
+                position,
+                journal,
+            )
+        })
+    }
+
     pub(in crate::typer) fn resolve_expression_term(
         &mut self,
         name: dotty_core::Name,
