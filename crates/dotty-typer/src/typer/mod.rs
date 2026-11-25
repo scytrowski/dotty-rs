@@ -67,7 +67,7 @@ pub use subtype::{
 };
 
 /// Why one overload was excluded from an application candidate set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverloadRejection {
     /// This call's `ApplyKind` does not consume the candidate's current clause.
     ApplicationKindMismatch {
@@ -92,6 +92,12 @@ pub enum OverloadRejection {
     ArgumentNonConformance {
         /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
         argument_index: usize,
+        /// Zero-based declaration ordinal for the checked argument in this candidate.
+        parameter_index: usize,
+        /// Short owned description of the observed type, valid after rollback.
+        actual_description: Box<str>,
+        /// Short owned description of the required type, valid after rollback.
+        expected_description: Box<str>,
         /// Observed semantic type identity in the caller’s type arena.
         actual: TypeId,
         /// Required semantic type identity in the caller’s type arena.

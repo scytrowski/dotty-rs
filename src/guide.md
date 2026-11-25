@@ -608,6 +608,39 @@ On a syntax rejection, [`NameSourceError::Syntax`] returns the recovered tree an
 lexer/parser diagnostics. A rejected naming transaction rolls back symbols, scope
 insertions and packages. The earlier `bind` operation has already interned names.
 
+For a rejected overload set, [`ReportedTyperError::overload_candidates`] borrows
+the original reasons together with their source evidence. The primary location
+is the complete call. A nonconforming named operand points to its value; an
+unknown or duplicate name points to the written label. Ambiguous alternatives
+have declaration locations but no rejection. An omitted provider removes its
+location while preserving the candidate and reason.
+
+```rust
+use dotty::{NamedClassSources, ReportedTyperError, parse_source};
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+use dotty::typer::{OverloadRejection, SourceTyper};
+
+let text = "class A { def pick(right: Int): Int = right; def pick(flag: Boolean): Int = 1; def bad(): Int = pick(right = true) }";
+let mut store = SemanticStore::new();
+let defs = Definitions::bootstrap(&mut store);
+let mut packages = Packages::new();
+let id = SourceId::from_index(3);
+let file = parse_source(id, text, Default::default())?.bind(&mut store.names)
+    .name("A.scala", &mut store, &mut packages)?.into_classes(&store)?;
+let sources = NamedClassSources::new([&file], &store)?;
+let methods: Vec<_> = file.classes()[0].methods().collect();
+let mut typer = SourceTyper::new(file.ast(), id, file.index(), &mut store, defs, &packages);
+for method in &methods { typer.complete_symbol(method.symbol)?; }
+let error = typer.type_method_definition(methods[2].tree).unwrap_err();
+let report = ReportedTyperError::from_typer(error, |_| Some(file.ast())).with_named_sources(&sources);
+let first = report.overload_candidates().next().ok_or("missing alternative")?;
+assert!(matches!(first.reason, Some(OverloadRejection::ArgumentNonConformance {
+    actual_description, expected_description, ..
+}) if &**actual_description == "Boolean" && &**expected_description == "Int"));
+assert_eq!(first.target.and_then(|t| t.parameter).unwrap().method, methods[0].symbol);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 A successful [`NamedSource`] owns its syntax and index for this analysis.
 [`NamedSource::into_classes`] reads the existing semantic store. If a file contains
 a `trait`, that strict projection returns [`ClassProjectionError`] with the

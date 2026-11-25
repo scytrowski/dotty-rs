@@ -182,3 +182,9 @@ the selected overload; the operand targets the caller's local declaration.
 The stdio test changes only the local initializer from `4` to `true` and
 back. It verifies both reference lists and both definition ranges after each
 edit in UTF-8 and UTF-16.
+
+For rejected ordinary overloads, the client publishes one diagnostic on the call.
+With `publishDiagnostics.relatedInformation`, it includes each candidate's operand
+or label and its available provider declaration. The stdio fixture changes
+`pick(right = true)` to `pick(flag = true)`, checks the repaired definition link,
+then undoes the edit and verifies the restored evidence in UTF-8 and UTF-16.

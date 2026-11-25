@@ -10,6 +10,7 @@ use crate::{CallDiagnostic, typer_error_span_with};
 #[derive(Debug)]
 pub struct ReportedTyperError {
     failure: Failure,
+    candidate_sites: Box<[crate::rejected_call::CandidateSites]>,
     class: Option<SymbolId>,
     member: Option<SymbolId>,
 }
@@ -70,9 +71,50 @@ impl ReportedTyperError {
         };
         Self {
             failure,
+            candidate_sites: Box::default(),
             class,
             member,
         }
+    }
+
+    /// Enriches a report with the exact label and per-candidate source locations
+    /// from the original revision. Both caller and provider may be omitted.
+    /// Symbols must belong to the same naming session. Body and member-signature
+    /// semantic diagnostics with named sources apply this enrichment automatically.
+    pub fn with_named_sources(mut self, sources: &crate::NamedClassSources<'_>) -> Self {
+        if let Failure::Other {
+            error:
+                TyperError::UnknownNamedArgument { .. } | TyperError::DuplicateNamedArgument { .. },
+            location: Some(site),
+            ..
+        } = &mut self.failure
+            && let Some(file) = sources.file(site.source())
+            && let Some(label) = crate::rejected_call::written_label(file, *site)
+        {
+            *site = SourceSpan::new(site.source(), crate::core::Span::without_point(label.label));
+        }
+        self.candidate_sites = crate::rejected_call::capture(sources, self.error());
+        self
+    }
+
+    /// Iterates in the order supplied by the typer. Failed candidates borrow
+    /// their original typed reasons; ambiguous candidates have no rejection.
+    /// Without named sources, method IDs and reasons remain available. Other
+    /// error variants yield an empty iterator. No lookup or typing runs here.
+    pub fn overload_candidates(
+        &self,
+    ) -> impl Iterator<Item = crate::ReportedOverloadCandidate<'_>> {
+        crate::rejected_call::candidates(self.error())
+            .enumerate()
+            .map(|(i, (method, reason))| {
+                let sites = self.candidate_sites.get(i);
+                crate::ReportedOverloadCandidate {
+                    method,
+                    reason,
+                    argument: sites.and_then(|s| s.argument.as_ref()),
+                    target: sites.and_then(|s| s.target),
+                }
+            })
     }
 
     /// Canonical enclosing class if supplied by the phase or caller.

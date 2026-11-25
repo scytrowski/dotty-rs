@@ -14,6 +14,8 @@ impl TyperError {
             Self::ExpectedExpressionTypeMismatch { .. } => {
                 Some("typer.expected_expression_type_mismatch")
             }
+            Self::OverloadApplicationNoApplicable { .. } => Some("typer.no_applicable_overload"),
+            Self::AmbiguousOverloadApplication { .. } => Some("typer.ambiguous_overload"),
             other => other.call_error_code(),
         }
     }
@@ -44,17 +46,20 @@ impl TyperError {
         actual: TypeId,
         expected: TypeId,
     ) -> Self {
-        let description = |ty| describe(store, ty, &mut 32).into_boxed_str();
         Self::ApplicationArgumentTypeMismatch {
             source,
             tree_index,
             argument_index,
             actual,
             expected,
-            actual_description: description(actual),
-            expected_description: description(expected),
+            actual_description: type_description(store, actual),
+            expected_description: type_description(store, expected),
         }
     }
+}
+
+pub(super) fn type_description(store: &SemanticStore, ty: TypeId) -> Box<str> {
+    describe(store, ty, &mut 32).into_boxed_str()
 }
 
 // A single node budget bounds both nested and wide types, including cyclic arena graphs.

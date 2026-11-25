@@ -135,7 +135,7 @@ impl SourceTyper<'_> {
                     member: member_name,
                 });
             }
-            [candidate] => *candidate,
+            [candidate] => candidate.clone(),
             _ => {
                 return Err(TyperError::ExtractorResultMemberOverloaded {
                     source: self.source,
@@ -1260,7 +1260,7 @@ impl SourceTyper<'_> {
                     extractor,
                 });
             }
-            [candidate] => *candidate,
+            [candidate] => candidate.clone(),
             _ => {
                 return Err(TyperError::ExtractorUnapplyOverloaded {
                     source: self.source,

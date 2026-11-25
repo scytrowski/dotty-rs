@@ -490,6 +490,14 @@ impl SourceTyper<'_> {
                 {
                     candidate.rejection = Some(OverloadRejection::ArgumentNonConformance {
                         argument_index: 0,
+                        parameter_index: 0,
+                        actual_description: diagnostic_types::type_description(
+                            self.store,
+                            argument.widened_type,
+                        ),
+                        expected_description: diagnostic_types::type_description(
+                            self.store, *formal,
+                        ),
                         actual: argument.widened_type,
                         expected: *formal,
                     });
@@ -541,7 +549,12 @@ impl SourceTyper<'_> {
                     let reverse = typer.extension_formal_conforms(right, left, site, journal)?;
                     forward.cmp(&reverse)
                 } else {
-                    match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind) {
+                    match typer.choose_overload_candidate(
+                        &mut [a.clone(), b.clone()],
+                        arguments,
+                        site,
+                        kind,
+                    ) {
                         Ok(best) if best.symbol == a.symbol => Ordering::Greater,
                         Ok(_) => Ordering::Less,
                         Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
@@ -552,7 +565,7 @@ impl SourceTyper<'_> {
             })
         };
         if let [only] = applicable.as_slice() {
-            return Ok(*only);
+            return Ok(only.clone());
         }
         let winner = rank(self, &applicable, journal)?;
         // The expected result can break a tie or replace an incompatible winner.
@@ -572,23 +585,23 @@ impl SourceTyper<'_> {
                         && self.contextual_conforms(result, expected, site, journal)?
                     {
                         if winner == Some(i) {
-                            return Ok(*c);
+                            return Ok(c.clone());
                         }
-                        compatible.push(*c);
+                        compatible.push(c.clone());
                     }
                 }
                 if let Some(index) = rank(self, &compatible, journal)? {
-                    return Ok(compatible[index]);
+                    return Ok(compatible.swap_remove(index));
                 }
             }
         }
-        winner
-            .map(|i| applicable[i])
-            .ok_or_else(|| TyperError::AmbiguousOverloadApplication {
+        winner.map(|i| applicable.swap_remove(i)).ok_or_else(|| {
+            TyperError::AmbiguousOverloadApplication {
                 source: self.source,
                 tree_index: site,
                 candidates: applicable.iter().map(|c| c.symbol).collect(),
-            })
+            }
+        })
     }
 
     fn extension_overload_candidates(

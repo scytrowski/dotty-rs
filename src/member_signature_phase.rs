@@ -36,12 +36,12 @@ impl MemberSignatureFailure {
                 error,
             } => Self::Typing {
                 declaration,
-                report: Box::new(ReportedTyperError::from_class(
-                    error,
-                    declaration.class,
-                    Some(member),
-                    |id| sources.file(id).map(|file| file.ast()),
-                )),
+                report: Box::new(
+                    ReportedTyperError::from_class(error, declaration.class, Some(member), |id| {
+                        sources.file(id).map(|file| file.ast())
+                    })
+                    .with_named_sources(sources),
+                ),
             },
         }
     }
