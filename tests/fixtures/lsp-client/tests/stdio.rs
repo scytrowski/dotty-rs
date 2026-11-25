@@ -166,6 +166,13 @@ impl Client {
         )
     }
 
+    fn signature_help(&mut self, uri: &str, line: usize, character: usize) -> Value {
+        self.request(
+            "textDocument/signatureHelp",
+            json!({"textDocument":{"uri":uri},"position":{"line":line,"character":character}}),
+        )
+    }
+
     fn references(
         &mut self,
         uri: &str,
@@ -1860,5 +1867,46 @@ fn editing_a_local_initializer_changes_signature_help_at_the_unchanged_call() {
             );
             client.shutdown();
         }
+    }
+}
+
+#[test]
+fn shadowing_a_bare_call_removes_signature_help_until_undo() {
+    let methods = PICK_OVERLOADS.strip_suffix('}').unwrap();
+    let prefix = "    /* 😀 */ val third = 2";
+    let shadow = "; val pick = 0";
+    let call = "    /* 😀 */ val result = pick(1, true, third, ";
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![]);
+        client.open(
+            B,
+            &format!(
+                "{methods}
+  def run: Int = {{
+{prefix}
+{call}
+  }}
+}}"
+            ),
+        );
+        let edit = token_column(enc, prefix, "2") + 1;
+        let cursor = token_column(enc, call, "third, ") + "third, ".len();
+        let expected =
+            json!({"signatures":[pick_signature("n: Int", "tail: Boolean")],"activeParameter":3});
+        expect_missing_argument(&mut client, 1);
+        assert_eq!(client.signature_help(B, 3, cursor), expected);
+        client.edit(B, 2, range(2, edit, edit), shadow);
+        expect_missing_argument(&mut client, 2);
+        assert_eq!(client.signature_help(B, 3, cursor), Value::Null);
+        client.edit(B, 3, range(2, edit, edit + shadow.len()), "");
+        expect_missing_argument(&mut client, 3);
+        assert_eq!(client.signature_help(B, 3, cursor), expected);
+        client.edit(B, 4, range(3, cursor, cursor), "false); result");
+        client.diagnostics(B, 4, json!([]));
+        assert_eq!(
+            client.signature_help(B, 3, cursor + "false".len()),
+            json!({"signatures":[pick_signature("n: Int", "tail: Boolean")],"activeParameter":3,"activeSignature":0})
+        );
+        client.shutdown();
     }
 }
