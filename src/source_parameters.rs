@@ -47,6 +47,12 @@ impl ParameterDeclaration {
             Self::Constructor(p) => p.parameter,
         }
     }
+    pub(crate) fn symbol_kind(self) -> SymbolKind {
+        match self {
+            Self::Constructor(p) if p.kind != ConstructorParameterKind::Plain => SymbolKind::Field,
+            _ => SymbolKind::Parameter,
+        }
+    }
     pub(crate) fn target(self) -> SourceMemberTarget {
         match self {
             Self::Method(p) => p.target,

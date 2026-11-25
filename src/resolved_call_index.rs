@@ -394,20 +394,19 @@ impl ResolvedMemberIndex {
                     continue;
                 };
                 let origin = SourceSpan::new(file.source(), Span::without_point(name.name));
-                let symbol = match access {
+                match access {
                     TermAccess::Parameter(id) => {
                         let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        continue;
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
                         local_uses.push((origin, (slot, kind)));
-                        id
+                        index.references.entry(id).or_default().push(origin);
                     }
                     TermAccess::Field(field, kind) => {
                         let Some(&target) = targets.get(&field) else {
@@ -419,17 +418,16 @@ impl ResolvedMemberIndex {
                             kind,
                             target,
                         });
-                        field
                     }
-                };
-                index.references.entry(symbol).or_default().push(origin);
+                }
             }
             let reads = parameter_uses
                 .iter()
                 .map(|(span, slot)| (parameters[*slot].symbol(), *span));
             let labels = argument_labels.iter().map(|(span, p)| (p.symbol(), *span));
-            for (parameter, span) in merge_sites(reads, labels) {
-                index.references.entry(parameter).or_default().push(span);
+            let accesses = fields.iter().map(|access| (access.field, access.origin));
+            for (symbol, span) in merge_sites(merge_sites(reads, accesses), labels) {
+                index.references.entry(symbol).or_default().push(span);
             }
             let method_declarations = navigation.method_targets();
             let symbols = class_declarations
@@ -779,7 +777,7 @@ impl ResolvedMemberIndex {
 
     /// Classifies a committed use of a field, ordinary local, or parameter
     /// at its written name. Direct assignment targets are writes; other supported
-    /// value uses are reads. Declarations and method calls yield `None`.
+    /// value uses are reads. Argument labels, declarations and method calls yield `None`.
     pub fn value_access_at(&self, source: SourceId, offset: u32) -> Option<crate::ValueAccessKind> {
         let file = self.files.get(&source)?;
         if let Some((_, (_, kind))) = use_at(&file.local_uses, offset) {
@@ -864,14 +862,14 @@ impl ResolvedMemberIndex {
             } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
                 (id, SymbolKind::Local, target, None)
             } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
-                (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
+                (p.symbol(), p.symbol_kind(), p.target(), Some(origin))
             } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
                 (id, SymbolKind::Method, target, None)
             } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
                 (id, SymbolKind::Field, target, None)
             } else {
                 let p = self.parameter_declaration_at(source, offset)?;
-                (p.symbol(), SymbolKind::Parameter, p.target(), None)
+                (p.symbol(), p.symbol_kind(), p.target(), None)
             };
         Some(SourceSymbolSite {
             symbol,
@@ -898,7 +896,8 @@ impl ResolvedMemberIndex {
     /// token order. For classes, covers single unqualified explicit parents and committed
     /// simple `new` expressions, as well as simple written class types in supported method and constructor signatures. Omits declarations. Unknown and unused symbols yield an
     /// empty slice. Method parameter references include committed reads and written
-    /// argument labels at calls to that overload. Omitted arguments have no source
+    /// argument labels at calls to that overload. A constructor field includes its named
+    /// argument labels as well as actual field accesses. Omitted arguments have no source
     /// token. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)

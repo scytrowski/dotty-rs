@@ -902,7 +902,10 @@ available for clients that retain just body results. A plain primary
 constructor parameter has one written declaration and two symbols. Use
 [`SourceConstructorParameter::parameter`] for source references and
 [`SourceConstructorParameter::formal`] to compare with the constructor plan.
-Explicit constructor `val` and `var` declarations use field navigation.
+For a public constructor `val` or `var`, the class-owned symbol is the field.
+Its references include named argument labels, reads and writes in source order.
+Use [`ResolvedMemberIndex::value_access_at`] to distinguish reads and writes.
+A label binds a formal and has no value access kind.
 
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The

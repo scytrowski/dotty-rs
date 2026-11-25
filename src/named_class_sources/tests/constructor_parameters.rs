@@ -234,3 +234,82 @@ fn only_committed_parent_reads_enter_the_index_once_after_a_blocked_retry() {
         );
     }
 }
+
+#[test]
+fn constructor_field_references_merge_labels_and_accesses_in_written_order() {
+    let text = "class Use {
+      def create(): Counter = { val count = 4; new Counter(count = count) }
+      def read(c: Counter): Int = c.count
+      def update(c: Counter): Unit = c.count = 7
+      def again(c: Counter): Counter = new Counter(count = c.count)
+    }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let provider = named(
+        3,
+        "class Counter(var count: Int)",
+        &mut store,
+        &mut packages,
+    );
+    let caller = named(1, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&caller, &provider], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    assert!(matches!(
+        sources.try_complete_member_signature(
+            provider.classes()[0].constructor_fields[0],
+            &mut store,
+            defs,
+            &packages
+        ),
+        Ok(SignatureCompletion::Complete(_))
+    ));
+    let (body, report) = sources
+        .check_class_body(
+            caller.classes()[0].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    let source = caller.source();
+    let positions: Vec<_> = text.match_indices("count").map(|(i, _)| i as u32).collect();
+    let [local, label, rhs, read, write, last_label, last_read] = positions[..] else {
+        panic!("unexpected source")
+    };
+    let site = index.symbol_at(source, label).unwrap();
+    assert_eq!(
+        (site.kind, site.target.source),
+        (SymbolKind::Field, provider.source())
+    );
+    assert_eq!(
+        index.symbol_at(source, rhs).unwrap().symbol,
+        index.symbol_at(source, local).unwrap().symbol
+    );
+    assert_ne!(index.symbol_at(source, rhs).unwrap().symbol, site.symbol);
+    use crate::ValueAccessKind::{Read, Write};
+    for (pos, access) in [
+        (label, None),
+        (read, Some(Read)),
+        (write, Some(Write)),
+        (last_label, None),
+        (last_read, Some(Read)),
+    ] {
+        assert_eq!(index.symbol_at(source, pos).unwrap().symbol, site.symbol);
+        assert_eq!(index.value_access_at(source, pos), access);
+    }
+    assert_eq!(
+        index
+            .references_to(site.symbol)
+            .iter()
+            .map(|s| (s.source(), s.span().range().start()))
+            .collect::<Vec<_>>(),
+        [label, read, write, last_label, last_read].map(|i| (source, i))
+    );
+}
