@@ -121,3 +121,36 @@ fn omissions_and_labels_belong_to_the_selected_overload() {
         assert!(query("both(i").is_none());
     }
 }
+
+#[test]
+fn a_named_label_resolves_to_the_formal_and_its_value_keeps_its_lexical_symbol() {
+    let a = "class Ops { def diff(left: Int = 9, right: Int = 4): Int = left - right }";
+    let b = "class Use { def run(o: Ops): Int = { val right = 4; o.diff(`right` = o.diff(right = right), left = 9) } }";
+    let idx = index(a, b, true, 0);
+    let target = idx.parameter_at(PROVIDER, pos(a, "right:")).unwrap();
+    let local = idx.symbol_at(CALLER, pos(b, "right = 4")).unwrap();
+    let at = |offset| idx.symbol_info_at(CALLER, offset).unwrap().0;
+    for (token, width) in [("`right`", 7), ("right = right", 5)] {
+        let start = pos(b, token);
+        for offset in start..start + width {
+            assert_eq!(idx.parameter_at(CALLER, offset), Some(target));
+            let site = at(offset);
+            assert_eq!(
+                (site.symbol, site.target),
+                (target.parameter, target.target)
+            );
+            let range = site.usage.unwrap().span().range();
+            assert_eq!((range.start(), range.end()), (start, start + width));
+            assert_eq!(idx.value_access_at(CALLER, offset), None);
+        }
+        for offset in [start + width, start + width + 1] {
+            assert!(idx.symbol_at(CALLER, offset).is_none());
+        }
+    }
+    let rhs = pos(b, "right),");
+    assert_eq!(at(rhs).symbol, local.symbol);
+    assert_eq!(
+        idx.value_access_at(CALLER, rhs),
+        Some(crate::ValueAccessKind::Read)
+    );
+}

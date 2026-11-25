@@ -24,6 +24,7 @@ struct IndexedFile {
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
+    argument_labels: Vec<(SourceSpan, SourceMethodParameter)>,
     calls: Vec<ResolvedSourceCall>,
     resolved_arguments: HashMap<u32, crate::ResolvedCallArguments>,
     argument_bindings: HashMap<u32, crate::core::NamedCallBinding>,
@@ -298,6 +299,7 @@ impl ResolvedMemberIndex {
             }
             let mut calls = Vec::new();
             let mut resolved_arguments = HashMap::new();
+            let mut argument_labels = Vec::new();
             let mut argument_bindings = HashMap::new();
             // A target navigation error is reported once when visiting its file.
             for site in sources
@@ -323,6 +325,10 @@ impl ResolvedMemberIndex {
                         )
                     })
                 {
+                    argument_labels.extend(arguments.written.iter().filter_map(|arg| {
+                        let span = SourceSpan::new(file.source(), Span::without_point(arg.label?));
+                        Some((span, arg.parameter))
+                    }));
                     resolved_arguments.insert(call.origin.span().range().start(), arguments);
                 }
                 index
@@ -335,6 +341,8 @@ impl ResolvedMemberIndex {
                 }
                 calls.push(call);
             }
+            // An outer call can have labels on both sides of a nested call.
+            argument_labels.sort_unstable_by_key(|(span, _)| span.span().range().start());
             let locals = crate::source_locals::declarations(file, navigation, bodies, store);
             let mut local_uses = Vec::new();
             let mut slots: HashMap<_, _> = parameters
@@ -419,6 +427,7 @@ impl ResolvedMemberIndex {
                     local_uses,
                     parameters,
                     parameter_uses,
+                    argument_labels,
                     calls,
                     resolved_arguments,
                     argument_bindings,
@@ -593,7 +602,8 @@ impl ResolvedMemberIndex {
         declaration_at(&self.files.get(&source)?.method_declarations, offset)
     }
 
-    /// Finds a named parameter at its declaration or a committed bare read.
+    /// Finds a method parameter at its declaration, a committed bare read, or
+    /// an exact argument label at a checked call to that overload.
     /// Includes unused declarations and successful members of a partial body.
     /// Only ordinary parameters of class methods with one value list are indexed.
     /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
@@ -649,8 +659,11 @@ impl ResolvedMemberIndex {
         offset: u32,
     ) -> Option<(SourceSpan, ParameterDeclaration)> {
         let file = self.files.get(&source)?;
-        let (origin, slot) = use_at(&file.parameter_uses, offset)?;
-        Some((origin, file.parameters[slot]))
+        if let Some((origin, slot)) = use_at(&file.parameter_uses, offset) {
+            return Some((origin, file.parameters[slot]));
+        }
+        let (origin, p) = use_at(&file.argument_labels, offset)?;
+        Some((origin, ParameterDeclaration::Method(p)))
     }
 
     /// Gets the committed read or write at a written field name. The
