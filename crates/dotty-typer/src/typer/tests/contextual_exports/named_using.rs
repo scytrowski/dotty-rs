@@ -264,3 +264,24 @@ fn exported_provider_and_legacy_method_keep_the_selected_symbol_and_witnesses() 
         assert_eq!(actual, names.map(|n| (site, n)));
     }
 }
+
+#[test]
+fn ordinary_named_arguments_retain_the_selected_formals_in_written_order() {
+    let code = "class C {
+      def diff(left: Int, right: Int): Int = left - right
+      def reverse(): Int = diff(right = 4, left = 9)
+      def mixed(): Int = diff(left = 9, 4)
+      def suffix(): Int = diff(9, right = 4)
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(code);
+    let mut t = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (site, formals) in [("reverse", [1, 0]), ("mixed", [0, 1]), ("suffix", [0, 1])] {
+        client_result(&mut t, &parsed, site).unwrap();
+        let (_, rhs) = method_definition_and_rhs(&parsed, t.store(), t.index, source, site);
+        let root = t.typed_index.get(source, rhs).unwrap();
+        assert_eq!(
+            *t.typed_index.named_call(root).unwrap().written_to_formal,
+            formals
+        );
+    }
+}

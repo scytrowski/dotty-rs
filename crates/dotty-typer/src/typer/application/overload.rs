@@ -1404,7 +1404,7 @@ impl SourceTyper<'_> {
             return Ok(Some(false));
         }
         // The resolved call binds names before typing their right-hand sides.
-        if self.has_named_using_arguments(application_kind, argument_trees) {
+        if self.has_named_arguments(argument_trees) {
             return Ok(None);
         }
         if argument_trees.len() != method.params.len() {

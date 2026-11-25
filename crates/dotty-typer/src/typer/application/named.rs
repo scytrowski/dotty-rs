@@ -1,4 +1,4 @@
-//! Bind written using arguments to the selected method clause.
+//! Bind written arguments to the selected method clause.
 use super::*;
 
 pub(super) struct NamedArgument {
@@ -7,28 +7,23 @@ pub(super) struct NamedArgument {
 }
 
 impl SourceTyper<'_> {
-    pub(super) fn has_named_using_arguments(
-        &self,
-        kind: ApplyKind,
-        trees: &[TreeId<Untyped>],
-    ) -> bool {
-        kind == ApplyKind::Using
-            && trees.iter().any(|&t| {
-                matches!(
-                    self.arena.try_get(t).map(|t| &t.kind),
-                    Some(TreeKind::NamedArg(_))
-                )
-            })
+    pub(super) fn has_named_arguments(&self, trees: &[TreeId<Untyped>]) -> bool {
+        trees.iter().any(|&t| {
+            matches!(
+                self.arena.try_get(t).map(|t| &t.kind),
+                Some(TreeKind::NamedArg(_))
+            )
+        })
     }
 
-    pub(super) fn named_using_arguments(
+    pub(super) fn bind_named_arguments(
         &self,
         kind: ApplyKind,
         callable: TypeId,
         trees: &[TreeId<Untyped>],
         tree_index: u32,
     ) -> Result<Option<Vec<Option<NamedArgument>>>, TyperError> {
-        if !self.has_named_using_arguments(kind, trees) {
+        if !self.has_named_arguments(trees) {
             return Ok(None);
         }
         // Instantiation changes parameter types but preserves the clause's names

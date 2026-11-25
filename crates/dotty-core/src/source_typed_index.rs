@@ -31,7 +31,17 @@ impl std::error::Error for ConflictingTypedTree {}
 #[derive(Clone, Debug, Default)]
 pub struct SourceTypedIndex {
     trees: HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>,
+    named_calls: HashMap<TreeId<Typed>, NamedCallBinding>,
     synthetic_definitions: HashMap<TreeId<Typed>, SymbolId>,
+}
+
+/// Correspondence retained when a checked ordinary call contains argument labels.
+#[derive(Clone, Debug)]
+pub struct NamedCallBinding {
+    /// Original typed callee before capturing the receiver in a temporary.
+    pub function: TreeId<Typed>,
+    /// Formal ordinal for each written operand, including positional operands.
+    pub written_to_formal: Box<[usize]>,
 }
 
 impl SourceTypedIndex {
@@ -70,7 +80,7 @@ impl SourceTypedIndex {
     /// Adds mappings into the same session arena. On conflict the index is
     /// unchanged and the first conflict in source and tree index order is returned.
     pub fn merge(&mut self, other: Self) -> Result<(), ConflictingTypedTree> {
-        if self.is_empty() {
+        if self.is_empty() && self.named_calls.is_empty() && self.synthetic_definitions.is_empty() {
             *self = other;
             return Ok(());
         }
@@ -91,12 +101,38 @@ impl SourceTypedIndex {
             return Err(error);
         }
         self.trees.extend(other.trees);
+        self.named_calls.extend(other.named_calls);
+        self.synthetic_definitions
+            .extend(other.synthetic_definitions);
         Ok(())
     }
 
     /// Removes the mapping for a source tree, if present.
     pub fn remove(&mut self, source: SourceId, untyped: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.trees.remove(&(source, untyped))
+    }
+
+    /// Records the exact typed root and pre-lowering function of an ordinary named call.
+    /// All IDs must belong to this index's typed arena. The caller supplies a complete
+    /// permutation of the selected clause in written order after successful typing.
+    pub fn record_named_call(
+        &mut self,
+        root: TreeId<Typed>,
+        function: TreeId<Typed>,
+        written_to_formal: Box<[usize]>,
+    ) {
+        self.named_calls.insert(
+            root,
+            NamedCallBinding {
+                function,
+                written_to_formal,
+            },
+        );
+    }
+
+    /// Returns the argument binding of this exact typed call or its evaluation-order block.
+    pub fn named_call(&self, root: TreeId<Typed>) -> Option<&NamedCallBinding> {
+        self.named_calls.get(&root)
     }
 
     /// Allocates a compiler-generated definition and binds it to its symbol.
