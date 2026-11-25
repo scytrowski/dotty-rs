@@ -3226,10 +3226,54 @@ class Ops {
         SourceId::from_index(3),
         "Use.scala",
         "package demo
-class Use { def cross(o: Ops): Int = o.diff(right = 4) }",
+class Use { def cross(o: Ops): Int = { val right = 4; o.diff(right = right) } }",
     );
     for files in [[ops, use_ops], [use_ops, ops]] {
-        let artifacts = super::with_plan(&files, |plan, defs, _, _, _| {
+        let artifacts = super::with_plan(&files, |plan, defs, sources, bodies, _| {
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            let offset = |source: &str, token: &str| source.find(token).unwrap() as u32;
+            let formal = |token| index.parameter_at(ops.0, offset(ops.2, token)).unwrap();
+            let left = formal("left: Int");
+            let right = formal("right: Int");
+            let call = index
+                .call_arguments_at(use_ops.0, offset(use_ops.2, "diff("))
+                .unwrap();
+            assert_eq!(call.call.method, right.method);
+            let [arg] = &*call.written else {
+                panic!("one explicit argument expected")
+            };
+            let [default] = &*call.defaulted else {
+                panic!("one default expected")
+            };
+            assert_eq!((arg.ordinal, arg.parameter), (1, right));
+            assert_eq!((default.ordinal, default.parameter), (0, left));
+            assert_eq!(
+                Some(default.getter),
+                plan.store.default_getter(call.call.method, 0)
+            );
+            let label = arg.label.unwrap();
+            let text = use_ops.2;
+            assert_eq!(
+                &text[arg.range.start() as usize..arg.range.end() as usize],
+                "right = right"
+            );
+            assert_eq!(&text[label.start() as usize..label.end() as usize], "right");
+            assert_eq!(
+                index.symbol_at(use_ops.0, label.start()).unwrap().symbol,
+                right.parameter
+            );
+            let local = index
+                .symbol_at(use_ops.0, offset(text, "right = 4"))
+                .unwrap();
+            assert_eq!(local.kind, dotty::core::SymbolKind::Local);
+            assert_eq!(
+                index
+                    .symbol_at(use_ops.0, offset(text, "right)"))
+                    .unwrap()
+                    .symbol,
+                local.symbol
+            );
             super::checked_emission(plan, defs)
         });
         let class = artifacts
