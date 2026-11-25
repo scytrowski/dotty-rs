@@ -1700,21 +1700,39 @@ fn signature_help_tracks_the_active_formal_and_selected_overload_across_edits() 
     }
 }
 
+const PICK_OVERLOADS: &str = "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }";
+
+fn pick_signature(third: &str, tail: &str) -> Value {
+    json!({
+        "label":format!("def pick(a: Int, b: Boolean, {third}, {tail}): Int"),
+        "parameters":[{"label":"a: Int"},{"label":"b: Boolean"},{"label":third},{"label":tail}]
+    })
+}
+
+fn expect_missing_argument(client: &mut Client, version: i32) {
+    let Message::Notification(n) = client.receive() else {
+        panic!("syntax diagnostics")
+    };
+    assert_eq!(n.method, "textDocument/publishDiagnostics");
+    assert_eq!(n.params["uri"], B);
+    assert_eq!(n.params["version"], version);
+    assert!(
+        n.params["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "parser.expression.missing_argument")
+    );
+}
+
 #[test]
 fn incomplete_signature_help_narrows_at_the_third_argument_and_commits_after_closing() {
-    let methods = "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }";
     let line = "  def run(o: Ops): Int = /* 😀 */ o.pick(";
-    let signature = |third: &str, tail: &str| {
-        json!({
-            "label":format!("def pick(a: Int, b: Boolean, {third}, {tail}): Int"),
-            "parameters":[{"label":"a: Int"},{"label":"b: Boolean"},{"label":third},{"label":tail}]
-        })
-    };
-    let first = signature("n: Int", "tail: Boolean");
-    let second = signature("flag: Boolean", "tail: Int");
+    let first = pick_signature("n: Int", "tail: Boolean");
+    let second = pick_signature("flag: Boolean", "tail: Int");
     for enc in ["utf-8", "utf-16"] {
         let mut client = Client::start(enc, vec![A]);
-        client.open(A, methods);
+        client.open(A, PICK_OVERLOADS);
         client.open(B, &format!("class Use {{\r\n{line}\r\n}}"));
         let start = token_column(enc, line, "pick(") + 5;
         let mut previous = "";
@@ -1742,18 +1760,7 @@ fn incomplete_signature_help_narrows_at_the_third_argument_and_commits_after_clo
             if closed {
                 client.diagnostics(B, i as i32 + 1, json!([]));
             } else {
-                let Message::Notification(n) = client.receive() else {
-                    panic!("syntax diagnostics")
-                };
-                assert_eq!(n.method, "textDocument/publishDiagnostics");
-                assert_eq!(n.params["uri"], B);
-                assert_eq!(n.params["version"], i + 1);
-                let issues = n.params["diagnostics"].as_array().unwrap();
-                assert!(
-                    issues
-                        .iter()
-                        .any(|d| d["code"] == "parser.expression.missing_argument")
-                );
+                expect_missing_argument(&mut client, i as i32 + 1);
             }
             let pos = start + args.len() - usize::from(closed);
             let help = client.request(
@@ -1771,6 +1778,63 @@ fn incomplete_signature_help_narrows_at_the_third_argument_and_commits_after_clo
             let hover = client.hover(B, 1, start - 3);
             assert_eq!(hover.is_null(), !closed);
             previous = args;
+        }
+        client.shutdown();
+    }
+}
+
+#[test]
+fn editing_a_local_initializer_changes_signature_help_at_the_unchanged_call() {
+    let local = "    /* 😀 */ val third = 2";
+    let call = "    /* 😀 */ ops.pick(1, true, third, ";
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![A]);
+        client.open(A, PICK_OVERLOADS);
+        client.open(
+            B,
+            &format!(
+                "class Use {{
+  def run(actual: Ops): Int = {{
+    val ops = actual
+{local}
+{call}
+  }}
+}}"
+            ),
+        );
+        let edit_start = token_column(enc, local, "2");
+        let cursor = token_column(enc, call, "third, ") + "third, ".len();
+        for (version, edit, expected) in [
+            (1, None, pick_signature("n: Int", "tail: Boolean")),
+            (
+                2,
+                Some(("2", "false")),
+                pick_signature("flag: Boolean", "tail: Int"),
+            ),
+            (
+                3,
+                Some(("false", "2")),
+                pick_signature("n: Int", "tail: Boolean"),
+            ),
+        ] {
+            if let Some((old, new)) = edit {
+                client.edit(
+                    B,
+                    version,
+                    range(3, edit_start, edit_start + old.len()),
+                    new,
+                );
+            }
+            expect_missing_argument(&mut client, version);
+            let help = client.request(
+                "textDocument/signatureHelp",
+                json!({"textDocument":{"uri":B},"position":{"line":4,"character":cursor}}),
+            );
+            assert_eq!(
+                help,
+                json!({"signatures":[expected],"activeParameter":3}),
+                "{enc}, revision {version}"
+            );
         }
         client.shutdown();
     }
