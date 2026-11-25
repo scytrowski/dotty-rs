@@ -2254,3 +2254,80 @@ fn named_constructor_signature_and_definition_survive_duplicate_label_repair() {
         client.shutdown();
     }
 }
+
+#[test]
+fn editing_a_constructor_field_to_val_preserves_named_allocation_and_reads() {
+    const PROVIDER: &str = "class Counter(seed: Int, val id: Int, /* 😀 */ var count: Int)";
+    let lines = [
+        "class Use {",
+        "  def make(count: Int): Counter = /* 😀 */ new Counter(count = count, seed = 9, id = 2)",
+        "  def read(c: Counter): Int = /* 😀 */ c.count",
+        "  def write(c: Counter): Unit = /* 😀 */ c.count = 7",
+        "}",
+    ];
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![]);
+        client.open(A, PROVIDER);
+        client.diagnostics(A, 1, json!([]));
+        client.open(B, &lines.join("\n"));
+        let col = |line, token| token_column(encoding, line, token);
+        let modifier = col(PROVIDER, "var");
+        let decl = col(PROVIDER, "count:");
+        let first = col(lines[1], "count =");
+        let rhs = col(lines[1], "count,");
+        let read = col(lines[2], "c.count") + 2;
+        let write = col(lines[3], "c.count") + 2;
+        for (version, keyword) in [(1, "var"), (2, "val"), (3, "var")] {
+            if version > 1 {
+                client.edit(A, version, range(0, modifier, modifier + 3), keyword);
+            }
+            client.diagnostics(A, version, json!([]));
+            let mutable = keyword == "var";
+            let problems = if mutable {
+                json!([])
+            } else {
+                json!([{
+                    "range":range(3,write-2,write+5),"severity":1,"source":"dotty",
+                    "message":"Cannot assign to an immutable value"
+                }])
+            };
+            client.diagnostics(B, 1, problems);
+            for (cursor, active) in [
+                (first, 2),
+                (col(lines[1], "seed ="), 0),
+                (col(lines[1], "id ="), 1),
+            ] {
+                let sig = client.signature_help(B, 1, cursor);
+                assert_eq!(sig["activeParameter"], active);
+                assert_eq!(
+                    sig["signatures"][0]["label"],
+                    format!("new Counter(seed: Int, val id: Int, {keyword} count: Int)")
+                );
+            }
+            for (line, cursor, uri, start) in [
+                (1, first, A, decl),
+                (2, read, A, decl),
+                (1, rhs, B, col(lines[1], "count:")),
+            ] {
+                let def = client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":line,"character":cursor}}),
+                );
+                assert_eq!(def[0]["targetUri"], uri);
+                assert_eq!(
+                    def[0]["targetSelectionRange"],
+                    range(if uri == A { 0 } else { 1 }, start, start + 5)
+                );
+            }
+            let mut uses = vec![
+                json!({"uri":B,"range":range(1,first,first+5)}),
+                json!({"uri":B,"range":range(2,read,read+5)}),
+            ];
+            if mutable {
+                uses.push(json!({"uri":B,"range":range(3,write,write+5)}));
+            }
+            assert_eq!(client.references(A, 0, decl, false), json!(uses));
+        }
+        client.shutdown();
+    }
+}
