@@ -372,3 +372,94 @@ fn selected_overload_retains_its_own_ordered_signature_in_either_file_order() {
         );
     }
 }
+
+#[test]
+fn incomplete_prefixes_keep_both_overloads_until_the_third_argument() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let ops = named(
+        1,
+        "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail; private def pick(a: Boolean): Boolean = a }; class Other { def pick(a: Int): Int = a }",
+        &mut store,
+        &mut packages,
+    );
+    let sources = NamedClassSources::new([&ops], &store).unwrap();
+    prepare_bodies(&sources, &mut store, defs, &packages);
+    let methods: Vec<_> = ops.classes()[0].methods().map(|m| m.symbol).collect();
+    let id = SourceId::from_index(4);
+    let text = "class Use { def run(ops: Ops): Int = ops.pick(1, true, false, ";
+    let parsed = crate::parse_source(id, text, Default::default())
+        .unwrap()
+        .bind(&mut store.names);
+    assert!(!parsed.diagnostics.is_empty());
+    let index =
+        crate::IncompleteCallIndex::build(&sources, [("Use.scala", parsed)], store, defs, packages);
+    for (prefix, slot, expected) in [
+        ("pick(", 0, &methods[..2]),
+        ("1,", 1, &methods[..2]),
+        ("true,", 2, &methods[..2]),
+        ("false,", 3, &methods[1..2]),
+    ] {
+        let cursor = (text.find(prefix).unwrap() + prefix.len()) as u32;
+        let query = index.at(id, cursor).unwrap();
+        assert_eq!(query.active_parameter, slot);
+        assert_eq!(
+            query
+                .candidates
+                .iter()
+                .map(|c| c.method)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for candidate in query.candidates {
+            assert_eq!(candidate.parameters.len(), 4);
+            assert_eq!(candidate.target.source, ops.source());
+            assert_eq!(candidate.result.ty, defs.int);
+        }
+    }
+    assert_eq!(
+        index.at(id, text.len() as u32).unwrap().candidates[0].parameters[3]
+            .ty
+            .ty,
+        defs.int
+    );
+    assert!(index.at(ops.source(), text.len() as u32).is_none());
+}
+
+#[test]
+fn incomplete_calls_respect_failed_arguments_receiver_scope_and_written_arity() {
+    for (body, has_candidate) in [
+        ("ops.pick(1, ", true),
+        ("ops.pick(false, ", false),
+        ("ops.pick(unknown, ", false),
+        ("ops.pick(1, true, ", false),
+        ("other.pick(1, ", false),
+        ("{ val ops = other; ops.pick(1, ", false),
+        ("ops.pick(ops.pick(1, ", true),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let packages = Packages::new();
+        let providers = NamedClassSources::new([], &store).unwrap();
+        let id = SourceId::from_index(5);
+        let text = format!(
+            "class Ops {{ def pick(n: Int, b: Boolean): Int = n }}; class Other; class Use {{ def run(ops: Ops, other: Other): Int = {body}"
+        );
+        let parsed = crate::parse_source(id, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &providers,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        assert_eq!(
+            index.at(id, text.len() as u32).is_some(),
+            has_candidate,
+            "{body}"
+        );
+    }
+}

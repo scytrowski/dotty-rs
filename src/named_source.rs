@@ -68,6 +68,16 @@ impl ParsedSource<SyntaxDiagnostic> {
         if !self.diagnostics.is_empty() {
             return Err(NameSourceError::Syntax(Box::new(self)));
         }
+        self.name_with_status(filename, store, packages, SourceParseStatus::Clean)
+    }
+
+    pub(crate) fn name_with_status(
+        self,
+        filename: &str,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        status: SourceParseStatus,
+    ) -> Result<NamedSource, NameSourceError> {
         let syntax = self.syntax;
         let source = syntax.call_names.source();
         match name_compilation_unit_with_diagnostics(
@@ -75,7 +85,7 @@ impl ParsedSource<SyntaxDiagnostic> {
             syntax.root,
             source,
             filename,
-            SourceParseStatus::Clean,
+            status,
             store,
             packages,
         ) {

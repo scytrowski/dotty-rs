@@ -1,38 +1,53 @@
 //! Written argument lists for cursor queries in one source revision.
 
-use dotty_core::TextRange;
+use dotty_core::{TextRange, TreeId, Untyped};
 
-/// A closed parenthesized application, including nested and indirect applications.
+/// A parenthesized application, including nested and indirect applications.
 #[derive(Debug)]
 pub struct CallArgumentList {
     /// Written callee token for a direct named call. Other applications have no name here.
     pub callee: Option<TextRange>,
-    /// Half-open UTF-8 byte range from the opening through the closing parenthesis.
+    /// UTF-8 byte range from the opening through the closing parenthesis, or to
+    /// the recovery boundary of an unfinished list.
     pub range: TextRange,
     /// Expression ranges in written order, excluding delimiters and surrounding trivia.
     pub arguments: Box<[TextRange]>,
     /// True for an ordinary clause containing only positional arguments.
     pub positional: bool,
+    /// Original application in the parse arena when its closing parenthesis is
+    /// missing. Only the first `arguments.len()` argument trees are written.
+    pub unfinished: Option<TreeId<Untyped>>,
+    pub(crate) includes_end: bool,
     pub(crate) comma_ends: Box<[u32]>,
     pub(crate) parent: Option<usize>,
 }
 
 impl CallArgumentList {
+    /// Positional slot at an insertion point, including the next unwritten slot
+    /// after an opening parenthesis or comma. Only valid inside this list.
+    pub fn slot_at(&self, offset: u32) -> Option<usize> {
+        self.contains_cursor(offset)
+            .then(|| self.comma_ends.partition_point(|end| *end <= offset))
+    }
+
+    fn contains_cursor(&self, offset: u32) -> bool {
+        offset > self.range.start()
+            && (offset < self.range.end() || self.includes_end && offset == self.range.end())
+    }
+
     /// Index of the written argument at a UTF-8 insertion position. Trivia before
     /// a comma belongs to the previous argument; immediately after a comma the
     /// next argument becomes active. Empty lists, trailing commas without a next
     /// argument, and positions outside the parentheses yield `None`.
     pub fn argument_index(&self, offset: u32) -> Option<usize> {
-        if offset <= self.range.start() || offset >= self.range.end() {
-            return None;
-        }
-        let slot = self.comma_ends.partition_point(|end| *end <= offset);
+        let slot = self.slot_at(offset)?;
         (slot < self.arguments.len()).then_some(slot)
     }
 }
 
-/// Index of completed parenthesized applications in a single parse.
-/// It owns only byte ranges and can be retained after dropping the syntax arena.
+/// Index of parenthesized applications in a single parse. Ranges and unfinished
+/// tree IDs can be retained after releasing the arena; dereference a tree ID
+/// only in its original parse.
 #[derive(Debug)]
 pub struct SourceCallArguments(Vec<CallArgumentList>);
 
@@ -58,9 +73,28 @@ impl SourceCallArguments {
     /// the opening and after the closing token are outside. Supply a UTF-8
     /// byte offset from the original revision. Unclosed lists have no entry.
     pub fn at(&self, offset: u32) -> Option<&CallArgumentList> {
+        self.innermost(offset)
+            .filter(|list| list.unfinished.is_none())
+    }
+
+    /// Finds the innermost unfinished list at this cursor. EOF and the insertion
+    /// position immediately before a closing brace are included. The next
+    /// declaration and positions inside a completed nested list are excluded.
+    pub fn unfinished_at(&self, offset: u32) -> Option<&CallArgumentList> {
+        self.innermost(offset)
+            .filter(|list| list.unfinished.is_some())
+    }
+
+    /// Visits unfinished lists with an intact positional prefix in opening-token
+    /// order. Inspect `positional` to exclude named or contextual arguments.
+    pub fn unfinished_lists(&self) -> impl Iterator<Item = &CallArgumentList> {
+        self.0.iter().filter(|list| list.unfinished.is_some())
+    }
+
+    fn innermost(&self, offset: u32) -> Option<&CallArgumentList> {
         let next = self.0.partition_point(|list| list.range.start() < offset);
         let mut list = self.0.get(next.checked_sub(1)?)?;
-        while offset >= list.range.end() {
+        while !list.contains_cursor(offset) {
             list = &self.0[list.parent?];
         }
         Some(list)
@@ -157,5 +191,62 @@ mod tests {
             );
         }
         assert!(parse("f(1").call_arguments.at(2).is_none());
+    }
+
+    #[test]
+    fn eof_and_commas_preserve_every_written_argument_and_the_next_slot() {
+        for (text, slot, count) in [
+            ("o.pick(", 0, 0),
+            ("o.pick(1, ", 1, 1),
+            ("o.pick(1, true, ", 2, 2),
+            ("o.pick(1, true, 3, ", 3, 3),
+            ("o.pick(1, true, 3, 4", 3, 4),
+        ] {
+            let parsed = parse(text);
+            let end = text.len() as u32;
+            let list = parsed.call_arguments.unfinished_at(end).unwrap();
+            assert_eq!(
+                (list.slot_at(end), list.arguments.len(), list.unfinished),
+                (Some(slot), count, Some(parsed.root))
+            );
+            assert!(parsed.call_arguments.at(end).is_none());
+            assert!(parsed.call_arguments.unfinished_at(end + 1).is_none());
+        }
+    }
+
+    #[test]
+    fn recovery_respects_nesting_and_following_declarations() {
+        let parsed = parse("a.pick(b.pick(");
+        let inner = parsed.call_arguments.unfinished_at(14).unwrap();
+        assert_eq!(inner.callee.unwrap().start(), 9);
+        let text = "class Use { def run(o: Ops): Int = o.pick(1,  \n def next(): Int = 0 }";
+        let parsed = crate::parse_compilation_unit(
+            dotty_core::SourceText::new(text).unwrap(),
+            dotty_core::SourceId::from_index(0),
+            dotty_lexer::ContextualScanner::new(text).unwrap(),
+            &mut dotty_core::NameInterner::new(),
+        );
+        let cursor = text.find("1,").unwrap() as u32 + 2;
+        assert_eq!(
+            parsed
+                .call_arguments
+                .unfinished_at(cursor)
+                .unwrap()
+                .slot_at(cursor),
+            Some(1)
+        );
+        assert!(
+            parsed
+                .call_arguments
+                .unfinished_at(text.find("def next").unwrap() as u32)
+                .is_none()
+        );
+        let next = text.find("next()").unwrap() as u32;
+        assert!(parsed.ast.iter().any(|(tree, _)| {
+            parsed
+                .call_names
+                .method_name(tree)
+                .is_some_and(|name| name.start() == next)
+        }));
     }
 }

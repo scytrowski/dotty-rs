@@ -92,18 +92,15 @@ where
         }
         let mut args = Vec::new();
         let mut comma_ends = Vec::new();
+        let mut missing_slot = None;
         let closed = if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             true
         } else {
             loop {
-                if self.at_enum_body_parent_boundary()
-                    || matches!(
-                        self.current().kind,
-                        TokenKind::Punctuation(Punctuation::RightBrace)
-                            | TokenKind::Outdent
-                            | TokenKind::Eof
-                    )
-                {
+                if self.at_call_recovery_boundary() || self.at_enum_body_parent_boundary() {
+                    if self.diagnostics.len() == diagnostics_before {
+                        missing_slot = Some(args.len());
+                    }
                     self.report_issue(ParseIssue::Expression(ExpressionIssue::MissingArgument {
                         found: self.current().kind,
                     }));
@@ -113,6 +110,11 @@ where
                 }
                 self.consume_newlines_before_argument_delimiter();
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    if self.at_call_recovery_boundary()
+                        && self.diagnostics.len() == diagnostics_before
+                    {
+                        missing_slot = Some(args.len());
+                    }
                     break self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                 }
                 comma_ends.push(self.last_real_token_end);
@@ -121,26 +123,28 @@ where
                 }
             }
         };
-        if closed
-            && self.diagnostics.len() == diagnostics_before
-            && let Ok(range) = dotty_core::TextRange::new(open.start(), self.last_real_token_end)
-            && let Some(arguments) = args
+        let end = if closed {
+            self.last_real_token_end
+        } else {
+            self.current().span.start()
+        };
+        let count = if closed && self.diagnostics.len() == diagnostics_before {
+            Some(args.len())
+        } else {
+            missing_slot
+        };
+        let captured = count.and_then(|count| {
+            let written = &args[..count];
+            let arguments = written
                 .iter()
                 .map(|&tree| Some(self.ast.get(tree).position?.span().range()))
-                .collect()
-        {
-            self.call_arguments.push(crate::CallArgumentList {
-                callee: name.map(|(_, range)| range),
-                range,
-                arguments,
-                positional: kind == ApplyKind::Regular
-                    && !args
-                        .iter()
-                        .any(|&tree| matches!(self.ast.get(tree).kind, TreeKind::NamedArg(_))),
-                comma_ends: comma_ends.into_boxed_slice(),
-                parent: None,
-            });
-        }
+                .collect::<Option<Box<[_]>>>()?;
+            let positional = kind == ApplyKind::Regular
+                && !written
+                    .iter()
+                    .any(|&tree| matches!(self.ast.get(tree).kind, TreeKind::NamedArg(_)));
+            Some((arguments, positional))
+        });
         let call = self.alloc_from(
             mark,
             TreeKind::Apply(Apply {
@@ -149,10 +153,43 @@ where
                 kind,
             }),
         );
+        if let Some((arguments, positional)) = captured
+            && let Ok(range) = dotty_core::TextRange::new(open.start(), end)
+        {
+            self.call_arguments.push(crate::CallArgumentList {
+                callee: name.map(|(_, range)| range),
+                range,
+                arguments,
+                positional,
+                unfinished: (!closed).then_some(call),
+                includes_end: !closed
+                    && (end == self.source.len_bytes()
+                        || self
+                            .cursor
+                            .at(TokenKind::Punctuation(Punctuation::RightBrace))),
+                comma_ends: comma_ends.into_boxed_slice(),
+                parent: None,
+            });
+        }
         if let Some((_, range)) = name {
             self.call_names.push((range, call));
         }
         call
+    }
+
+    fn at_call_recovery_boundary(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Eof
+                | TokenKind::Outdent
+                | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::Semicolon)
+                | TokenKind::Keyword(
+                    dotty_core::HardKeyword::Def
+                        | dotty_core::HardKeyword::Val
+                        | dotty_core::HardKeyword::Var
+                        | dotty_core::HardKeyword::Class
+                )
+        )
     }
 
     fn current_is_using_marker(&mut self) -> bool {

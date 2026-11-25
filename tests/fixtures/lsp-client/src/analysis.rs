@@ -9,9 +9,8 @@ use dotty::core::{
 };
 use dotty::{
     CheckedClassBodies, ClassHeaderBindings, ClassHeaderPhase, MemberSignaturePhase,
-    NamedClassSource, NamedClassSources, NamedClassSourcesError, PreparationDiagnostic,
-    ResolvedMemberIndex, SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport,
-    SignatureCycle,
+    NamedClassSources, NamedClassSourcesError, PreparationDiagnostic, ResolvedMemberIndex,
+    SemanticDiagnostic, SignatureBlockage, SignatureBlockageReport, SignatureCycle,
 };
 
 #[derive(Clone)]
@@ -58,6 +57,7 @@ pub struct FileResult {
 pub struct Analysis {
     pub files: BTreeMap<String, FileResult>,
     pub members: ResolvedMemberIndex,
+    pub unfinished: dotty::IncompleteCallIndex,
     // Source IDs follow the open documents' URI order in this revision.
     uris: Vec<String>,
 }
@@ -74,27 +74,6 @@ impl Analysis {
             .ok()?;
         Some(SourceId::from_index(i as u32))
     }
-}
-
-fn name(
-    text: &str,
-    source: SourceId,
-    filename: &str,
-    store: &mut SemanticStore,
-    packages: &mut Packages,
-    result: &mut FileResult,
-) -> Option<NamedClassSource> {
-    let parsed = dotty::parse_source(source, text, Default::default())
-        .map_err(|error| result.problems.push(Problem::Scan(error)))
-        .ok()?
-        .bind(&mut store.names);
-    let (file, diagnostics) = parsed
-        .prepare_classes(filename, store, packages)
-        .into_parts();
-    result
-        .problems
-        .extend(diagnostics.into_iter().map(Problem::Preparation));
-    file
 }
 
 // Report one marker at each participant. A downstream waiter already has a provider report.
@@ -150,21 +129,47 @@ pub fn analyze_with_classpath(
     let mut uris = Vec::with_capacity(docs.len());
     let mut results = HashMap::new();
     let mut units = Vec::new();
+    let mut unfinished = Vec::new();
     for (i, (uri, doc)) in docs.iter().enumerate() {
         let source = SourceId::from_index(i as u32);
         uris.push(uri.clone());
-        if let Some(unit) = name(
-            doc.text.as_str(),
-            source,
-            uri.rsplit('/').next().unwrap_or(uri),
-            &mut store,
-            &mut packages,
-            results.entry(source).or_default(),
-        ) {
-            units.push(unit);
+        let result: &mut FileResult = results.entry(source).or_default();
+        let filename = uri.rsplit('/').next().unwrap_or(uri);
+        let parsed = match dotty::parse_source(source, doc.text.as_str(), Default::default()) {
+            Ok(parsed) => parsed.bind(&mut store.names),
+            Err(error) => {
+                result.problems.push(Problem::Scan(error));
+                continue;
+            }
+        };
+        if !parsed.diagnostics.is_empty()
+            && parsed
+                .syntax
+                .call_arguments
+                .unfinished_lists()
+                .next()
+                .is_some()
+        {
+            result.problems.extend(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .cloned()
+                    .map(PreparationDiagnostic::Syntax)
+                    .map(Problem::Preparation),
+            );
+            unfinished.push((filename, parsed));
+        } else {
+            let (file, diagnostics) = parsed
+                .prepare_classes(filename, &mut store, &mut packages)
+                .into_parts();
+            units.extend(file);
+            result
+                .problems
+                .extend(diagnostics.into_iter().map(Problem::Preparation));
         }
     }
-    let members = match NamedClassSources::new(&units, &store) {
+    let (members, unfinished) = match NamedClassSources::new(&units, &store) {
         Ok(sources) => {
             let mut external = classpath.map(|path| {
                 ClasspathSymbolResolver::new(
@@ -177,20 +182,23 @@ pub fn analyze_with_classpath(
                 Some(resolver) => resolver,
                 None => &mut NoResolver,
             };
-            analyze_sources(
+            let members = analyze_sources(
                 &sources,
                 &mut store,
                 defs,
                 &packages,
                 &mut results,
                 resolver,
-            )
+            );
+            let pending =
+                dotty::IncompleteCallIndex::build(&sources, unfinished, store, defs, packages);
+            (members, pending)
         }
         Err(error) => {
             for result in results.values_mut() {
                 result.problems.push(Problem::Sources(error));
             }
-            ResolvedMemberIndex::default()
+            Default::default()
         }
     };
     let files = results
@@ -200,6 +208,7 @@ pub fn analyze_with_classpath(
     Analysis {
         files,
         members,
+        unfinished,
         uris,
     }
 }

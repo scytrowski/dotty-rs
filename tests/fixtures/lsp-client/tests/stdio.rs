@@ -1699,3 +1699,79 @@ fn signature_help_tracks_the_active_formal_and_selected_overload_across_edits() 
         client.shutdown();
     }
 }
+
+#[test]
+fn incomplete_signature_help_narrows_at_the_third_argument_and_commits_after_closing() {
+    let methods = "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }";
+    let line = "  def run(o: Ops): Int = /* 😀 */ o.pick(";
+    let signature = |third: &str, tail: &str| {
+        json!({
+            "label":format!("def pick(a: Int, b: Boolean, {third}, {tail}): Int"),
+            "parameters":[{"label":"a: Int"},{"label":"b: Boolean"},{"label":third},{"label":tail}]
+        })
+    };
+    let first = signature("n: Int", "tail: Boolean");
+    let second = signature("flag: Boolean", "tail: Int");
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![A]);
+        client.open(A, methods);
+        client.open(B, &format!("class Use {{\r\n{line}\r\n}}"));
+        let start = token_column(enc, line, "pick(") + 5;
+        let mut previous = "";
+        for (i, (args, slot, options)) in [
+            ("", 0, vec![&first, &second]),
+            ("1, ", 1, vec![&first, &second]),
+            ("1, true, ", 2, vec![&first, &second]),
+            ("1, true, 2, ", 3, vec![&first]),
+            ("1, true, false, ", 3, vec![&second]),
+            ("true, ", 1, vec![]),
+            ("1, true, 2, false)", 3, vec![&first]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if i != 0 {
+                client.edit(
+                    B,
+                    i as i32 + 1,
+                    range(1, start, start + previous.len()),
+                    args,
+                );
+            }
+            let closed = args.ends_with(')');
+            if closed {
+                client.diagnostics(B, i as i32 + 1, json!([]));
+            } else {
+                let Message::Notification(n) = client.receive() else {
+                    panic!("syntax diagnostics")
+                };
+                assert_eq!(n.method, "textDocument/publishDiagnostics");
+                assert_eq!(n.params["uri"], B);
+                assert_eq!(n.params["version"], i + 1);
+                let issues = n.params["diagnostics"].as_array().unwrap();
+                assert!(
+                    issues
+                        .iter()
+                        .any(|d| d["code"] == "parser.expression.missing_argument")
+                );
+            }
+            let pos = start + args.len() - usize::from(closed);
+            let help = client.request(
+                "textDocument/signatureHelp",
+                json!({"textDocument":{"uri":B},"position":{"line":1,"character":pos}}),
+            );
+            let expected = if options.is_empty() {
+                Value::Null
+            } else if closed {
+                json!({"signatures":options,"activeParameter":slot,"activeSignature":0})
+            } else {
+                json!({"signatures":options,"activeParameter":slot})
+            };
+            assert_eq!(help, expected, "{enc} at {args:?}");
+            let hover = client.hover(B, 1, start - 3);
+            assert_eq!(hover.is_null(), !closed);
+            previous = args;
+        }
+        client.shutdown();
+    }
+}

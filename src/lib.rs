@@ -138,6 +138,9 @@ pub use source_declaration_index::{
     SignatureDeclaration, SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
 
+mod incomplete_calls;
+pub use incomplete_calls::{CallSignatureCandidate, CallSignatureCandidates, IncompleteCallIndex};
+
 mod resolved_call_index;
 pub use resolved_call_index::{
     ResolvedCallIndex, ResolvedCallSignature, ResolvedMemberIndex, ResolvedSourceParent,

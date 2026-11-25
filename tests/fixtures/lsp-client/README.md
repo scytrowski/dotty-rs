@@ -42,7 +42,12 @@ For `textDocument/signatureHelp`, the client passes the insertion position to
 its formal parameters, highlighting the next formal immediately after a comma.
 The stdio regression checks nested calls, a change of overload after an edit,
 and a rejected sibling call in both negotiated encodings. The request covers
-completed positional applications with a committed source target.
+completed positional applications with a committed source target. For an
+unfinished call the fixture keeps the parser diagnostics, then builds an
+`IncompleteCallIndex` at the end of the revision. It returns the compatible
+signatures in lookup order and the cursor slot. Hover continues to require a
+committed target. The four-parameter stdio test keeps two overloads through
+the first two arguments and narrows them when the third argument is typed.
 
 The references request accepts positions on direct calls, supported field accesses, method parameter
 reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,

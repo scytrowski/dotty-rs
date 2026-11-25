@@ -1197,3 +1197,28 @@ establish general Scala ABI compatibility or a combined compiler API.
 The parsing, typing, and TASTy examples above need no JDK or Scala installation.
 External JVM verification and pinned Scala-consumer oracle checks are separate
 validation steps for the supported producer shapes.
+
+### Inspect an unfinished call in an editor revision
+
+Keep the normal parse diagnostics and run [`IncompleteCallIndex::build`] as the
+last operation on the editor's semantic store. A candidate remains provisional
+even when the prefix leaves only one overload. Once the call is closed and
+checked, use [`ResolvedMemberIndex::call_signature_at`] for the selected method.
+
+```rust
+use dotty::{IncompleteCallIndex, NamedClassSources, parse_source};
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+
+let mut store = SemanticStore::new();
+let defs = Definitions::bootstrap(&mut store);
+let providers = NamedClassSources::new([], &store)?;
+let id = SourceId::from_index(0);
+let text = "class Ops { def pick(i: Int, b: Boolean): Int = i }; class Use { def run(o: Ops): Int = o.pick(1, ";
+let parsed = parse_source(id, text, Default::default())?.bind(&mut store.names);
+assert!(!parsed.diagnostics.is_empty());
+let pending = IncompleteCallIndex::build(&providers, [("Use.scala", parsed)], store, defs, Packages::new());
+let help = pending.at(id, text.len() as u32).unwrap();
+assert_eq!(help.active_parameter, 1);
+assert_eq!(help.candidates[0].parameters[1].ty.name.as_ref(), "Boolean");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
