@@ -2331,3 +2331,44 @@ fn editing_a_constructor_field_to_val_preserves_named_allocation_and_reads() {
         client.shutdown();
     }
 }
+
+const PARENT: &str = "class Base(val id: Int, /* 😀 */ var count: Int)";
+const CHILD: &str =
+    "class Child(id: Int, initial: Int) extends /* 😀 */ Base(count = initial, id = id)";
+
+#[test]
+fn parent_signature_and_definitions_follow_formals_in_both_encodings() {
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, PARENT);
+        client.open(B, CHILD);
+        client.diagnostics(B, 1, json!([]));
+        let col = |text, token| token_column(encoding, text, token);
+        for (cursor, ordinal) in [(col(CHILD, "count ="), 1), (col(CHILD, "id ="), 0)] {
+            assert_eq!(
+                client.signature_help(B, 0, cursor),
+                json!({
+                    "signatures":[{"label":"extends Base(val id: Int, var count: Int)",
+                    "parameters":[{"label":"val id: Int"},{"label":"var count: Int"}]}],
+                    "activeSignature":0,"activeParameter":ordinal
+                })
+            );
+        }
+        for (cursor, uri, start) in [
+            (col(CHILD, "id ="), A, col(PARENT, "id:")),
+            (col(CHILD, "id)"), B, col(CHILD, "id:")),
+        ] {
+            let def = client.request(
+                "textDocument/definition",
+                json!({"textDocument":{"uri":B},"position":{"line":0,"character":cursor}}),
+            );
+            assert_eq!(def[0]["targetUri"], uri);
+            assert_eq!(def[0]["targetSelectionRange"], range(0, start, start + 2));
+            assert_eq!(
+                client.references(uri, 0, start, false),
+                json!([{"uri": B, "range": range(0, cursor, cursor + 2)}])
+            );
+        }
+        client.shutdown();
+    }
+}
