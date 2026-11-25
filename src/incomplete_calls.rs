@@ -65,10 +65,10 @@ impl IncompleteCallIndex {
     /// rejected contexts and unsupported calls contribute no candidates.
     /// Clean provider signatures must already be complete. Public source methods
     /// with one plain positional list and named parameter and result types are
-    /// supported. The receiver and prefix are typed in the enclosing method
-    /// context, including preceding ordinary eager local `val` and `var`
-    /// statements in enclosing blocks. Unsupported scopes or ill-typed
-    /// preceding statements suppress candidates for that call.
+    /// supported. The receiver and written arguments are typed in their lexical
+    /// context, including inside the initializer of an ordinary local `val` or
+    /// `var`. Earlier statements in each enclosing block are typed in order.
+    /// Unsupported scopes or ill-typed preceding statements suppress candidates.
     /// Filtering uses value-type conformance and requires a formal at the active
     /// slot. The probe uses source declarations and types available in this
     /// session and performs no external classpath loading.
