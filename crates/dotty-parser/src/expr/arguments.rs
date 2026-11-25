@@ -166,6 +166,7 @@ where
             && let Ok(range) = dotty_core::TextRange::new(open.start(), end)
         {
             self.call_arguments.push(crate::CallArgumentList {
+                application: call,
                 callee: name.map(|(_, range)| range),
                 range,
                 arguments,
