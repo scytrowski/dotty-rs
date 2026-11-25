@@ -848,20 +848,20 @@ impl SourceTyper<'_> {
         let named =
             self.bind_named_arguments(application_kind, callable, &argument_trees, tree_index)?;
         let mut inferred_witnesses = HashMap::new();
-        if application_kind == ApplyKind::Regular && named.is_some() {
-            if !self.strict_ordinary_clause(callable)
+        if application_kind == ApplyKind::Regular
+            && named.is_some()
+            && (!self.strict_ordinary_clause(callable)
                 || is_constructor_application
                 || !matches!(
                     self.typed_arena.get(function).kind,
                     TreeKind::Ident(_) | TreeKind::Select(_)
-                )
-            {
-                return Err(TyperError::UnsupportedExpression {
-                    source: self.source,
-                    tree_index,
-                    expression_kind: "named arguments outside a direct strict ordinary method",
-                });
-            }
+                ))
+        {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index,
+                expression_kind: "named arguments outside a direct strict ordinary method",
+            });
         }
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
