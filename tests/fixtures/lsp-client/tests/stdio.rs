@@ -2199,3 +2199,58 @@ fn rejected_overloads_publish_one_diagnostic_with_negotiated_candidate_locations
         client.shutdown();
     }
 }
+
+#[test]
+fn named_constructor_signature_and_definition_survive_duplicate_label_repair() {
+    let provider = "class Pair(left: Int, /* 😀 */ right: Int)";
+    let text =
+        "class Use { def make(right: Int): Pair = /* 😀 */ new Pair(right = right, left = 9) }";
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, provider);
+        client.open(B, text);
+        client.diagnostics(B, 1, json!([]));
+        let col = |s| token_column(encoding, text, s);
+        let first = col("right =");
+        let second = col("left =");
+        let rhs = col("right,");
+        let formal = token_column(encoding, provider, "right:");
+        for version in [1, 3] {
+            if version == 3 {
+                client.edit(B, 3, range(0, first, first + 4), "right");
+                client.diagnostics(B, 3, json!([]));
+            }
+            for (cursor, active) in [(first, 1), (rhs, 1), (second, 0)] {
+                assert_eq!(
+                    client.signature_help(B, 0, cursor),
+                    json!({
+                        "signatures":[{"label":"new Pair(left: Int, right: Int)",
+                        "parameters":[{"label":"left: Int"},{"label":"right: Int"}]}],
+                        "activeSignature":0,"activeParameter":active
+                    })
+                );
+            }
+            for (cursor, target, start) in [(first, A, formal), (rhs, B, col("right:"))] {
+                let def = client.request(
+                    "textDocument/definition",
+                    json!({"textDocument":{"uri":B},"position":{"line":0,"character":cursor}}),
+                );
+                assert_eq!(def[0]["targetUri"], target);
+                assert_eq!(def[0]["targetSelectionRange"], range(0, start, start + 5));
+            }
+            assert_eq!(client.hover(B, 0, first)["contents"]["value"], "right: Int");
+            assert_eq!(
+                client.references(A, 0, formal, false),
+                json!([{"uri":B,"range":range(0,first,first+5)}])
+            );
+            if version == 1 {
+                client.edit(B, 2, range(0, first, first + 5), "left");
+                client.diagnostics(B, 2, json!([{"range":range(0,second-1,second+3),
+                    "severity":1,"source":"dotty","code":"typer.duplicate_named_argument","message":"Parameter supplied twice"}]));
+                assert_eq!(client.signature_help(B, 0, first), Value::Null);
+                assert_eq!(client.references(A, 0, formal, false), json!([]));
+            }
+        }
+        client.shutdown();
+    }
+}

@@ -1007,6 +1007,9 @@ for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
     assert_eq!(args.written[0].ordinal, 0);
     assert_eq!(args.written[0].parameter.constructor, site.constructor);
     assert_eq!(args.written[0].label.unwrap().start(), offset + 5);
+    let signature = index.construction_signature_at(id, offset + 5).unwrap();
+    assert_eq!(signature.active_parameter, Some(0));
+    assert_eq!(&*signature.parameters[0].ty.name, "Int");
     let expected = &file.classes()[selected];
     assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));
     assert_eq!(index.references_to(site.class), &[site.origin]);

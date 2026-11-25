@@ -436,6 +436,12 @@ impl ResolvedMemberIndex {
                 .chain(&field_declarations)
                 .chain(&locals)
                 .map(|(symbol, _)| (*symbol, *symbol))
+                .chain(
+                    file.classes()
+                        .iter()
+                        .filter(|class| store.symbols.has_plain_primary_clause(class.constructor))
+                        .map(|class| (class.constructor, class.constructor)),
+                )
                 .chain(parameters.iter().map(|p| {
                     let formal = match p {
                         ParameterDeclaration::Constructor(p) => p.formal,
@@ -542,6 +548,42 @@ impl ResolvedMemberIndex {
         let file = self.files.get(&source)?;
         let list = file.call_arguments.at(offset)?;
         file.construction_arguments.get(&list.range.start())
+    }
+
+    /// Returns the signature of the innermost checked explicit allocation at
+    /// this UTF-8 insertion position. Supports the same source constructors as
+    /// [`Self::construction_arguments_at`], with retained named parameter types.
+    /// A cursor after a trailing comma or within an inner method call yields `None`.
+    pub fn construction_signature_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<crate::ResolvedConstructionSignature<'_>> {
+        let file = self.files.get(&source)?;
+        let list = file.call_arguments.at(offset)?;
+        let args = file.construction_arguments.get(&list.range.start())?;
+        let crate::SourceSymbolSignature::Method {
+            parameters: Some(parameters),
+            result,
+            ..
+        } = &self
+            .signatures
+            .get(&args.construction.constructor)?
+            .signature
+        else {
+            return None;
+        };
+        let active_parameter = if args.written.is_empty() {
+            None
+        } else {
+            Some(args.written.get(list.argument_index(offset)?)?.ordinal)
+        };
+        Some(crate::ResolvedConstructionSignature {
+            construction: args.construction,
+            instance: result,
+            parameters,
+            active_parameter,
+        })
     }
 
     /// Resolves a UTF-8 byte within the name of a single, unqualified, explicit

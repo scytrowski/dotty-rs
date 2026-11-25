@@ -96,7 +96,7 @@ impl SourceSymbolInfo {
                 };
                 SourceSymbolSignature::Value(SourceNamedType::capture(store, ty)?)
             }
-            SymbolKind::Method => {
+            SymbolKind::Method | SymbolKind::Constructor => {
                 let SymbolInfo::Complete(ty) = symbol.info else {
                     return None;
                 };

@@ -30,6 +30,20 @@ pub struct ResolvedConstructionArguments {
     pub written: Box<[crate::ResolvedWrittenArgument<crate::SourceConstructorParameter>]>,
 }
 
+/// Checked constructor signature at a cursor in a completed argument list.
+/// All references borrow the same retained revision.
+#[derive(Debug)]
+pub struct ResolvedConstructionSignature<'a> {
+    /// Written allocation and canonical identities.
+    pub construction: ResolvedSourceConstruction,
+    /// Constructed source class, including its semantic name.
+    pub instance: &'a crate::SourceNamedType,
+    /// Strict formal parameters in declaration order.
+    pub parameters: &'a [crate::SourceSignatureParameter],
+    /// Formal ordinal of the written operand at the cursor, or none for an empty list.
+    pub active_parameter: Option<usize>,
+}
+
 impl ResolvedConstructionArguments {
     pub(crate) fn capture(
         construction: ResolvedSourceConstruction,
