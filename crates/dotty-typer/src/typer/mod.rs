@@ -18583,10 +18583,56 @@ mod tests {
     }
 
     #[test]
+    fn mixed_primary_constructor_uses_written_positions_and_declared_field_types() {
+        for args in [
+            "count = 4, seed = 1, id = false",
+            "1, count = 4, id = false",
+            "count = 4, seed = 1, count = 7",
+            "count = 4, id = false",
+            "count = false, seed = 1, id = false",
+        ] {
+            let text = format!(
+                "class Counter(seed: Int, val id: Boolean, var count: Int); class Use {{ def make(): Counter = new Counter({args}) }}"
+            );
+            let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer =
+                SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression(rhs, context);
+            match args {
+                "count = 4, seed = 1, count = 7" => assert!(
+                    matches!(result, Err(TyperError::DuplicateNamedArgument {name,..}) if typer.store.names.resolve(name.text()) == "count")
+                ),
+                "count = 4, id = false" => assert!(
+                    matches!(result, Err(TyperError::MissingRequiredArgument {parameter_index:0, ref parameter_name,..}) if &**parameter_name == "seed")
+                ),
+                "count = false, seed = 1, id = false" => assert!(
+                    matches!(result, Err(TyperError::ApplicationArgumentTypeMismatch {argument_index:0, expected,..}) if expected == defs.int)
+                ),
+                _ => {
+                    let binding = typer.typed_index.named_call(result.unwrap()).unwrap();
+                    assert_eq!(
+                        &*binding.written_to_formal,
+                        if args.starts_with("1,") {
+                            &[0, 2, 1]
+                        } else {
+                            &[2, 0, 1]
+                        }
+                    );
+                    continue;
+                }
+            }
+            assert!(typer.typed_index.get(source, rhs).is_none());
+        }
+    }
+
+    #[test]
     fn named_primary_constructor_leaves_other_constructor_shapes_unsupported() {
         for declaration in [
-            "class Point(val x: Int)",
-            "class Point(var x: Int)",
+            "class Point(private val x: Int)",
+            "class Point(protected var x: Int)",
+            "class Point(val x: Int = 1)",
             "class Point(x: Int = 2)",
             "class Point private (x: Int)",
             "class Point(x: Int) { def this() = this(0) }",

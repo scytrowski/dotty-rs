@@ -2628,7 +2628,7 @@ input orders and executes the inferred call on JDK 21.
 
 A regular explicit allocation may name and reorder the required parameters of
 a public, monomorphic source primary constructor with one ordinary clause of
-plain parameters. The class must have a single constructor. Argument checking
+plain parameters, public `val` and `var` parameters, or a mixture. The class must have a single constructor. Argument checking
 uses declaration slots. Strict operands that move are evaluated once in written
 order, before the constructor invocation. The committed typed root retains the
 written-to-formal permutation, including when evaluation requires a block.
