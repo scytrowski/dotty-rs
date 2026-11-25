@@ -165,6 +165,7 @@ mod source_locals;
 mod source_signature_types;
 pub use source_signature_types::{MethodTypeRole, ResolvedConstructorType, ResolvedMethodType};
 mod source_parameters;
+pub use core::ast::ConstructorParameterKind;
 pub use source_parameters::{SourceConstructorParameter, SourceMethodParameter};
 
 mod source_construction;

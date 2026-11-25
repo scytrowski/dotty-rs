@@ -19,7 +19,7 @@ pub struct ResolvedSourceConstruction {
     pub target: SourceMemberTarget,
 }
 
-/// Arguments of a checked explicit source allocation with one plain primary clause.
+/// Arguments of a checked explicit source allocation with one required primary clause.
 /// Both declaration and use identities belong to the indexed revision.
 #[derive(Debug)]
 pub struct ResolvedConstructionArguments {
@@ -40,6 +40,8 @@ pub struct ResolvedConstructionSignature<'a> {
     pub instance: &'a crate::SourceNamedType,
     /// Strict formal parameters in declaration order.
     pub parameters: &'a [crate::SourceSignatureParameter],
+    /// Source declarations in the same order as `parameters`, with field roles and formal IDs.
+    pub declarations: &'a [crate::SourceConstructorParameter],
     /// Formal ordinal of the written operand at the cursor, or none for an empty list.
     pub active_parameter: Option<usize>,
 }
@@ -54,9 +56,10 @@ impl ResolvedConstructionArguments {
         store: &SemanticStore,
     ) -> Option<(u32, Self)> {
         let constructor = store.symbols.get(construction.constructor);
-        if !store
+        if store
             .symbols
-            .has_plain_primary_clause(construction.constructor)
+            .required_primary_clause(construction.constructor)
+            .is_none()
             || constructor.visibility != crate::core::Visibility::Public
         {
             return None;

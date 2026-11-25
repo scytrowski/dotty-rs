@@ -3398,3 +3398,52 @@ class Probe {
         );
     }
 }
+
+#[test]
+fn mixed_constructor_arguments_expose_source_roles_and_runtime_formals() {
+    use dotty::ConstructorParameterKind::{Plain, Val, Var};
+    let counter = (
+        SourceId::from_index(4),
+        "Counter.scala",
+        "class Counter(seed: Int, val id: Int, var count: Int)",
+    );
+    let caller = (
+        SourceId::from_index(1),
+        "Factory.scala",
+        "class Factory { def make(): Counter = new Counter(count = 4, seed = 9, id = 2) }",
+    );
+    for files in [[counter, caller], [caller, counter]] {
+        super::with_plan(&files, |plan, _, sources, bodies, _| {
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            let offset = caller.2.find("count =").unwrap() as u32;
+            let args = index.construction_arguments_at(caller.0, offset).unwrap();
+            let sig = index.construction_signature_at(caller.0, offset).unwrap();
+            assert_eq!(sig.active_parameter, Some(2));
+            assert_eq!(sig.declarations.len(), 3);
+            for ((p, ty), (name, kind)) in sig.declarations.iter().zip(sig.parameters).zip([
+                ("seed", Plain),
+                ("id", Val),
+                ("count", Var),
+            ]) {
+                let decl = index
+                    .constructor_parameter_at(counter.0, counter.2.find(name).unwrap() as u32)
+                    .unwrap();
+                assert_eq!(decl, *p);
+                assert_eq!((p.kind, &*ty.name, &*ty.ty.name), (kind, name, "Int"));
+                assert_eq!(
+                    plan.store.symbols.owner(p.parameter),
+                    Some(args.construction.class)
+                );
+                assert_eq!(
+                    plan.store.symbols.owner(p.formal),
+                    Some(args.construction.constructor)
+                );
+            }
+            assert_eq!(args.written.len(), 3);
+            for (arg, slot) in args.written.iter().zip([2, 0, 1]) {
+                assert_eq!((arg.ordinal, arg.parameter), (slot, sig.declarations[slot]));
+            }
+        });
+    }
+}
