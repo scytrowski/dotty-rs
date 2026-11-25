@@ -1786,56 +1786,79 @@ fn incomplete_signature_help_narrows_at_the_third_argument_and_commits_after_clo
 #[test]
 fn editing_a_local_initializer_changes_signature_help_at_the_unchanged_call() {
     let local = "    /* 😀 */ val third = 2";
-    let call = "    /* 😀 */ ops.pick(1, true, third, ";
     for enc in ["utf-8", "utf-16"] {
-        let mut client = Client::start(enc, vec![A]);
-        client.open(A, PICK_OVERLOADS);
-        client.open(
-            B,
-            &format!(
-                "class Use {{
+        for (call, completion) in [
+            ("    /* 😀 */ ops.pick(1, true, third, ", "false)"),
+            (
+                "    /* 😀 */ val result = ops.pick(1, true, third, ",
+                "false); result",
+            ),
+        ] {
+            let mut client = Client::start(enc, vec![A]);
+            client.open(A, PICK_OVERLOADS);
+            client.open(
+                B,
+                &format!(
+                    "class Use {{
   def run(actual: Ops): Int = {{
     val ops = actual
 {local}
 {call}
   }}
 }}"
-            ),
-        );
-        let edit_start = token_column(enc, local, "2");
-        let cursor = token_column(enc, call, "third, ") + "third, ".len();
-        for (version, edit, expected) in [
-            (1, None, pick_signature("n: Int", "tail: Boolean")),
-            (
-                2,
-                Some(("2", "false")),
-                pick_signature("flag: Boolean", "tail: Int"),
-            ),
-            (
-                3,
-                Some(("false", "2")),
-                pick_signature("n: Int", "tail: Boolean"),
-            ),
-        ] {
-            if let Some((old, new)) = edit {
-                client.edit(
-                    B,
-                    version,
-                    range(3, edit_start, edit_start + old.len()),
-                    new,
+                ),
+            );
+            let edit_start = token_column(enc, local, "2");
+            let cursor = token_column(enc, call, "third, ") + "third, ".len();
+            for (version, edit, expected) in [
+                (1, None, pick_signature("n: Int", "tail: Boolean")),
+                (
+                    2,
+                    Some(("2", "false")),
+                    pick_signature("flag: Boolean", "tail: Int"),
+                ),
+                (
+                    3,
+                    Some(("false", "2")),
+                    pick_signature("n: Int", "tail: Boolean"),
+                ),
+            ] {
+                if let Some((old, new)) = edit {
+                    client.edit(
+                        B,
+                        version,
+                        range(3, edit_start, edit_start + old.len()),
+                        new,
+                    );
+                }
+                expect_missing_argument(&mut client, version);
+                let help = client.request(
+                    "textDocument/signatureHelp",
+                    json!({"textDocument":{"uri":B},"position":{"line":4,"character":cursor}}),
+                );
+                assert_eq!(
+                    help,
+                    json!({"signatures":[expected],"activeParameter":3}),
+                    "{enc}, revision {version}"
                 );
             }
-            expect_missing_argument(&mut client, version);
-            let help = client.request(
+            client.edit(B, 4, range(4, cursor, cursor), completion);
+            client.diagnostics(B, 4, json!([]));
+            let end = cursor + "false".len();
+            let committed = client.request(
                 "textDocument/signatureHelp",
-                json!({"textDocument":{"uri":B},"position":{"line":4,"character":cursor}}),
+                json!({"textDocument":{"uri":B},"position":{"line":4,"character":end}}),
             );
             assert_eq!(
-                help,
-                json!({"signatures":[expected],"activeParameter":3}),
-                "{enc}, revision {version}"
+                committed,
+                json!({
+                    "signatures": [pick_signature("n: Int", "tail: Boolean")],
+                    "activeParameter": 3,
+                    "activeSignature": 0
+                }),
+                "{enc}: {call}"
             );
+            client.shutdown();
         }
-        client.shutdown();
     }
 }

@@ -27723,6 +27723,58 @@ mod tests {
     }
 
     #[test]
+    fn probing_local_initializers_agrees_with_full_typing_on_shadowing_and_self_reference() {
+        for keyword in ["val", "var"] {
+            for annotated in [false, true] {
+                let annotation = if annotated { ": Int" } else { "" };
+                let text = format!(
+                    "class C {{ def run(n: Int): Int = {{ {keyword} n{annotation} = n; n }} }}"
+                );
+                let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+                let (method, rhs) =
+                    method_definition_and_rhs(&parsed, &store, &index, source, "run");
+                let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                    panic!()
+                };
+                let TreeKind::ValDef(value) = &parsed.ast.get(block.stats[0]).kind else {
+                    panic!()
+                };
+                let target = value.rhs.unwrap();
+                let mut typer =
+                    SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+                typer.complete_symbol(method).unwrap();
+                let inspected = typer
+                    .inspect_method_expression(method, target, |probe, context| {
+                        let typed = probe.type_expression(target, context)?;
+                        Ok(probe.typed_ast().get(typed).ty)
+                    })
+                    .unwrap()
+                    .expect("initializer is reachable");
+                let context = typer.expression_context_for(method).unwrap();
+                let checked = typer.type_expression(rhs, context);
+                if annotated {
+                    for error in [inspected.unwrap_err(), checked.unwrap_err()] {
+                        assert!(matches!(error, TyperError::RecursiveLocalValueInitializer {
+                            source: file, tree_index, .. } if file == source && tree_index == target.index()));
+                    }
+                } else {
+                    checked.unwrap();
+                    let typed = typer.source_typed_index().get(source, target).unwrap();
+                    let actual = typer.typed_ast().get(typed).ty;
+                    let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+                    for ty in [inspected.unwrap(), actual] {
+                        assert_eq!(
+                            typer.store().types.get(ty).reference_symbol(),
+                            Some(parameter)
+                        );
+                        assert_eq!(typer.widen_expression_type(ty).unwrap(), defs.int);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_probe_prefix_rolls_back_and_never_inspects_the_target() {
         let (parsed, mut store, packages, defs, index, source) = parse_and_name(
             "class C { def run: Int = { val first = 1; val broken = missing; first } }",
