@@ -154,3 +154,31 @@ fn a_named_label_resolves_to_the_formal_and_its_value_keeps_its_lexical_symbol()
         Some(crate::ValueAccessKind::Read)
     );
 }
+
+#[test]
+fn references_merge_only_written_labels_with_reads_in_file_and_token_order() {
+    let a = "class Ops { def pick(right: Int = 4): Int = right + pick(right = right); def pick(right: Boolean): Int = 1 }";
+    let b = "class Use { def a(o: Ops): Int = o.pick(right = 1); def b(o: Ops): Int = o.pick(right = true); def c(o: Ops): Int = o.pick(); def bad(o: Ops): Int = o.pick(right = 3, right = 4) }";
+    for reverse in [false, true] {
+        let idx = index(a, b, reverse, 1);
+        let references = |formal| {
+            let p = idx.parameter_at(PROVIDER, pos(a, formal)).unwrap();
+            idx.references_to(p.parameter)
+                .iter()
+                .map(|s| (s.source(), s.span().range().start()))
+                .collect::<Vec<_>>()
+        };
+        let provider = ["right +", "right = right", "right);"].map(|name| (PROVIDER, pos(a, name)));
+        let caller = [(CALLER, pos(b, "right = 1"))];
+        let expected = if reverse {
+            [caller.as_slice(), provider.as_slice()]
+        } else {
+            [provider.as_slice(), caller.as_slice()]
+        };
+        assert_eq!(references("right: Int"), expected.concat());
+        assert_eq!(
+            references("right: Boolean"),
+            [(CALLER, pos(b, "right = true"))]
+        );
+    }
+}

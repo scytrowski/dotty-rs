@@ -102,7 +102,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
 
 // Each input is already ordered within one file. Keep reference collection linear
 // when declarations, parent clauses and allocations occur in interleaved order.
-fn merge_class_sites(
+fn merge_sites(
     left: impl Iterator<Item = (SymbolId, SourceSpan)>,
     right: impl Iterator<Item = (SymbolId, SourceSpan)>,
 ) -> impl Iterator<Item = (SymbolId, SourceSpan)> {
@@ -287,12 +287,12 @@ impl ResolvedMemberIndex {
             let method_types = crate::source_signature_types::method_types(file, &targets, store);
             let parent_sites = parents.iter().map(|s| (s.parent, s.origin));
             let construction_sites = constructions.iter().map(|s| (s.class, s.origin));
-            let signature_sites = merge_class_sites(
+            let signature_sites = merge_sites(
                 method_types.iter().map(|s| (s.class, s.origin)),
                 constructor_types.iter().map(|s| (s.class, s.origin)),
             );
-            for (class, span) in merge_class_sites(
-                merge_class_sites(parent_sites, construction_sites),
+            for (class, span) in merge_sites(
+                merge_sites(parent_sites, construction_sites),
                 signature_sites,
             ) {
                 index.references.entry(class).or_default().push(span);
@@ -371,7 +371,7 @@ impl ResolvedMemberIndex {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        parameters[slot].symbol()
+                        continue;
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
@@ -394,6 +394,13 @@ impl ResolvedMemberIndex {
                     }
                 };
                 index.references.entry(symbol).or_default().push(origin);
+            }
+            let reads = parameter_uses
+                .iter()
+                .map(|(span, slot)| (parameters[*slot].symbol(), *span));
+            let labels = argument_labels.iter().map(|(span, p)| (p.parameter, *span));
+            for (parameter, span) in merge_sites(reads, labels) {
+                index.references.entry(parameter).or_default().push(span);
             }
             let method_declarations = navigation.method_targets();
             let symbols = class_declarations
@@ -796,7 +803,9 @@ impl ResolvedMemberIndex {
     /// Committed uses of this exact symbol, in input file order then
     /// token order. For classes, covers single unqualified explicit parents and committed
     /// simple `new` expressions, as well as simple written class types in supported method and constructor signatures. Omits declarations. Unknown and unused symbols yield an
-    /// empty slice. Supply a symbol from the original session.
+    /// empty slice. Method parameter references include committed reads and written
+    /// argument labels at calls to that overload. Omitted arguments have no source
+    /// token. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)
     }

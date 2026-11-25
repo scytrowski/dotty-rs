@@ -749,6 +749,15 @@ including builtins, and methods with zero or one ordinary value clause. An
 unfinished signature or a type outside this subset yields `None`; the separate
 navigation query can still resolve its declaration.
 
+Use [`ResolvedMemberIndex::call_arguments_at`] on the callee name to inspect
+written arguments in evaluation order and omitted parameters with their selected
+getters. Each argument identifies the canonical source parameter on the selected
+overload. Argument and label ranges belong to the caller; parameter declaration
+ranges belong to its defining file. In `o.diff(right = right)`, [`ResolvedMemberIndex::symbol_at`]
+on the label resolves the formal, and the operand resolves its own lexical symbol.
+[`ResolvedMemberIndex::references_to`] includes the written label alongside reads
+of that formal. An implicit default has no source reference in the caller.
+
 For an ordinary call with named arguments, [`ResolvedMemberIndex::call_signature_at`]
 returns the active formal of the selected overload. Each formal exposes its
 registered default getter, and the checked signature lists the getters actually
