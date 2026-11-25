@@ -388,7 +388,7 @@ fn overload_errors_locate_the_whole_call_and_keep_its_candidates() {
             };
             assert_eq!(candidates.len(), 2);
             let mut reasons = class.methods().take(2).map(|method| {
-                candidates
+                &candidates
                     .iter()
                     .find(|(id, _)| *id == method.symbol)
                     .expect("rejection for the declared overload")
@@ -396,8 +396,8 @@ fn overload_errors_locate_the_whole_call_and_keep_its_candidates() {
             });
             assert!(
                 matches!(reasons.next(), Some(OverloadRejection::ArgumentNonConformance {
-                argument_index: 0, actual, expected,
-            }) if actual == defs.boolean && expected == defs.int)
+                argument_index: 0, actual, expected, ..
+            }) if *actual == defs.boolean && *expected == defs.int)
             );
             assert!(matches!(
                 reasons.next(),

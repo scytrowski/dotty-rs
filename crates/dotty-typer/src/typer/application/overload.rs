@@ -17,6 +17,39 @@ enum ApplicationFunctionShape {
     },
 }
 
+// Defer the two type descriptions until the entire overload set fails. These IDs
+// are consumed inside the same typing transaction, before the caller can roll it back.
+enum CandidateFailure {
+    Known(OverloadRejection),
+    Mismatch {
+        written: usize,
+        formal: usize,
+        expected: TypeId,
+        actual: TypeId,
+    },
+}
+
+impl CandidateFailure {
+    fn retain(self, store: &SemanticStore) -> OverloadRejection {
+        match self {
+            Self::Known(reason) => reason,
+            Self::Mismatch {
+                written,
+                formal,
+                actual,
+                expected,
+            } => OverloadRejection::ArgumentNonConformance {
+                argument_index: written,
+                parameter_index: formal,
+                actual,
+                expected,
+                actual_description: diagnostic_types::type_description(store, actual),
+                expected_description: diagnostic_types::type_description(store, expected),
+            },
+        }
+    }
+}
+
 fn supported_override_signature(method: &MethodType, store: &SemanticStore) -> bool {
     method.kind == MethodKind::Plain
         && method.params.iter().all(|parameter| {
@@ -1507,7 +1540,7 @@ impl SourceTyper<'_> {
                     )?
                     && let Some(candidate) = candidates.iter().find(|c| c.symbol == winner)
                 {
-                    return Ok(*candidate);
+                    return Ok(candidate.clone());
                 }
             }
             resolution
@@ -1523,7 +1556,7 @@ impl SourceTyper<'_> {
         self.resolver.rollback_to(self.store, resolver_checkpoint);
         self.store.rollback_to(store_checkpoint);
         self.type_index.restore(type_index_checkpoint);
-        candidates.copy_from_slice(&original_candidates);
+        candidates.clone_from_slice(&original_candidates);
 
         let selected_index = candidates
             .iter()
@@ -1540,7 +1573,7 @@ impl SourceTyper<'_> {
             original_candidates.len() == 1,
             info_journal,
         )?;
-        Ok(candidates[selected_index])
+        Ok(candidates[selected_index].clone())
     }
 
     pub(in crate::typer) fn choose_constructor_overload_candidate(
@@ -1585,7 +1618,7 @@ impl SourceTyper<'_> {
         self.resolver.rollback_to(self.store, resolver_checkpoint);
         self.store.rollback_to(store_checkpoint);
         self.type_index.restore(type_index_checkpoint);
-        candidates.copy_from_slice(&original_candidates);
+        candidates.clone_from_slice(&original_candidates);
 
         let selected_index = candidates
             .iter()
@@ -1602,7 +1635,7 @@ impl SourceTyper<'_> {
             false,
             info_journal,
         )?;
-        Ok(candidates[selected_index])
+        Ok(candidates[selected_index].clone())
     }
 
     pub(in crate::typer) fn instantiate_generic_overload_candidates(
@@ -1660,10 +1693,15 @@ impl SourceTyper<'_> {
                     argument_index,
                     actual,
                     expected,
+                    actual_description,
+                    expected_description,
                     ..
                 }) => {
                     candidate.rejection = Some(OverloadRejection::ArgumentNonConformance {
                         argument_index,
+                        parameter_index: argument_index,
+                        actual_description,
+                        expected_description,
                         actual,
                         expected,
                     });
@@ -2004,9 +2042,9 @@ impl SourceTyper<'_> {
         let mut using_defaults = Vec::new();
         let mut rejected = Vec::new();
         let mut unsupported_candidates = Vec::new();
-        for candidate in candidates.iter().copied() {
-            if let Some(rejection) = candidate.rejection {
-                rejected.push((candidate.symbol, rejection));
+        for candidate in candidates {
+            if let Some(rejection) = &candidate.rejection {
+                rejected.push((candidate.symbol, CandidateFailure::Known(rejection.clone())));
                 continue;
             }
             let method = match self.store.types.try_get(candidate.callable) {
@@ -2026,7 +2064,9 @@ impl SourceTyper<'_> {
                             if retain_unsupported_rejections {
                                 rejected.push((
                                     candidate.symbol,
-                                    OverloadRejection::UnsupportedSemantics,
+                                    CandidateFailure::Known(
+                                        OverloadRejection::UnsupportedSemantics,
+                                    ),
                                 ));
                                 unsupported_candidates.push(candidate.symbol);
                                 continue;
@@ -2040,7 +2080,7 @@ impl SourceTyper<'_> {
                             );
                         }
                     };
-                    rejected.push((candidate.symbol, rejection));
+                    rejected.push((candidate.symbol, CandidateFailure::Known(rejection)));
                     continue;
                 }
                 _ => {
@@ -2053,10 +2093,10 @@ impl SourceTyper<'_> {
             if !application_kind_accepts(application_kind, method.kind) {
                 rejected.push((
                     candidate.symbol,
-                    OverloadRejection::ApplicationKindMismatch {
+                    CandidateFailure::Known(OverloadRejection::ApplicationKindMismatch {
                         application_kind,
                         method_kind: method.kind,
-                    },
+                    }),
                 ));
                 continue;
             }
@@ -2069,10 +2109,10 @@ impl SourceTyper<'_> {
             if !partial && let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
                 rejected.push((
                     candidate.symbol,
-                    OverloadRejection::WrongArity {
+                    CandidateFailure::Known(OverloadRejection::WrongArity {
                         expected,
                         actual: arguments.len(),
-                    },
+                    }),
                 ));
                 continue;
             }
@@ -2099,7 +2139,10 @@ impl SourceTyper<'_> {
                         };
                         rejected.push((
                             candidate.symbol,
-                            OverloadRejection::NamedArgument { tree_index, reason },
+                            CandidateFailure::Known(OverloadRejection::NamedArgument {
+                                tree_index,
+                                reason,
+                            }),
                         ));
                         continue;
                     }
@@ -2121,9 +2164,11 @@ impl SourceTyper<'_> {
                             .default_getter(candidate.symbol, formal)
                             .is_none()
                     {
-                        argument_rejection = Some(OverloadRejection::MissingRequiredArgument {
-                            parameter_index: formal,
-                        });
+                        argument_rejection = Some(CandidateFailure::Known(
+                            OverloadRejection::MissingRequiredArgument {
+                                parameter_index: formal,
+                            },
+                        ));
                         break;
                     }
                     continue;
@@ -2137,8 +2182,9 @@ impl SourceTyper<'_> {
                 match self.conforms(actual, parameter.ty) {
                     Ok(true) => {}
                     Ok(false) => {
-                        argument_rejection = Some(OverloadRejection::ArgumentNonConformance {
-                            argument_index,
+                        argument_rejection = Some(CandidateFailure::Mismatch {
+                            written: argument_index,
+                            formal,
                             actual,
                             expected: parameter.ty,
                         });
@@ -2156,7 +2202,10 @@ impl SourceTyper<'_> {
             }
             if unsupported_relation {
                 if retain_unsupported_rejections {
-                    rejected.push((candidate.symbol, OverloadRejection::UnsupportedSemantics));
+                    rejected.push((
+                        candidate.symbol,
+                        CandidateFailure::Known(OverloadRejection::UnsupportedSemantics),
+                    ));
                     unsupported_candidates.push(candidate.symbol);
                     continue;
                 }
@@ -2177,7 +2226,10 @@ impl SourceTyper<'_> {
                 .type_contains_param_ref(method.result, candidate.callable)?;
             if unsupported {
                 if retain_unsupported_rejections {
-                    rejected.push((candidate.symbol, OverloadRejection::UnsupportedSemantics));
+                    rejected.push((
+                        candidate.symbol,
+                        CandidateFailure::Known(OverloadRejection::UnsupportedSemantics),
+                    ));
                     unsupported_candidates.push(candidate.symbol);
                     continue;
                 }
@@ -2206,11 +2258,14 @@ impl SourceTyper<'_> {
             });
         }
         match applicable.as_slice() {
-            [candidate] => Ok(*candidate),
+            [candidate] => Ok((**candidate).clone()),
             [] => Err(TyperError::OverloadApplicationNoApplicable {
                 source: self.source,
                 tree_index,
-                candidates: rejected,
+                candidates: rejected
+                    .into_iter()
+                    .map(|(id, why)| (id, why.retain(self.store)))
+                    .collect(),
             }),
             many => {
                 let mut most_specific = Vec::new();
@@ -2280,7 +2335,7 @@ impl SourceTyper<'_> {
                     }
                 }
                 match most_specific.as_slice() {
-                    [candidate] => Ok(*candidate),
+                    [candidate] => Ok((**candidate).clone()),
                     _ => Err(TyperError::AmbiguousOverloadApplication {
                         source: self.source,
                         tree_index,

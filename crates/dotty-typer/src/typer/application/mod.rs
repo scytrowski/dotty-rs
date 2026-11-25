@@ -12,7 +12,7 @@ mod named;
 pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::{InferenceLocation, PolyApplicationInference};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::typer) struct ApplicationCandidate {
     pub(in crate::typer) symbol: SymbolId,
     pub(in crate::typer) callable: TypeId,

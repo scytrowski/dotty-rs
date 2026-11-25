@@ -47,3 +47,25 @@ fn named_source_reports_select_the_exact_label_or_operand() {
         assert_eq!((range.start(), range.end()), (start, start + len));
     }
 }
+
+#[test]
+fn rejected_argument_keeps_its_written_and_formal_positions_and_type_descriptions() {
+    use crate::typer::{OverloadRejection, TyperError};
+    let a = "class Ops { def pick(n: Int, right: Int): Int = right; def pick(flag: Boolean, n: Int): Int = n }";
+    let b = "class Use { def bad(o: Ops): Int = o.pick(right = true, n = 1) }";
+    let result = reports(a, b, false);
+    let TyperError::OverloadApplicationNoApplicable { candidates, .. } = result[0].error() else {
+        panic!()
+    };
+    assert!(
+        matches!(&candidates[0].1, OverloadRejection::ArgumentNonConformance {argument_index:0, parameter_index:1, actual_description, expected_description, ..}
+        if &**actual_description == "Boolean" && &**expected_description == "Int")
+    );
+    assert!(matches!(
+        &candidates[1].1,
+        OverloadRejection::NamedArgument {
+            reason: crate::typer::NamedArgumentRejection::Unknown(_),
+            ..
+        }
+    ));
+}
