@@ -823,8 +823,26 @@ impl SourceTyper<'_> {
             is_constructor_application,
         } = request;
         let named =
-            self.named_using_arguments(application_kind, callable, &argument_trees, tree_index)?;
+            self.bind_named_arguments(application_kind, callable, &argument_trees, tree_index)?;
         let mut inferred_witnesses = HashMap::new();
+        if application_kind == ApplyKind::Regular && named.is_some() {
+            let supported = matches!(self.store.types.try_get(callable), Some(Type::Method(m))
+                if m.kind == MethodKind::Plain && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_))
+                && m.params.iter().all(|p| !p.erased && !p.varargs && !matches!(self.store.types.get(p.ty), Type::ByName { .. })));
+            if !supported
+                || is_constructor_application
+                || !matches!(
+                    self.typed_arena.get(function).kind,
+                    TreeKind::Ident(_) | TreeKind::Select(_)
+                )
+            {
+                return Err(TyperError::UnsupportedExpression {
+                    source: self.source,
+                    tree_index,
+                    expression_kind: "named arguments outside a direct strict ordinary method",
+                });
+            }
+        }
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
@@ -1056,6 +1074,7 @@ impl SourceTyper<'_> {
             && method.kind == MethodKind::Plain
             && application_kind == ApplyKind::Regular
             && !is_constructor_application
+            && named.is_none()
         {
             self.trailing_ordinary_defaults(
                 &mut function,
@@ -1284,8 +1303,8 @@ impl SourceTyper<'_> {
                 TyperWarning::ImplicitClauseWithoutUsing,
             ));
         }
-        if method.kind != MethodKind::Plain {
-            let call = self.finish_contextual_call(
+        let call = if method.kind != MethodKind::Plain {
+            self.finish_contextual_call(
                 function,
                 callable,
                 method.result,
@@ -1293,35 +1312,47 @@ impl SourceTyper<'_> {
                 application_kind,
                 position,
                 tree_index,
+            )?
+        } else {
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+                function,
+                arguments,
+                application_kind,
+                method.result,
+                position,
+            )
+        };
+        // Compute dependent result paths before lifting strict operands.
+        if let Some(slots) = &named
+            && slots
+                .iter()
+                .enumerate()
+                .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
+        {
+            self.order_named_operands(
+                call,
+                slots,
+                &method,
+                &mut shared,
+                context,
+                tree_index,
+                info_journal,
             )?;
-            // Compute dependent result paths from the original operands before
-            // introducing temporaries solely for evaluation order.
-            if let Some(slots) = &named
-                && slots
-                    .iter()
-                    .enumerate()
-                    .any(|(i, a)| a.as_ref().is_some_and(|a| i != a.written))
-            {
-                self.order_named_operands(
-                    call,
-                    slots,
-                    &method,
-                    &mut shared,
-                    context,
-                    tree_index,
-                    info_journal,
-                )?;
-            }
-            return Ok(self.bind_default_operands(shared, call, position));
         }
-        let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
-            function,
-            arguments,
-            application_kind,
-            method.result,
-            position,
-        );
-        Ok(self.bind_default_operands(shared, call, position))
+        let root = self.bind_default_operands(shared, call, position);
+        if application_kind == ApplyKind::Regular
+            && let Some(slots) = named
+        {
+            let mut formals = vec![0; argument_trees.len()];
+            for (formal, argument) in slots.iter().enumerate() {
+                if let Some(argument) = argument {
+                    formals[argument.written] = formal;
+                }
+            }
+            self.typed_index
+                .record_named_call(root, function, formals.into());
+        }
+        Ok(root)
     }
 
     pub(in crate::typer) fn type_type_application(

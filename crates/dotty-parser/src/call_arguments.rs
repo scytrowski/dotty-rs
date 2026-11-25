@@ -2,6 +2,19 @@
 
 use dotty_core::{TextRange, TreeId, Untyped};
 
+/// A written argument label and its operand in one source revision.
+#[derive(Debug)]
+pub struct NamedCallArgument {
+    /// Zero-based position in the source argument list.
+    pub written: usize,
+    /// Semantic spelling (without backquotes), independent of the parse interner.
+    pub name: Box<str>,
+    /// Exact UTF-8 range of the label token, including any backquotes.
+    pub label: TextRange,
+    /// Operand range, absent for an unfinished assignment at the recovery boundary.
+    pub value: Option<TextRange>,
+}
+
 /// A parenthesized application, including nested and indirect applications.
 #[derive(Debug)]
 pub struct CallArgumentList {
@@ -10,8 +23,12 @@ pub struct CallArgumentList {
     /// UTF-8 byte range from the opening through the closing parenthesis, or to
     /// the recovery boundary of an unfinished list.
     pub range: TextRange,
-    /// Expression ranges in written order, excluding delimiters and surrounding trivia.
+    /// Complete argument ranges in written order, excluding delimiters and surrounding trivia.
     pub arguments: Box<[TextRange]>,
+    /// Argument labels in source order, including a trailing label awaiting a value.
+    pub named_arguments: Box<[NamedCallArgument]>,
+    /// True for an ordinary argument clause, including one containing labels.
+    pub regular: bool,
     /// True for an ordinary clause containing only positional arguments.
     pub positional: bool,
     /// Original application in the parse arena when its closing parenthesis is
@@ -85,7 +102,7 @@ impl SourceCallArguments {
             .filter(|list| list.unfinished.is_some())
     }
 
-    /// Visits unfinished lists with an intact positional prefix in opening-token
+    /// Visits unfinished lists with an intact argument prefix in opening-token
     /// order. Inspect `positional` to exclude named or contextual arguments.
     pub fn unfinished_lists(&self) -> impl Iterator<Item = &CallArgumentList> {
         self.0.iter().filter(|list| list.unfinished.is_some())
@@ -191,6 +208,40 @@ mod tests {
             );
         }
         assert!(parse("f(1").call_arguments.at(2).is_none());
+    }
+
+    #[test]
+    fn labels_retain_their_ranges_and_missing_value_in_nested_calls() {
+        let text = "diff(right = inner(`x` = 4), left = ";
+        let parsed = parse(text);
+        assert!(!parsed.diagnostics.is_empty());
+        let slice = |r: dotty_core::TextRange| &text[r.start() as usize..r.end() as usize];
+        let outer = parsed
+            .call_arguments
+            .unfinished_at(text.len() as u32)
+            .unwrap();
+        let [right, left] = &*outer.named_arguments else {
+            panic!()
+        };
+        assert!(outer.regular && !outer.positional);
+        assert_eq!(outer.arguments.len(), 1);
+        assert_eq!(
+            (right.written, slice(right.label), right.value.map(slice)),
+            (0, "right", Some("inner(`x` = 4)"))
+        );
+        assert_eq!(
+            (left.written, slice(left.label), left.value),
+            (1, "left", None)
+        );
+        let inner = parsed
+            .call_arguments
+            .at(text.find('4').unwrap() as u32)
+            .unwrap();
+        let x = &inner.named_arguments[0];
+        assert_eq!(
+            (&*x.name, slice(x.label), x.value.map(slice)),
+            ("x", "`x`", Some("4"))
+        );
     }
 
     #[test]

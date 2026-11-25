@@ -62,6 +62,7 @@ impl Client {
                     "general": {"positionEncodings": [encoding]},
                     "textDocument": {
                         "definition": {"linkSupport": true},
+                        "signatureHelp": {"signatureInformation":{"activeParameterSupport":true}},
                         "publishDiagnostics": {"versionSupport": true}
                     }
                 }
@@ -1954,6 +1955,82 @@ fn changing_provider_visibility_refreshes_signature_help_in_an_unedited_document
                 expected,
                 "{enc}, provider version {version}"
             );
+        }
+        client.shutdown();
+    }
+}
+
+#[test]
+fn named_signature_help_tracks_each_overload_through_edit_close_and_undo() {
+    let methods = "class Ops { def pick(left: Int, right: Boolean): Int = left; def pick(right: Boolean, n: Int): Int = n }";
+    let line = "  def run(o: Ops): Int = /* 😀 */ o.pick(";
+    let signature = |a: &str, b: &str| json!({"label":format!("def pick({a}, {b}): Int"), "parameters":[{"label":a},{"label":b}]});
+    let a = signature("left: Int", "right: Boolean");
+    let b = signature("right: Boolean", "n: Int");
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![A]);
+        client.open(A, methods);
+        let mut previous = "right = ";
+        client.open(B, &format!("class Use {{\r\n{line}{previous}\r\n}}"));
+        let start = token_column(enc, line, "pick(") + 5;
+        let mut named_a = a.clone();
+        named_a["activeParameter"] = json!(1);
+        let mut named_b = b.clone();
+        named_b["activeParameter"] = json!(0);
+        let alternatives = json!({"signatures":[named_a,named_b]});
+        for (i, (args, expected)) in [
+            ("right = ", alternatives.clone()),
+            ("missing = ", Value::Null),
+            ("right = ", alternatives.clone()),
+            (
+                "right = true, n = ",
+                json!({"signatures":[b],"activeParameter":1}),
+            ),
+            (
+                "right = true, left = ",
+                json!({"signatures":[a],"activeParameter":0}),
+            ),
+            (
+                "right = true, left = 9)",
+                json!({"signatures":[a],"activeParameter":0,"activeSignature":0}),
+            ),
+            ("right = ", alternatives),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let version = i as i32 + 1;
+            if i > 0 {
+                client.edit(B, version, range(1, start, start + previous.len()), args);
+            }
+            let closed = args.ends_with(')');
+            if closed {
+                client.diagnostics(B, version, json!([]));
+            } else {
+                let Message::Notification(n) = client.receive() else {
+                    panic!("expected diagnostics")
+                };
+                assert_eq!(n.method, "textDocument/publishDiagnostics");
+                assert_eq!(n.params["uri"], B);
+                assert_eq!(n.params["version"], version);
+                assert!(
+                    n.params["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|d| d["code"] == "parser.expression.missing_assignment_rhs"),
+                    "{}",
+                    n.params
+                );
+            }
+            let cursor = start + args.len() - usize::from(closed);
+            assert_eq!(
+                client.signature_help(B, 1, cursor),
+                expected,
+                "{enc}: {args}"
+            );
+            assert_eq!(client.hover(B, 1, start - 3).is_null(), !closed);
+            previous = args;
         }
         client.shutdown();
     }

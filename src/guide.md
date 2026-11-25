@@ -744,6 +744,13 @@ including builtins, and methods with zero or one ordinary value clause. An
 unfinished signature or a type outside this subset yields `None`; the separate
 navigation query can still resolve its declaration.
 
+For an ordinary call with named arguments, [`ResolvedMemberIndex::call_signature_at`]
+returns the active formal of the selected overload. In an unfinished call,
+[`IncompleteCallIndex::at`] returns one [`ActiveCallSignature`] per viable
+overload. For example, `pick(right = ` can highlight formal 1 in
+`pick(left: Int, right: Boolean)` and formal 0 in `pick(right: Boolean, n: Int)`.
+A written label can therefore narrow the candidates before its value is complete.
+
 For a single lookup, [`NamedClassSources::resolved_call_at`] returns the written
 name, selected method symbol and source definition together. To collect one
 file's calls in source order, use [`NamedClassSources::resolved_calls_in`].

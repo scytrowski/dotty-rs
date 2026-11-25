@@ -141,6 +141,14 @@ suffix. An available default getter takes precedence for an omitted explicit
 using argument. The same path substitution applies when searching all arguments
 or materializing a conditional provider with an implicit or using clause.
 
+A direct ordinary call to a monomorphic method with one strict plain clause
+can bind all parameters by position or name. For `diff(left: Int, right: Int)`,
+Scala 3.9.0 accepts `diff(right = 4, left = 9)`, `diff(left = 9, 4)` and
+`diff(9, right = 4)`. It rejects the final operand of `diff(right = 4, 9)`.
+Unknown or repeated names point to the written argument. An incompatible
+value points to its RHS. The committed typed root retains the original callee
+and formal ordinal of each operand in written order.
+
 For an unambiguously selected method with a known contextual or legacy implicit
 signature, an explicit `using` clause can bind arguments by name. Missing slots
 are filled in parameter order, so `read(using v = w)` can first select `p`

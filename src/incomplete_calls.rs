@@ -33,10 +33,41 @@ pub struct CallSignatureCandidate {
 /// [`crate::ResolvedCallSignature`].
 #[derive(Debug)]
 pub struct CallSignatureCandidates<'a> {
-    /// Zero-based slot after the opening parenthesis or most recent comma.
+    /// Written slot after the opening parenthesis or most recent comma. For named
+    /// arguments, use each candidate's formal ordinal in [`ActiveCallSignature`].
     pub active_parameter: usize,
     /// Compatible overloads in semantic member lookup order. Always nonempty.
-    pub candidates: Vec<&'a CallSignatureCandidate>,
+    pub candidates: Vec<ActiveCallSignature<'a>>,
+}
+
+/// One viable signature and the formal selected by the cursor in that signature.
+#[derive(Debug)]
+pub struct ActiveCallSignature<'a> {
+    /// Borrowed method declaration from this revision.
+    pub signature: &'a CallSignatureCandidate,
+    /// Zero-based ordinal in this candidate's declaration.
+    pub active_parameter: usize,
+}
+
+impl std::ops::Deref for ActiveCallSignature<'_> {
+    type Target = CallSignatureCandidate;
+    fn deref(&self) -> &Self::Target {
+        self.signature
+    }
+}
+
+#[derive(Debug)]
+struct CandidatePrefix {
+    signature: CallSignatureCandidate,
+    compatible: usize,
+    // Empty for positional lists, whose mapping is the identity.
+    named_slots: Vec<SlotHint>,
+}
+
+#[derive(Debug)]
+struct SlotHint {
+    before: Option<usize>,
+    bound: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -44,7 +75,7 @@ struct FileCandidates {
     syntax: Arc<SourceCallArguments>,
     // For each recovered application, number of consecutive written arguments
     // compatible with each candidate. Earlier cursor positions reuse the prefix.
-    matches: HashMap<TreeId<Untyped>, Vec<(CallSignatureCandidate, usize)>>,
+    matches: HashMap<TreeId<Untyped>, Vec<CandidatePrefix>>,
 }
 
 /// Arena-independent candidate information for a single editor revision.
@@ -64,7 +95,7 @@ impl IncompleteCallIndex {
     /// packages. Only owned candidate data escapes. Unavailable declarations,
     /// rejected contexts and unsupported calls contribute no candidates.
     /// Clean provider signatures must already be complete. Accessible source methods
-    /// with one plain positional list and named parameter and result types are
+    /// with one plain argument list and named parameter and result types are
     /// supported for unqualified calls and explicit receivers. The written
     /// arguments and any receiver are typed in their lexical
     /// context, including inside the initializer of an ordinary local `val` or
@@ -148,7 +179,7 @@ impl IncompleteCallIndex {
                 &packages,
             );
             let mut matches = HashMap::new();
-            for list in syntax.unfinished_lists().filter(|list| list.positional) {
+            for list in syntax.unfinished_lists().filter(|list| list.regular) {
                 let Some(tree) = list.unfinished else {
                     continue;
                 };
@@ -196,12 +227,39 @@ impl IncompleteCallIndex {
         let written = list
             .arguments
             .partition_point(|range| range.end() <= offset);
+        let before_operand = list
+            .named_arguments
+            .binary_search_by_key(&active_parameter, |label| label.written)
+            .ok()
+            .map_or_else(
+                || {
+                    list.arguments
+                        .get(active_parameter)
+                        .is_none_or(|arg| offset < arg.start())
+                },
+                |i| offset < list.named_arguments[i].label.start(),
+            );
         let candidates: Vec<_> = file
             .matches
             .get(&list.unfinished?)?
             .iter()
-            .filter(|(c, prefix)| *prefix >= written && active_parameter < c.parameters.len())
-            .map(|(candidate, _)| candidate)
+            .filter(|c| c.compatible >= written)
+            .filter_map(|c| {
+                let formal = if list.positional {
+                    (active_parameter < c.signature.parameters.len()).then_some(active_parameter)?
+                } else {
+                    let hint = c.named_slots.get(active_parameter)?;
+                    if before_operand {
+                        hint.before?
+                    } else {
+                        hint.bound?
+                    }
+                };
+                Some(ActiveCallSignature {
+                    signature: &c.signature,
+                    active_parameter: formal,
+                })
+            })
             .collect();
         (!candidates.is_empty()).then_some(CallSignatureCandidates {
             active_parameter,
@@ -228,7 +286,7 @@ fn prefix_candidates(
     all: &NamedClassSources<'_>,
     typer: &mut SourceTyper<'_>,
     context: ExpressionContext,
-) -> Option<Vec<(CallSignatureCandidate, usize)>> {
+) -> Option<Vec<CandidatePrefix>> {
     list.callee?;
     let TreeKind::Apply(app) = &file.ast().get(tree).kind else {
         return None;
@@ -262,7 +320,13 @@ fn prefix_candidates(
         .args
         .iter()
         .take(list.arguments.len())
-        .map_while(|&arg| value_type(typer, arg, context))
+        .map_while(|&arg| {
+            let value = match &file.ast().get(arg).kind {
+                TreeKind::NamedArg(named) => named.arg,
+                _ => arg,
+            };
+            value_type(typer, value, context)
+        })
         .collect();
     let mut found = Vec::new();
     for method in methods {
@@ -294,13 +358,27 @@ fn prefix_candidates(
         else {
             continue;
         };
+        let named_slots = if list.positional {
+            Vec::new()
+        } else {
+            candidate_slots(list, &parameters)
+        };
         let compatible = prefix
             .iter()
-            .zip(&parameters)
-            .take_while(|(arg, formal)| typer.conforms(**arg, formal.ty.ty).unwrap_or(false))
+            .enumerate()
+            .take_while(|(written, arg)| {
+                let formal = if list.positional {
+                    Some(*written)
+                } else {
+                    named_slots.get(*written).and_then(|hint| hint.bound)
+                };
+                formal
+                    .and_then(|i| parameters.get(i))
+                    .is_some_and(|p| typer.conforms(**arg, p.ty.ty).unwrap_or(false))
+            })
             .count();
-        found.push((
-            CallSignatureCandidate {
+        found.push(CandidatePrefix {
+            signature: CallSignatureCandidate {
                 method,
                 target,
                 name,
@@ -308,7 +386,39 @@ fn prefix_candidates(
                 result,
             },
             compatible,
-        ));
+            named_slots,
+        });
     }
     Some(found)
+}
+
+fn candidate_slots(
+    list: &CallArgumentList,
+    parameters: &[SourceSignatureParameter],
+) -> Vec<SlotHint> {
+    let ordinals: HashMap<_, _> = parameters
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (&*p.name, i))
+        .collect();
+    let mut order = crate::typer::ArgumentSlots::new(parameters.len());
+    let mut labels = list.named_arguments.iter().peekable();
+    let mut hints = Vec::new();
+    for written in 0..=list.arguments.len() {
+        let before = order.next_unfilled();
+        let bound = if let Some(label) = labels.next_if(|a| a.written == written) {
+            ordinals
+                .get(&*label.name)
+                .and_then(|ordinal| order.bind(Some(*ordinal)).ok())
+        } else if written == list.arguments.len() {
+            before
+        } else {
+            order.bind(None).ok()
+        };
+        hints.push(SlotHint { before, bound });
+        if bound.is_none() {
+            break;
+        }
+    }
+    hints
 }

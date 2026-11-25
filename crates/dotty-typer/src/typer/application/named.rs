@@ -1,4 +1,4 @@
-//! Bind written using arguments to the selected method clause.
+//! Bind written arguments to the selected method clause.
 use super::*;
 
 pub(super) struct NamedArgument {
@@ -7,28 +7,23 @@ pub(super) struct NamedArgument {
 }
 
 impl SourceTyper<'_> {
-    pub(super) fn has_named_using_arguments(
-        &self,
-        kind: ApplyKind,
-        trees: &[TreeId<Untyped>],
-    ) -> bool {
-        kind == ApplyKind::Using
-            && trees.iter().any(|&t| {
-                matches!(
-                    self.arena.try_get(t).map(|t| &t.kind),
-                    Some(TreeKind::NamedArg(_))
-                )
-            })
+    pub(super) fn has_named_arguments(&self, trees: &[TreeId<Untyped>]) -> bool {
+        trees.iter().any(|&t| {
+            matches!(
+                self.arena.try_get(t).map(|t| &t.kind),
+                Some(TreeKind::NamedArg(_))
+            )
+        })
     }
 
-    pub(super) fn named_using_arguments(
+    pub(super) fn bind_named_arguments(
         &self,
         kind: ApplyKind,
         callable: TypeId,
         trees: &[TreeId<Untyped>],
         tree_index: u32,
     ) -> Result<Option<Vec<Option<NamedArgument>>>, TyperError> {
-        if !self.has_named_using_arguments(kind, trees) {
+        if !self.has_named_arguments(trees) {
             return Ok(None);
         }
         // Instantiation changes parameter types but preserves the clause's names
@@ -50,7 +45,7 @@ impl SourceTyper<'_> {
             .map(|(i, p)| (*p.name.as_name(), i))
             .collect();
         let mut slots: Vec<_> = (0..method.params.len()).map(|_| None).collect();
-        let mut next_unfilled = 0;
+        let mut order = crate::ArgumentSlots::new(method.params.len());
         for (written, &tree) in trees.iter().enumerate() {
             let node = self
                 .arena
@@ -67,35 +62,30 @@ impl SourceTyper<'_> {
                         tree_index: tree.index(),
                         name: arg.name,
                     })?;
-                (*ordinal, arg.arg)
+                (Some(*ordinal), arg.arg)
             } else {
-                if written != next_unfilled {
-                    return Err(TyperError::PositionalAfterNamedArgument {
+                (None, tree)
+            };
+            let formal = order.bind(ordinal).map_err(|reason| match reason {
+                crate::ArgumentSlotError::Duplicate(i) => TyperError::DuplicateNamedArgument {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: *method.params[i].name.as_name(),
+                },
+                crate::ArgumentSlotError::MisplacedPositional => {
+                    TyperError::PositionalAfterNamedArgument {
                         source: self.source,
                         tree_index: tree.index(),
-                    });
+                    }
                 }
-                (written, tree)
-            };
-            let Some(slot) = slots.get_mut(ordinal) else {
-                return Err(TyperError::ApplicationArityMismatch {
+                crate::ArgumentSlotError::OutsideClause => TyperError::ApplicationArityMismatch {
                     source: self.source,
                     tree_index,
                     expected: method.params.len(),
                     actual: trees.len(),
-                });
-            };
-            if slot.is_some() {
-                return Err(TyperError::DuplicateNamedArgument {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: *method.params[ordinal].name.as_name(),
-                });
-            }
-            *slot = Some(NamedArgument { written, value });
-            while slots.get(next_unfilled).is_some_and(Option::is_some) {
-                next_unfilled += 1;
-            }
+                },
+            })?;
+            slots[formal] = Some(NamedArgument { written, value });
         }
         Ok(Some(slots))
     }

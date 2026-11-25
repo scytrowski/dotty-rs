@@ -42,8 +42,10 @@
 #![deny(missing_docs)]
 #![doc = include_str!("guide.md")]
 
+mod argument_slots;
 mod source_type_index;
 mod source_typed_index;
+pub use argument_slots::{ArgumentSlotError, ArgumentSlots};
 mod typer;
 mod types;
 
@@ -53,9 +55,10 @@ pub use typer::{
     ConstructorCandidate, ExpressionContext, ExpressionScopeId, FieldInitializerContextIssue,
     MAX_MEMBER_LOOKUP_DEPTH, MAX_SOURCE_FUNCTION_ARITY, MAX_TYPE_RELATION_DEPTH,
     MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS, MemberCandidate, MemberLookupError,
-    OverloadRejection, PatternKind, SignatureCompletion, SourceFunctionFamily, SourceFunctionKind,
-    SourceFunctionPurity, SourceTyper, TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding,
-    TypedSourceOutput, TyperDiagnostic, TyperError, TyperWarning,
+    NamedArgumentRejection, OverloadRejection, PatternKind, SignatureCompletion,
+    SourceFunctionFamily, SourceFunctionKind, SourceFunctionPurity, SourceTyper,
+    TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding, TypedSourceOutput,
+    TyperDiagnostic, TyperError, TyperWarning,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,

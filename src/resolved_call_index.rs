@@ -25,6 +25,7 @@ struct IndexedFile {
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
+    named_formals: HashMap<u32, Box<[usize]>>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     method_declarations: Vec<(SymbolId, SourceMethodTarget)>,
@@ -44,7 +45,7 @@ pub struct ResolvedSourceParent {
 }
 
 /// Selected declaration and argument-to-parameter correspondence for a checked
-/// positional call. All names and types borrow the retained revision index.
+/// ordinary call. All names and types borrow the retained revision index.
 #[derive(Debug)]
 pub struct ResolvedCallSignature<'a> {
     /// Exact source overload, its written use, and its declaration.
@@ -59,7 +60,7 @@ pub struct ResolvedCallSignature<'a> {
     pub result: &'a crate::SourceNamedType,
     /// Parentheses and argument expression ranges in the calling file.
     pub arguments: &'a crate::parser::CallArgumentList,
-    /// Zero-based index into both the written arguments and the formals.
+    /// Zero-based formal ordinal for the written operand at the cursor.
     /// An empty clause has no active parameter.
     pub active_parameter: Option<usize>,
 }
@@ -284,8 +285,9 @@ impl ResolvedMemberIndex {
                 index.references.entry(class).or_default().push(span);
             }
             let mut calls = Vec::new();
+            let mut named_formals = HashMap::new();
             // A target navigation error is reported once when visiting its file.
-            for call in sources
+            for (call, formals) in sources
                 .calls_in_file(file, navigation, bodies, typed_ast, store)
                 .flatten()
             {
@@ -294,6 +296,9 @@ impl ResolvedMemberIndex {
                     .entry(call.method)
                     .or_default()
                     .push(call.origin);
+                if let Some(formals) = formals {
+                    named_formals.insert(call.origin.span().range().start(), formals.into());
+                }
                 calls.push(call);
             }
             let locals = crate::source_locals::declarations(file, navigation, bodies, store);
@@ -381,6 +386,7 @@ impl ResolvedMemberIndex {
                     parameters,
                     parameter_uses,
                     calls,
+                    named_formals,
                     fields,
                     field_declarations,
                     method_declarations,
@@ -459,8 +465,9 @@ impl ResolvedMemberIndex {
 
     /// Looks up the innermost parenthesized application at a UTF-8 insertion
     /// position. Requires a committed direct call to a source method with one
-    /// plain positional clause, a retained signature and one written argument
-    /// per formal. A position immediately after a comma selects the next formal.
+    /// plain clause, a retained signature and one written argument
+    /// per formal. A position immediately after a comma selects the next written operand.
+    /// Named arguments use the correspondence committed by the typer.
     /// An empty `()` returns a signature without an active parameter. A trailing
     /// comma without another argument, an unsupported or rejected inner call,
     /// and positions outside the list yield `None`. Performs no further typing.
@@ -469,8 +476,9 @@ impl ResolvedMemberIndex {
         source: SourceId,
         offset: u32,
     ) -> Option<ResolvedCallSignature<'_>> {
-        let arguments = self.files.get(&source)?.call_arguments.at(offset)?;
-        if !arguments.positional {
+        let file = self.files.get(&source)?;
+        let arguments = file.call_arguments.at(offset)?;
+        if !arguments.regular {
             return None;
         }
         let call = *self.call_at(source, arguments.callee?.start())?;
@@ -483,7 +491,17 @@ impl ResolvedMemberIndex {
         else {
             return None;
         };
-        let active_parameter = arguments.argument_index(offset);
+        let written = arguments.argument_index(offset);
+        let active_parameter = if arguments.positional {
+            written
+        } else {
+            Some(
+                *file
+                    .named_formals
+                    .get(&arguments.callee?.start())?
+                    .get(written?)?,
+            )
+        };
         if arguments.arguments.len() != parameters.len()
             || (!parameters.is_empty() && active_parameter.is_none())
         {

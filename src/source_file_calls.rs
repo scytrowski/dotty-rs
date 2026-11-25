@@ -195,6 +195,7 @@ impl SourceFileCalls {
     ) -> Option<SymbolId> {
         let entry = self.call_names().call_name_at(offset)?;
         self.method_for_call(entry, ast, typed_ast, store, bindings)
+            .map(|(method, _)| method)
     }
 
     fn method_for_call<'a>(
@@ -204,7 +205,7 @@ impl SourceFileCalls {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
         bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
-    ) -> Option<SymbolId> {
+    ) -> Option<(SymbolId, Option<&'a [usize]>)> {
         if ast.try_get(call)?.position?.source() != self.call_names().source() {
             return None;
         }
@@ -339,9 +340,11 @@ impl crate::NamedClassSources<'_> {
         let Some(entry) = calls.call_names().call_name_at(offset) else {
             return Ok(None);
         };
-        let Some(method) = calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
-            bodies.bindings(owner)
-        }) else {
+        let Some((method, _)) =
+            calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
+                bodies.bindings(owner)
+            })
+        else {
             return Ok(None);
         };
         self.resolved_target(source, entry.0, method, store)
@@ -362,23 +365,27 @@ impl crate::NamedClassSources<'_> {
             return Ok(Vec::new());
         };
         self.calls_in_file(caller, caller.navigation()?, bodies, typed_ast, store)
+            .map(|result| result.map(|(call, _)| call))
             .collect()
     }
 
-    pub(crate) fn calls_in_file(
+    pub(crate) fn calls_in_file<'a>(
         &self,
         caller: &crate::NamedClassSource,
         calls: &SourceFileCalls,
-        bodies: &crate::CheckedClassBodies,
+        bodies: &'a crate::CheckedClassBodies,
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
-    ) -> impl Iterator<Item = Result<ResolvedSourceCall, DeclarationError>> {
+    ) -> impl Iterator<Item = Result<(ResolvedSourceCall, Option<&'a [usize]>), DeclarationError>>
+    {
         calls.call_names().iter().filter_map(move |entry| {
-            let method = calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
-                bodies.bindings(owner)
-            })?;
+            let (method, formals) =
+                calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
+                    bodies.bindings(owner)
+                })?;
             self.resolved_target(caller.source(), entry.0, method, store)
                 .transpose()
+                .map(|result| result.map(|call| (call, formals)))
         })
     }
 

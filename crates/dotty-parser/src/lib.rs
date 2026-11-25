@@ -17,7 +17,7 @@
 #![doc = include_str!("guide.md")]
 
 mod call_arguments;
-pub use call_arguments::{CallArgumentList, SourceCallArguments};
+pub use call_arguments::{CallArgumentList, NamedCallArgument, SourceCallArguments};
 mod case_clauses;
 mod class_definitions;
 mod compilation_unit;

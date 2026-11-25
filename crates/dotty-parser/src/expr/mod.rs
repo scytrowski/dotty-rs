@@ -233,8 +233,11 @@ where
                 self.consume_control_newlines();
             }
             let missing_rhs_start = following_definition.or_else(|| {
-                self.starts_definition_statement()
-                    .then(|| self.current().span.start())
+                (self.starts_definition_statement()
+                    || (self.context.location == Location::InArgs
+                        && matches!(self.ast.get(lhs).kind, TreeKind::Ident(_))
+                        && self.at_call_recovery_boundary()))
+                .then(|| self.current().span.start())
             });
             let consumed_statement_separator = missing_rhs_start.is_some()
                 && matches!(

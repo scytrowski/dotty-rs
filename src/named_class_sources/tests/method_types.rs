@@ -823,3 +823,255 @@ fn inherited_identifier_reports_the_missing_provider_and_defers_multiple_methods
         }
     }
 }
+
+#[test]
+fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
+    use crate::typer::TyperError;
+    let text = "class Ops { def diff(left: Int, right: Int): Int = left - right }
+       class Bad {
+         def unknown(o: Ops): Int = o.diff(missing = 9, right = 4)
+         def duplicate(o: Ops): Int = o.diff(left = 9, left = 4)
+         def misplaced(o: Ops): Int = o.diff(right = 4, 9)
+         def wrong(o: Ops): Int = o.diff(right = false, left = 9)
+       }
+       class Good { def run(o: Ops): Int = o.diff(right = 4, left = 9) }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(8, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let before = store.checkpoint();
+    let trees = arena.iter().count();
+    for _ in 0..2 {
+        let (_, report) = sources
+            .check_class_body(
+                file.classes()[1].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        assert_eq!(store.checkpoint(), before);
+        assert_eq!(arena.iter().count(), trees);
+        let mut ranges = Vec::new();
+        for failure in report.errors {
+            let crate::ClassBodyError::Member { error, .. } = failure else {
+                panic!()
+            };
+            let expected = match &error {
+                TyperError::UnknownNamedArgument { name, .. }
+                    if store.names.resolve(name.text()) == "missing" =>
+                {
+                    "missing = 9"
+                }
+                TyperError::DuplicateNamedArgument { name, .. }
+                    if store.names.resolve(name.text()) == "left" =>
+                {
+                    "left = 4"
+                }
+                TyperError::PositionalAfterNamedArgument { .. } => "9",
+                TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    expected,
+                    ..
+                } if *expected == defs.int => "false",
+                other => panic!("{other:?}"),
+            };
+            let range = crate::typer_error_span(&error, file.ast())
+                .unwrap()
+                .span()
+                .range();
+            assert_eq!(
+                &text[range.start() as usize..range.end() as usize],
+                expected
+            );
+            ranges.push(expected);
+        }
+        assert_eq!(ranges, ["missing = 9", "left = 4", "9", "false"]);
+    }
+    let (_, good) = sources
+        .check_class_body(
+            file.classes()[2].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(good.errors.is_empty(), "{:?}", good.errors);
+}
+
+#[test]
+fn named_overloads_bind_each_candidates_own_labels_and_types() {
+    use crate::typer::{OverloadRejection, TyperError};
+    let methods = "class Ops { def pick(n: Int, b: Boolean): Int = n; def pick(b: Int, k: Boolean): Int = b; def swap(x: Int, y: Boolean): Int = x; def swap(y: Boolean, x: Int): Int = x }";
+    let calls = "class Use { def a(o: Ops): Int = o.pick(b = true, n = 1); def b(o: Ops): Int = o.pick(k = false, b = 2); def bad(o: Ops): Int = o.pick(n = true, b = 1); def tied(o: Ops): Int = o.swap(x = 1, y = false) }";
+    for reverse in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(2, methods, &mut store, &mut packages);
+        let caller = named(3, calls, &mut store, &mut packages);
+        let sources = NamedClassSources::new(
+            if reverse {
+                [&caller, &ops]
+            } else {
+                [&ops, &caller]
+            },
+            &store,
+        )
+        .unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                caller.classes()[0].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        let syms: Vec<_> = ops.classes()[0].methods().map(|m| m.symbol).collect();
+        let [
+            crate::ClassBodyError::Member {
+                error:
+                    TyperError::OverloadApplicationNoApplicable {
+                        candidates: rejected,
+                        ..
+                    },
+                ..
+            },
+            crate::ClassBodyError::Member {
+                error:
+                    TyperError::AmbiguousOverloadApplication {
+                        candidates: tied, ..
+                    },
+                ..
+            },
+        ] = report.errors.as_slice()
+        else {
+            panic!("{report:?}")
+        };
+        assert!(
+            matches!(rejected.as_slice(),[(a, OverloadRejection::ArgumentNonConformance {argument_index:0,..}),(b,OverloadRejection::NamedArgument{..})] if [*a,*b] == syms[..2])
+        );
+        assert_eq!(*tied, syms[2..]);
+        let mut bodies = CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+        for (i, name) in ["pick(b =", "pick(k ="].into_iter().enumerate() {
+            assert_eq!(
+                index
+                    .call_at(caller.source(), calls.find(name).unwrap() as u32)
+                    .unwrap()
+                    .method,
+                syms[i]
+            );
+            let signature = index
+                .call_signature_at(caller.source(), (calls.find(name).unwrap() + 5) as u32)
+                .unwrap();
+            assert_eq!(signature.active_parameter, Some(1));
+            assert_eq!(signature.call.method, syms[i]);
+        }
+    }
+}
+
+#[test]
+fn checked_named_signature_survives_argument_temporaries() {
+    let methods = "class Ops { def pick(left: Int, right: Boolean): Int = left }";
+    let calls = "class Use { def flag(): Boolean = true; def run(o: Ops): Int = o.pick(right = flag(), left = 9) }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let ops = named(2, methods, &mut store, &mut packages);
+    let caller = named(3, calls, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&caller, &ops], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let (body, report) = sources
+        .check_class_body(
+            caller.classes()[0].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    for (token, formal) in [("right =", 1), ("flag(),", 1), ("left =", 0), ("9)", 0)] {
+        let selected = index
+            .call_signature_at(caller.source(), calls.rfind(token).unwrap() as u32)
+            .unwrap();
+        assert_eq!(
+            selected.call.method,
+            ops.classes()[0].methods().next().unwrap().symbol
+        );
+        assert_eq!(selected.active_parameter, Some(formal));
+    }
+}
+
+#[test]
+fn unfinished_named_labels_select_each_candidates_formal_before_the_rhs() {
+    let methods = "class Ops { def pick(left: Int, right: Boolean): Int = left; def pick(right: Boolean, n: Int): Int = n }";
+    for (args, expected) in [
+        ("right = ", vec![(0, 1), (1, 0)]),
+        ("right = true, ", vec![(0, 0), (1, 1)]),
+        ("right = true, left = ", vec![(0, 0)]),
+        ("right = true, n = ", vec![(1, 1)]),
+        ("right = true, right = ", vec![]),
+        ("missing = ", vec![]),
+        ("right = 7, ", vec![]),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(2, methods, &mut store, &mut packages);
+        let providers = NamedClassSources::new([&ops], &store).unwrap();
+        prepare_bodies(&providers, &mut store, defs, &packages);
+        let methods: Vec<_> = ops.classes()[0].methods().map(|m| m.symbol).collect();
+        let id = SourceId::from_index(1);
+        let text = format!("class Use {{ def run(o: Ops): Int = o.pick({args}");
+        let parsed = crate::parse_source(id, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &providers,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        let get = |offset| {
+            index
+                .at(id, offset)
+                .into_iter()
+                .flat_map(|q| q.candidates)
+                .map(|c| (c.method, c.active_parameter))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            get(text.find(args).unwrap() as u32),
+            if args.starts_with("missing") {
+                vec![]
+            } else {
+                vec![(methods[0], 1), (methods[1], 0)]
+            }
+        );
+        assert_eq!(
+            get(text.len() as u32),
+            expected
+                .iter()
+                .map(|&(i, f)| (methods[i], f))
+                .collect::<Vec<_>>(),
+            "{args}"
+        );
+    }
+}

@@ -32467,3 +32467,67 @@ fn legacy_default_getter_runs_only_for_missing_implicit_evidence() {
         );
     }
 }
+
+#[test]
+fn ordinary_named_call_evaluates_receiver_then_written_operands_once() {
+    let source = r#"package example
+class Reader:
+  def diff(left: Int, right: Int): Int = left - right
+class Caller:
+  def choose(reader: Reader): Reader = reader
+  def right(): Int = 0
+  def left(): Int = 0
+  def run(reader: Reader): Int = choose(reader).diff(right = right(), left = left())
+"#;
+    let output = TestOutputDirectory::new("ordinary-named-arguments");
+    let artifacts = compile_source_classes(source, "Caller.scala", output.path()).unwrap();
+    let caller = decode_emitted_class_named(&artifacts, "example/Caller");
+    assert_invocation_sequence(
+        &caller,
+        emitted_method_code(&caller, "run"),
+        &[
+            (
+                0xb6,
+                "example/Caller",
+                "choose",
+                "(Lexample/Reader;)Lexample/Reader;",
+            ),
+            (0xb6, "example/Caller", "right", "()I"),
+            (0xb6, "example/Caller", "left", "()I"),
+            (0xb6, "example/Reader", "diff", "(II)I"),
+        ],
+    );
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(
+            &harness,
+            r#"class Run {
+          public static void main(String[] args) {
+            var trace = new StringBuilder();
+            var caller = new example.Caller() {
+              @Override public example.Reader choose(example.Reader ignored) {
+                trace.append("r"); return new example.Reader();
+              }
+              @Override public int right() { trace.append("R"); return 4; }
+              @Override public int left() { trace.append("L"); return 9; }
+            };
+            if (caller.run(null) != 5 || !trace.toString().equals("rRL"))
+              throw new AssertionError(trace);
+          }
+        }"#,
+        )
+        .unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
