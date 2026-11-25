@@ -178,3 +178,78 @@ fn an_omitted_required_parameter_has_a_target_but_no_written_operand() {
         a.find("left:").unwrap()
     );
 }
+
+#[test]
+fn failed_named_constructions_report_the_written_site_and_preserve_sibling_bindings() {
+    use crate::typer::TyperError;
+    let a = "class Pair(left: Int, right: Int)";
+    let b = "class Use {
+      def unknown(): Pair = new Pair(`other` = 2, left = 9)
+      def duplicate(): Pair = new Pair(right = 1, right = 2)
+      def wrong(): Pair = new Pair(right = false, left = 9)
+      def missing(): Pair = new Pair(right = 4)
+      def good(): Pair = new Pair(right = 7, left = 9)
+    }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let pair = named(8, a, &mut store, &mut packages);
+    let caller = named(3, b, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&caller, &pair], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let (body, report) = sources
+        .check_class_body(
+            caller.classes()[0].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    let errors: Vec<_> = report
+        .into_semantic_diagnostics(&sources)
+        .map(|d| match d.issue {
+            crate::SemanticIssue::Typing(e) => e,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(errors.len(), 4);
+    assert!(
+        matches!(errors[0].error(), TyperError::UnknownNamedArgument { name, .. } if store.names.resolve(name.text()) == "other")
+    );
+    assert!(
+        matches!(errors[1].error(), TyperError::DuplicateNamedArgument { name, .. } if store.names.resolve(name.text()) == "right")
+    );
+    assert!(
+        matches!(errors[2].error(), TyperError::ApplicationArgumentTypeMismatch { argument_index: 0, expected, .. } if *expected == defs.int)
+    );
+    assert!(
+        matches!(errors[3].error(), TyperError::MissingRequiredArgument { method, parameter_index: 0, parameter_name, .. } if *method == pair.classes()[0].constructor && &**parameter_name == "left")
+    );
+    let mut bodies = crate::CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = crate::ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    for (error, (token, width)) in errors.iter().zip([
+        ("`other`", 7),
+        ("right = 2", 5),
+        ("false", 5),
+        ("new Pair(right = 4)", 19),
+    ]) {
+        let span = error.location().unwrap();
+        let offset = b.find(token).unwrap() as u32;
+        assert_eq!(span.source(), caller.source());
+        assert_eq!(
+            (span.span().range().start(), span.span().range().end()),
+            (offset, offset + width)
+        );
+    }
+    for (i, (offset, _)) in b.match_indices("new Pair(").enumerate() {
+        assert_eq!(
+            index
+                .construction_arguments_at(caller.source(), offset as u32 + 9)
+                .is_some(),
+            i == 4
+        );
+    }
+}

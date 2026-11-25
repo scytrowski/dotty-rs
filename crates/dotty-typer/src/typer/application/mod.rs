@@ -1108,6 +1108,28 @@ impl SourceTyper<'_> {
         } else {
             None
         };
+        if is_constructor_application
+            && application_kind == ApplyKind::Regular
+            && let Some(slots) = &named
+            && let Some(parameter_index) = slots.iter().position(Option::is_none)
+            && let Some(constructor) = self
+                .store
+                .types
+                .get(self.typed_arena.get(function).ty)
+                .reference_symbol()
+        {
+            return Err(TyperError::MissingRequiredArgument {
+                source: self.source,
+                tree_index,
+                method: constructor,
+                parameter_index,
+                parameter_name: self
+                    .store
+                    .names
+                    .resolve(method.params[parameter_index].name.as_name().text())
+                    .into(),
+            });
+        }
         let mut defaulted = Vec::new();
         let defaults = if argument_trees.len() == method.params.len()
             || partial_using

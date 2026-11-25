@@ -1787,7 +1787,7 @@ pub enum TyperError {
         source: SourceId,
         /// Original application in that source's untyped arena.
         tree_index: u32,
-        /// Selected source method in the naming session.
+        /// Selected source method or primary constructor in the naming session.
         method: SymbolId,
         /// Zero-based ordinal of the first unbound required formal.
         parameter_index: usize,
