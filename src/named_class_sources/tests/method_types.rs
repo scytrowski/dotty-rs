@@ -512,74 +512,97 @@ fn unfinished_calls_use_the_local_receiver_and_typed_third_argument() {
 }
 
 #[test]
-fn unfinished_initializer_and_checked_call_select_the_same_source_overload() {
+fn provisional_and_checked_calls_agree_for_bare_this_and_explicit_receivers() {
     for declaration in ["val result", "var result: Int"] {
         for (third, tail, ordinal) in [("2", "false", 0), ("false", "2", 1)] {
-            let mut store = SemanticStore::new();
-            let defs = Definitions::bootstrap(&mut store);
-            let mut packages = Packages::new();
-            let ops = named(
-                1,
-                "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }",
-                &mut store,
-                &mut packages,
-            );
-            // Both callers share the same provider symbols and types, so the
-            // committed and provisional identities can be compared directly.
-            let prefix = format!(
-                "def run(ops: Ops): Int = {{ val third = {third}; {declaration} = ops.pick(1, true, third, "
-            );
-            let closed = format!("class Checked {{ {prefix}{tail}); result }} }}");
-            let checked = named(2, &closed, &mut store, &mut packages);
-            let sources = NamedClassSources::new([&ops, &checked], &store).unwrap();
-            let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
-            let (body, report) = sources
-                .check_class_body(
-                    checked.classes()[0].symbol,
+            // Use one shared base declaration for an inherited bare call.
+            // Both explicit receiver shapes can compare competing overloads.
+            let single = PICKS.split("; ").nth(ordinal).unwrap();
+            for (callee, parent, methods, winner) in [
+                ("pick", " extends Ops", single, 0),
+                ("this.pick", " extends Ops", PICKS, ordinal),
+                ("ops.pick", "", PICKS, ordinal),
+            ] {
+                let mut store = SemanticStore::new();
+                let defs = Definitions::bootstrap(&mut store);
+                let mut packages = Packages::new();
+                let ops = named(
+                    1,
+                    &format!("class Ops {{ {methods} }}"),
                     &mut store,
-                    defs,
-                    &packages,
-                    &mut arena,
-                    crate::core::NoResolver,
-                )
-                .into_parts();
-            assert!(report.errors.is_empty(), "{report:?}");
-            let mut bodies = CheckedClassBodies::default();
-            bodies.record(body).unwrap();
-            let resolved = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
-            let cursor = closed.find("third, ").unwrap() + "third, ".len();
-            let selected = resolved
-                .call_signature_at(checked.source(), cursor as u32)
-                .unwrap();
-            assert_eq!(selected.active_parameter, Some(3));
-            assert_eq!(
-                selected.call.method,
-                ops.classes()[0].methods().nth(ordinal).unwrap().symbol
-            );
-            assert_eq!(
-                selected.parameters[3].ty.ty,
-                [defs.boolean, defs.int][ordinal]
-            );
+                    &mut packages,
+                );
+                // Both callers share the same provider symbols and types, so the
+                // committed and provisional identities can be compared directly.
+                let prefix = format!(
+                    "def run(ops: Ops): Int = {{ val third = {third}; {declaration} = {callee}(1, true, third, "
+                );
+                let closed = format!("class Checked{parent} {{ {prefix}{tail}); result }} }}");
+                let checked = named(2, &closed, &mut store, &mut packages);
+                let sources = NamedClassSources::new([&ops, &checked], &store).unwrap();
+                let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+                let (body, report) = sources
+                    .check_class_body(
+                        checked.classes()[0].symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                        &mut arena,
+                        crate::core::NoResolver,
+                    )
+                    .into_parts();
+                assert!(report.errors.is_empty(), "{report:?}");
+                let mut bodies = CheckedClassBodies::default();
+                bodies.record(body).unwrap();
+                let resolved = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+                let cursor = closed.find("third, ").unwrap() + "third, ".len();
+                let selected = resolved
+                    .call_signature_at(checked.source(), cursor as u32)
+                    .unwrap();
+                assert_eq!(selected.active_parameter, Some(3));
+                assert_eq!(
+                    selected.call.method,
+                    ops.classes()[0].methods().nth(winner).unwrap().symbol
+                );
+                assert_eq!(
+                    selected.parameters[3].ty.ty,
+                    [defs.boolean, defs.int][ordinal]
+                );
 
-            let id = SourceId::from_index(3);
-            let open = format!("class Editing {{ {prefix}");
-            let parsed = crate::parse_source(id, &open, Default::default())
-                .unwrap()
-                .bind(&mut store.names);
-            let pending = crate::IncompleteCallIndex::build(
-                &sources,
-                [("Editing.scala", parsed)],
-                store,
-                defs,
-                packages,
-            );
-            let help = pending.at(id, open.len() as u32).unwrap();
-            assert_eq!(help.active_parameter, 3);
-            let [candidate] = help.candidates.as_slice() else {
-                panic!("{help:?}")
-            };
-            assert_eq!(candidate.method, selected.call.method);
-            assert_eq!(candidate.parameters[3].ty.ty, selected.parameters[3].ty.ty);
+                let id = SourceId::from_index(3);
+                let open = format!("class Editing{parent} {{ {prefix}");
+                let parsed = crate::parse_source(id, &open, Default::default())
+                    .unwrap()
+                    .bind(&mut store.names);
+                let pending = crate::IncompleteCallIndex::build(
+                    &sources,
+                    [("Editing.scala", parsed)],
+                    store,
+                    defs,
+                    packages,
+                );
+                let before_third = open.rfind("true,").unwrap() + "true,".len();
+                let earlier = pending.at(id, before_third as u32).unwrap();
+                assert_eq!(earlier.active_parameter, 2);
+                assert_eq!(
+                    earlier
+                        .candidates
+                        .iter()
+                        .map(|c| c.method)
+                        .collect::<Vec<_>>(),
+                    ops.classes()[0]
+                        .methods()
+                        .map(|m| m.symbol)
+                        .collect::<Vec<_>>()
+                );
+                let help = pending.at(id, open.len() as u32).unwrap();
+                assert_eq!(help.active_parameter, 3);
+                let [candidate] = help.candidates.as_slice() else {
+                    panic!("{help:?}")
+                };
+                assert_eq!(candidate.method, selected.call.method);
+                assert_eq!(candidate.parameters[3].ty.ty, selected.parameters[3].ty.ty);
+            }
         }
     }
 }

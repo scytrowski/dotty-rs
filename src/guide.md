@@ -1204,6 +1204,9 @@ Keep the normal parse diagnostics and run [`IncompleteCallIndex::build`] as the
 last operation on the editor's semantic store. A candidate remains provisional
 even when the prefix leaves only one overload. Once the call is closed and
 checked, use [`ResolvedMemberIndex::call_signature_at`] for the selected method.
+Bare calls use the nearest binding, including a parameter or local that shadows
+a method. Explicit receivers use the access rules at the call site. A private
+method can therefore be offered inside its declaring class.
 
 ```rust
 use dotty::{IncompleteCallIndex, NamedClassSources, parse_source};
