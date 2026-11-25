@@ -770,6 +770,7 @@ where
             };
             if let Some(name) = self.member_names.parent_name(parent) {
                 self.member_names.constructions.push((application, name));
+                self.mark_constructor_list(application, crate::ConstructorSyntax::Allocation(name));
             }
             application
         }

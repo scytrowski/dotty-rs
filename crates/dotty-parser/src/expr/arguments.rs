@@ -167,6 +167,7 @@ where
         {
             self.call_arguments.push(crate::CallArgumentList {
                 application: call,
+                constructor: None,
                 callee: name.map(|(_, range)| range),
                 range,
                 arguments,

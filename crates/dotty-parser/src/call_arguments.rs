@@ -15,6 +15,15 @@ pub struct NamedCallArgument {
     pub value: Option<TextRange>,
 }
 
+/// Written context and class-name token of a simple constructor application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorSyntax {
+    /// A single unqualified class after `new`.
+    Allocation(TextRange),
+    /// A single unqualified parent after `extends`.
+    DirectParent(TextRange),
+}
+
 /// A parenthesized application, including nested and indirect applications.
 #[derive(Debug)]
 pub struct CallArgumentList {
@@ -22,6 +31,8 @@ pub struct CallArgumentList {
     /// constructor this is the application paired with its written class name
     /// by [`crate::SourceMemberNames::constructions`].
     pub application: TreeId<Untyped>,
+    /// Simple allocation or direct parent clause, retained even if its list is unfinished.
+    pub constructor: Option<ConstructorSyntax>,
     /// Written callee token for a direct named call. Other applications have no name here.
     pub callee: Option<TextRange>,
     /// UTF-8 byte range from the opening through the closing parenthesis, or to
@@ -211,6 +222,45 @@ mod tests {
             );
         }
         assert_eq!(parsed.member_names.constructions().len(), 2);
+    }
+
+    #[test]
+    fn unfinished_constructor_lists_retain_their_written_context_and_tree() {
+        use super::ConstructorSyntax::*;
+        for (text, class, parent) in [
+            ("class Use { def f = new Base(", "Base", false),
+            ("class Child extends Base(count = ", "Base", true),
+            ("class Use { def f = new Outer(new Inner(", "Inner", false),
+        ] {
+            let parsed = crate::parse_compilation_unit(
+                SourceText::new(text).unwrap(),
+                SourceId::from_index(1),
+                ContextualScanner::new(text).unwrap(),
+                &mut NameInterner::new(),
+            );
+            assert!(!parsed.diagnostics.is_empty());
+            let end = text.len() as u32;
+            let list = parsed.call_arguments.unfinished_at(end).unwrap();
+            let name = match (parent, list.constructor) {
+                (true, Some(DirectParent(name))) | (false, Some(Allocation(name))) => name,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(&text[name.start() as usize..name.end() as usize], class);
+            assert_eq!(list.range.start(), name.end());
+            assert_eq!(list.slot_at(end), Some(0));
+            assert_eq!(list.unfinished, Some(list.application));
+            assert_eq!(
+                parsed.member_names.parent_name(list.application),
+                Some(name)
+            );
+            assert_eq!(
+                parsed
+                    .member_names
+                    .constructions()
+                    .contains(&(list.application, name)),
+                !parent
+            );
+        }
     }
 
     #[test]
