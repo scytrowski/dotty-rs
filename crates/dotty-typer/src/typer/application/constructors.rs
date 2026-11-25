@@ -272,7 +272,7 @@ impl SourceTyper<'_> {
         if application_kind == ApplyKind::Regular && self.has_named_arguments(argument_trees) {
             let supported = matches!(candidates.as_slice(), [candidate]
                 if candidate_set.rejected_incomplete.is_empty()
-                    && self.store.symbols.has_plain_primary_clause(candidate.symbol)
+                    && self.store.symbols.required_primary_clause(candidate.symbol).is_some()
                     && self.store.symbols.get(candidate.symbol).visibility == dotty_core::Visibility::Public
                     && self.strict_ordinary_clause(candidate.callable));
             if !supported {

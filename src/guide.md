@@ -902,7 +902,10 @@ available for clients that retain just body results. A plain primary
 constructor parameter has one written declaration and two symbols. Use
 [`SourceConstructorParameter::parameter`] for source references and
 [`SourceConstructorParameter::formal`] to compare with the constructor plan.
-Explicit constructor `val` and `var` declarations use field navigation.
+For a public constructor `val` or `var`, the class-owned symbol is the field.
+Its references include named argument labels, reads and writes in source order.
+Use [`ResolvedMemberIndex::value_access_at`] to distinguish reads and writes.
+A label binds a formal and has no value access kind.
 
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The
@@ -970,14 +973,17 @@ constructed class and the selected primary constructor separately. Use the
 class symbol for references. A neighboring argument or method selection has
 its own target. Inside a checked primary constructor list,
 [`ResolvedMemberIndex::construction_arguments_at`] pairs each written operand
-with its class-owned parameter and constructor-owned formal. Rebuild the index against the new revision after editing.
+with its class-owned parameter or field and its constructor-owned formal.
+The checked signature exposes those declarations in formal order, including the
+source distinction between a plain parameter, a public `val`, and a public `var`.
+Rebuild the index against the new revision after editing.
 
 ```rust
 use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, ResolvedMemberIndex, parse_source};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, NoResolver};
 # use dotty::typer::SignatureCompletion;
 
-let original = "class Base(n: Int) { def read(): Int = n }; class Peer(n: Int) { def read(): Int = n }; class Factory { def build(start: Int): Int = new Base(n = start).read() }";
+let original = "class Base(val n: Int) { def read(): Int = n }; class Peer(var n: Int) { def read(): Int = n }; class Factory { def build(start: Int): Int = new Base(n = start).read() }";
 let edited = original.replace("new Base", "new Peer");
 let offset = original.find("new Base").unwrap() as u32 + 4;
 for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
@@ -1009,6 +1015,9 @@ for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
     assert_eq!(args.written[0].label.unwrap().start(), offset + 5);
     let signature = index.construction_signature_at(id, offset + 5).unwrap();
     assert_eq!(signature.active_parameter, Some(0));
+    assert_eq!(signature.declarations[0], args.written[0].parameter);
+    let kind = [dotty::ConstructorParameterKind::Val, dotty::ConstructorParameterKind::Var][selected];
+    assert_eq!(signature.declarations[0].kind, kind);
     assert_eq!(&*signature.parameters[0].ty.name, "Int");
     let expected = &file.classes()[selected];
     assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));

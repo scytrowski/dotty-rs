@@ -128,6 +128,7 @@ pub struct ResolvedMemberIndex {
     files: HashMap<SourceId, IndexedFile>,
     references: HashMap<SymbolId, Vec<SourceSpan>>,
     signatures: HashMap<SymbolId, crate::SourceSymbolInfo>,
+    constructor_formals: HashMap<SymbolId, Vec<crate::SourceConstructorParameter>>,
     diagnostics: Vec<DeclarationDiagnostic>,
 }
 
@@ -169,7 +170,6 @@ impl ResolvedMemberIndex {
         let mut index = Self::default();
         let mut targets = HashMap::new();
         let mut method_formals: HashMap<SymbolId, Vec<SourceMethodParameter>> = HashMap::new();
-        let mut constructor_formals = HashMap::<_, Vec<_>>::new();
         let mut valid_files = Vec::new();
         for file in sources.files() {
             let navigation = match file.navigation() {
@@ -233,7 +233,8 @@ impl ResolvedMemberIndex {
                         .or_default()
                         .push(*formal);
                 } else if let ParameterDeclaration::Constructor(formal) = p {
-                    constructor_formals
+                    index
+                        .constructor_formals
                         .entry(formal.constructor)
                         .or_default()
                         .push(*formal);
@@ -295,7 +296,8 @@ impl ResolvedMemberIndex {
                         file,
                         root,
                         bindings,
-                        constructor_formals
+                        index
+                            .constructor_formals
                             .get(&constructor)
                             .map_or(&[], Vec::as_slice),
                         store,
@@ -392,20 +394,19 @@ impl ResolvedMemberIndex {
                     continue;
                 };
                 let origin = SourceSpan::new(file.source(), Span::without_point(name.name));
-                let symbol = match access {
+                match access {
                     TermAccess::Parameter(id) => {
                         let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        continue;
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
                             continue;
                         };
                         local_uses.push((origin, (slot, kind)));
-                        id
+                        index.references.entry(id).or_default().push(origin);
                     }
                     TermAccess::Field(field, kind) => {
                         let Some(&target) = targets.get(&field) else {
@@ -417,17 +418,16 @@ impl ResolvedMemberIndex {
                             kind,
                             target,
                         });
-                        field
                     }
-                };
-                index.references.entry(symbol).or_default().push(origin);
+                }
             }
             let reads = parameter_uses
                 .iter()
                 .map(|(span, slot)| (parameters[*slot].symbol(), *span));
             let labels = argument_labels.iter().map(|(span, p)| (p.symbol(), *span));
-            for (parameter, span) in merge_sites(reads, labels) {
-                index.references.entry(parameter).or_default().push(span);
+            let accesses = fields.iter().map(|access| (access.field, access.origin));
+            for (symbol, span) in merge_sites(merge_sites(reads, accesses), labels) {
+                index.references.entry(symbol).or_default().push(span);
             }
             let method_declarations = navigation.method_targets();
             let symbols = class_declarations
@@ -439,7 +439,12 @@ impl ResolvedMemberIndex {
                 .chain(
                     file.classes()
                         .iter()
-                        .filter(|class| store.symbols.has_plain_primary_clause(class.constructor))
+                        .filter(|class| {
+                            store
+                                .symbols
+                                .required_primary_clause(class.constructor)
+                                .is_some()
+                        })
                         .map(|class| (class.constructor, class.constructor)),
                 )
                 .chain(parameters.iter().map(|p| {
@@ -538,7 +543,7 @@ impl ResolvedMemberIndex {
 
     /// Looks up the innermost completed argument list at a UTF-8 insertion
     /// position in this revision. Returns the selected source constructor and
-    /// arguments only for a checked explicit allocation of a plain primary clause.
+    /// arguments only for a checked explicit allocation with one required clause of plain parameters or public fields.
     /// A nested method call, rejected construction or unfinished list yields `None`.
     pub fn construction_arguments_at(
         &self,
@@ -581,6 +586,10 @@ impl ResolvedMemberIndex {
         Some(crate::ResolvedConstructionSignature {
             construction: args.construction,
             instance: result,
+            declarations: self
+                .constructor_formals
+                .get(&args.construction.constructor)
+                .map_or(&[], Vec::as_slice),
             parameters,
             active_parameter,
         })
@@ -705,8 +714,8 @@ impl ResolvedMemberIndex {
         }
     }
 
-    /// Looks up a plain primary constructor parameter at its declaration, a named argument label or a committed read. Parent argument reads require [`Self::build_with_headers`].
-    /// Includes unused parameters. Explicit constructor fields, contextual and
+    /// Looks up a required primary constructor parameter at its declaration, a named argument label or a committed read. Parent argument reads require [`Self::build_with_headers`].
+    /// Includes unused parameters and field labels in supported clauses. Contextual and
     /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
     pub fn constructor_parameter_at(
         &self,
@@ -768,7 +777,7 @@ impl ResolvedMemberIndex {
 
     /// Classifies a committed use of a field, ordinary local, or parameter
     /// at its written name. Direct assignment targets are writes; other supported
-    /// value uses are reads. Declarations and method calls yield `None`.
+    /// value uses are reads. Argument labels, declarations and method calls yield `None`.
     pub fn value_access_at(&self, source: SourceId, offset: u32) -> Option<crate::ValueAccessKind> {
         let file = self.files.get(&source)?;
         if let Some((_, (_, kind))) = use_at(&file.local_uses, offset) {
@@ -853,14 +862,14 @@ impl ResolvedMemberIndex {
             } else if let Some((id, target)) = declaration_at(&file.locals, offset) {
                 (id, SymbolKind::Local, target, None)
             } else if let Some((origin, p)) = self.parameter_use_at(source, offset) {
-                (p.symbol(), SymbolKind::Parameter, p.target(), Some(origin))
+                (p.symbol(), p.symbol_kind(), p.target(), Some(origin))
             } else if let Some((id, target)) = declaration_at(&file.method_declarations, offset) {
                 (id, SymbolKind::Method, target, None)
             } else if let Some((id, target)) = declaration_at(&file.field_declarations, offset) {
                 (id, SymbolKind::Field, target, None)
             } else {
                 let p = self.parameter_declaration_at(source, offset)?;
-                (p.symbol(), SymbolKind::Parameter, p.target(), None)
+                (p.symbol(), p.symbol_kind(), p.target(), None)
             };
         Some(SourceSymbolSite {
             symbol,
@@ -887,7 +896,8 @@ impl ResolvedMemberIndex {
     /// token order. For classes, covers single unqualified explicit parents and committed
     /// simple `new` expressions, as well as simple written class types in supported method and constructor signatures. Omits declarations. Unknown and unused symbols yield an
     /// empty slice. Method parameter references include committed reads and written
-    /// argument labels at calls to that overload. Omitted arguments have no source
+    /// argument labels at calls to that overload. A constructor field includes its named
+    /// argument labels as well as actual field accesses. Omitted arguments have no source
     /// token. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)

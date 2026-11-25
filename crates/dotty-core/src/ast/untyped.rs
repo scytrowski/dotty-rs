@@ -6,6 +6,46 @@ use crate::ast::phase::Untyped;
 use crate::ids::{NameId, TreeId};
 use crate::names::{Name, TermName, TypeName};
 
+/// Source role of a required, strict primary constructor parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorParameterKind {
+    /// Class-owned parameter with no public accessor.
+    Plain,
+    /// Immutable public field declared by the parameter.
+    Val,
+    /// Mutable public field declared by the parameter.
+    Var,
+}
+
+impl super::ValDef<Untyped> {
+    /// Classifies the supported plain and public field forms in a primary
+    /// constructor clause. Use the original parse arena. A default, by-name
+    /// or repeated type, explicit visibility, or other modifiers yield `None`.
+    pub fn constructor_parameter_kind(
+        &self,
+        arena: &super::AstArena<Untyped>,
+    ) -> Option<ConstructorParameterKind> {
+        use super::{Modifier, TreeKind};
+        if self.rhs.is_some()
+            || self.metadata.visibility.is_some()
+            || matches!(
+                arena.try_get(self.tpt)?.kind,
+                TreeKind::ByNameTypeTree(_) | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+            )
+        {
+            return None;
+        }
+        match self.metadata.modifiers.as_slice() {
+            [Modifier::ParamAccessor, Modifier::PrivateLocal] => {
+                Some(ConstructorParameterKind::Plain)
+            }
+            [Modifier::ParamAccessor] => Some(ConstructorParameterKind::Val),
+            [Modifier::ParamAccessor, Modifier::Var] => Some(ConstructorParameterKind::Var),
+            _ => None,
+        }
+    }
+}
+
 /// One parser-level entry in a template's `uses` clause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UseRef {

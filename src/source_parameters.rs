@@ -2,7 +2,7 @@
 use crate::core::ast::Modifier;
 use crate::core::{SemanticStore, SourceDefinition, SymbolId, SymbolKind, TreeKind};
 use crate::source_declarations::{Declaration, DeclarationDiagnostic, DeclarationError};
-use crate::{NamedClassSource, SourceMemberTarget};
+use crate::{ConstructorParameterKind, NamedClassSource, SourceMemberTarget};
 
 /// One named value parameter of an ordinary class method with a single value
 /// parameter list. IDs and UTF-8 ranges belong to the originating revision.
@@ -16,11 +16,13 @@ pub struct SourceMethodParameter {
     pub target: SourceMemberTarget,
 }
 
-/// Two identities of a plain parameter in a single ordinary primary constructor
+/// Two identities of a required parameter in a single ordinary primary constructor
 /// list. All symbols and ranges are meaningful only in the original session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceConstructorParameter {
-    /// Class that owns the canonical source parameter.
+    /// Whether the declaration introduces a plain parameter, a public `val`, or a public `var`.
+    pub kind: ConstructorParameterKind,
+    /// Class that owns the canonical source parameter or field.
     pub class: SymbolId,
     /// Primary constructor that owns the formal used for constructor execution.
     pub constructor: SymbolId,
@@ -43,6 +45,12 @@ impl ParameterDeclaration {
         match self {
             Self::Method(p) => p.parameter,
             Self::Constructor(p) => p.parameter,
+        }
+    }
+    pub(crate) fn symbol_kind(self) -> SymbolKind {
+        match self {
+            Self::Constructor(p) if p.kind != ConstructorParameterKind::Plain => SymbolKind::Field,
+            _ => SymbolKind::Parameter,
         }
     }
     pub(crate) fn target(self) -> SourceMemberTarget {
@@ -107,30 +115,33 @@ fn collect_list(
     };
     let names = &file.named().syntax().member_names;
     for &tree in clause {
-        let Some(name) = names.parameter_name(tree) else {
-            continue;
-        };
         let node = file.ast().try_get(tree).ok_or_else(|| invalid(tree))?;
         let TreeKind::ValDef(val) = &node.kind else {
             return Err(invalid(tree));
         };
-        let supported = if class.is_some() {
-            val.metadata.modifiers == [Modifier::ParamAccessor, Modifier::PrivateLocal]
-                && val.rhs.is_none()
-                && !matches!(
-                    file.ast()
-                        .try_get(val.tpt)
-                        .ok_or_else(|| invalid(val.tpt))?
-                        .kind,
-                    TreeKind::ByNameTypeTree(_)
-                        | TreeKind::PhaseSpecific(crate::core::ast::UntypedNode::PostfixOp(_))
-                )
+        let (name, constructor_kind) = if class.is_some() {
+            let Some(kind) = val.constructor_parameter_kind(file.ast()) else {
+                continue;
+            };
+            let name = match kind {
+                ConstructorParameterKind::Plain => names.parameter_name(tree),
+                ConstructorParameterKind::Val | ConstructorParameterKind::Var
+                    if store
+                        .symbols
+                        .required_primary_clause(callable.symbol)
+                        .is_some() =>
+                {
+                    names.value_name(tree)
+                }
+                _ => None,
+            };
+            (name, Some(kind))
+        } else if val.metadata.modifiers == [Modifier::Param] {
+            (names.parameter_name(tree), None)
         } else {
-            val.metadata.modifiers == [Modifier::Param]
-        };
-        if !supported {
             continue;
-        }
+        };
+        let Some(name) = name else { continue };
         let parameter = file
             .index()
             .symbol_at(source, tree)
@@ -148,7 +159,13 @@ fn collect_list(
             .ok_or_else(|| invalid(tree))?
             .span()
             .range();
-        if symbol.kind != SymbolKind::Parameter
+        let expected_kind = match constructor_kind {
+            Some(ConstructorParameterKind::Val | ConstructorParameterKind::Var) => {
+                SymbolKind::Field
+            }
+            _ => SymbolKind::Parameter,
+        };
+        if symbol.kind != expected_kind
             || symbol.owner != Some(class.unwrap_or(callable.symbol))
             || name.start() < declaration.start()
             || name.end() > declaration.end()
@@ -160,7 +177,7 @@ fn collect_list(
             name,
             declaration,
         };
-        let parameter = if let Some(class) = class {
+        let parameter = if let (Some(class), Some(kind)) = (class, constructor_kind) {
             let constructor = callable.symbol;
             let formal = file
                 .index()
@@ -175,6 +192,7 @@ fn collect_list(
                 return Err(invalid(tree));
             }
             ParameterDeclaration::Constructor(SourceConstructorParameter {
+                kind,
                 class,
                 constructor,
                 parameter,

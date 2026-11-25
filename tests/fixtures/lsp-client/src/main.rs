@@ -195,7 +195,20 @@ impl Workspace {
                 ));
             }
             if let Some(ctor) = analysis.members.construction_signature_at(source, pos) {
-                let labels = parameter_labels(ctor.parameters);
+                use dotty::ConstructorParameterKind::{Plain, Val, Var};
+                let labels: Vec<_> = ctor
+                    .parameters
+                    .iter()
+                    .zip(ctor.declarations)
+                    .map(|(p, decl)| {
+                        let prefix = match decl.kind {
+                            Plain => "",
+                            Val => "val ",
+                            Var => "var ",
+                        };
+                        format!("{prefix}{}: {}", p.name, p.ty.name)
+                    })
+                    .collect();
                 let label = format!("new {}({})", ctor.instance.name, labels.join(", "));
                 return Some(signature_help(
                     labelled_signature(label, labels),
@@ -380,6 +393,9 @@ fn render_semantic(report: &dotty::SemanticDiagnostic) -> SourceDiagnostic {
         dotty::SemanticIssue::Typing(error) => {
             use dotty::typer::TyperError;
             let message = match error.error() {
+                TyperError::AssignmentTargetImmutable { .. } => {
+                    "Cannot assign to an immutable value"
+                }
                 TyperError::DuplicateNamedArgument { .. } => "Parameter supplied twice",
                 TyperError::OverloadApplicationNoApplicable { .. } => {
                     "No overload accepts these arguments"

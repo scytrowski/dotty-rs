@@ -4,12 +4,22 @@ use crate::ids::{SymbolId, checked_index};
 use crate::symbols::completion::SymbolInfo;
 use crate::symbols::symbol::Symbol;
 
+/// Shape of one monomorphic source primary constructor clause with only
+/// required, strict parameters. Their order is in the source declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredPrimaryClause {
+    /// Every parameter has no explicit accessor.
+    Plain,
+    /// At least one parameter declares a public immutable or mutable field.
+    WithFields,
+}
+
 /// Owns every [`Symbol`] for one compilation session.
 #[derive(Debug, Default)]
 pub struct SymbolTable {
     symbols: Vec<Symbol>,
     // Sorted by identity. Naming registers constructors in allocation order.
-    plain_primary_clauses: Vec<SymbolId>,
+    primary_clauses: Vec<(SymbolId, RequiredPrimaryClause)>,
 }
 
 impl SymbolTable {
@@ -38,9 +48,9 @@ impl SymbolTable {
     /// Drops every symbol allocated after the table held `len` symbols.
     pub(crate) fn truncate(&mut self, len: usize) {
         self.symbols.truncate(len);
-        self.plain_primary_clauses.truncate(
-            self.plain_primary_clauses
-                .partition_point(|id| (id.index() as usize) < len),
+        self.primary_clauses.truncate(
+            self.primary_clauses
+                .partition_point(|(id, _)| (id.index() as usize) < len),
         );
     }
 
@@ -53,25 +63,48 @@ impl SymbolTable {
     ///
     /// Panics unless the ID identifies a source constructor in this table.
     pub fn record_plain_primary_clause(&mut self, constructor: SymbolId) {
+        self.record_required_primary_clause(constructor, RequiredPrimaryClause::Plain);
+    }
+
+    /// Records the shape established by naming for this source constructor.
+    /// The first registration persists until the symbol is truncated. Supply
+    /// IDs from this table and the shape of the constructor’s original tree.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an unknown ID or a symbol other than a source constructor.
+    pub fn record_required_primary_clause(
+        &mut self,
+        constructor: SymbolId,
+        shape: RequiredPrimaryClause,
+    ) {
         let symbol = self.get(constructor);
         assert!(
             symbol.kind == crate::SymbolKind::Constructor
                 && matches!(symbol.origin, crate::SymbolOrigin::Source(_))
         );
         if let Err(slot) = self
-            .plain_primary_clauses
-            .binary_search_by_key(&constructor.index(), |id| id.index())
+            .primary_clauses
+            .binary_search_by_key(&constructor.index(), |(id, _)| id.index())
         {
-            self.plain_primary_clauses.insert(slot, constructor);
+            self.primary_clauses.insert(slot, (constructor, shape));
         }
     }
 
     /// Whether naming established a plain primary clause for this constructor
     /// in this session. Binary and unregistered symbols return `false`.
     pub fn has_plain_primary_clause(&self, constructor: SymbolId) -> bool {
-        self.plain_primary_clauses
-            .binary_search_by_key(&constructor.index(), |id| id.index())
-            .is_ok()
+        self.required_primary_clause(constructor) == Some(RequiredPrimaryClause::Plain)
+    }
+
+    /// Looks up the declaration shape recorded by naming in this session.
+    /// Binary constructors and unsupported source clauses yield `None`.
+    pub fn required_primary_clause(&self, constructor: SymbolId) -> Option<RequiredPrimaryClause> {
+        let slot = self
+            .primary_clauses
+            .binary_search_by_key(&constructor.index(), |(id, _)| id.index())
+            .ok()?;
+        Some(self.primary_clauses[slot].1)
     }
 
     /// Returns the symbol for an ID from this session.
