@@ -3204,3 +3204,58 @@ fn constructor_type_sites_match_the_emitted_descriptor_in_both_file_orders() {
         );
     }
 }
+
+#[test]
+fn ordinary_defaults_preserve_source_evaluation_order_and_getter_abi() {
+    let ops = (
+        SourceId::from_index(8),
+        "Ops.scala",
+        "package demo
+class Ops {
+  def left(): Int = 9
+  def right(): Int = 4
+  def receiver(): Ops = this
+  def supplied(): Int = 4
+  def diff(left: Int = left(), right: Int = right()): Int = left - right
+  def partial(): Int = receiver().diff(right = supplied())
+  def all(): Int = receiver().diff()
+  def explicit(): Int = receiver().diff(right = supplied(), left = 9)
+}",
+    );
+    let use_ops = (
+        SourceId::from_index(3),
+        "Use.scala",
+        "package demo
+class Use { def cross(o: Ops): Int = o.diff(right = 4) }",
+    );
+    for files in [[ops, use_ops], [use_ops, ops]] {
+        let artifacts = super::with_plan(&files, |plan, defs, _, _, _| {
+            super::checked_emission(plan, defs)
+        });
+        let class = artifacts
+            .iter()
+            .find(|c| c.internal_name() == "demo/Ops")
+            .unwrap();
+        use dotty::classfile::{ClassFile, Reader};
+        let decoded = ClassFile::decode(&mut Reader::new(class.bytes())).unwrap();
+        let pool = &decoded.constant_pool;
+        let getters: Vec<_> = decoded
+            .methods
+            .iter()
+            .filter_map(|m| {
+                let name = pool.utf8(m.name_index).unwrap();
+                name.contains("$default$")
+                    .then(|| (name, pool.utf8(m.descriptor_index).unwrap()))
+            })
+            .collect();
+        assert_eq!(
+            getters,
+            [("diff$default$1", "()I"), ("diff$default$2", "()I")]
+        );
+        assert_eq!(
+            super::run_java_client("ordinary-defaults", "OrdinaryDefaultsClient", &artifacts)
+                .trim(),
+            "OK"
+        );
+    }
+}

@@ -5,7 +5,7 @@ use dotty_core::types::MethodKind;
 use dotty_core::{SourceDefinition, SourceSemanticIndex, SourceTypedIndex, SymbolOrigin};
 
 impl JvmMethodPlan {
-    /// Plans the registered contextual defaults of this source method. The caller
+    /// Plans the registered parameter defaults of this source method. The caller
     /// must first type the full method definition, including parameter defaults.
     pub fn source_default_getters(
         &self,
@@ -149,7 +149,7 @@ pub(super) fn is_parameterless_getter(store: &SemanticStore, tree: &Tree<Typed>)
         .is_some_and(|ty| !matches!(ty, Type::Method(_) | Type::Poly(_)))
 }
 
-/// Verify the same-source getter registered for this contextual parameter. The generated spelling is only its ABI name.
+/// Verify the same-source getter registered for this parameter. The generated spelling is only its ABI name.
 pub(super) fn getter_name(
     store: &SemanticStore,
     plan: &JvmMethodPlan,
@@ -184,7 +184,7 @@ pub(super) fn getter_name(
     let Some(Type::Method(outer)) = store.types.try_get(target_info) else {
         return Err(invalid());
     };
-    let copies = if outer.kind == MethodKind::Plain {
+    let copies = if outer.kind == MethodKind::Plain && ordinal >= outer.params.len() {
         let tail = crate::descriptor::contextual_tail(store, outer).ok_or_else(invalid)?;
         let defaulted = ordinal
             .checked_sub(outer.params.len())

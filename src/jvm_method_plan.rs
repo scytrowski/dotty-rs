@@ -159,8 +159,22 @@ impl<'a> JvmMethodPlanner<'a> {
             &def.value_param_clauses,
             &typed.value_param_clauses,
         )?;
+        let locals = self.locals_for(method, self.local_bindings)?;
+        Ok(JvmMethodPlan {
+            method,
+            parameters,
+            body: Some(body),
+            locals,
+        })
+    }
+
+    pub(crate) fn locals_for(
+        &self,
+        method: SymbolId,
+        bindings: &[TypedLocalBinding],
+    ) -> Result<Vec<JvmLocalBinding>, MethodPlanError> {
         let mut locals = Vec::new();
-        for binding in self.local_bindings {
+        for binding in bindings {
             let id = binding.symbol();
             if !self.store.symbols.contains(id) {
                 return Err(MethodPlanError::Local(id));
@@ -185,12 +199,7 @@ impl<'a> JvmMethodPlanner<'a> {
                 symbol.flags.contains(SymbolFlags::MUTABLE),
             ));
         }
-        Ok(JvmMethodPlan {
-            method,
-            parameters,
-            body: Some(body),
-            locals,
-        })
+        Ok(locals)
     }
 
     fn parameters(
