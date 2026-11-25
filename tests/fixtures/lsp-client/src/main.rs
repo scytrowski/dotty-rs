@@ -112,6 +112,7 @@ struct Workspace {
     docs: Documents,
     revision: u64,
     ready: Option<Analysis>,
+    related_information: bool,
 }
 
 impl Workspace {
@@ -254,6 +255,71 @@ impl Workspace {
         }
     }
 
+    fn related_overloads(
+        &self,
+        files: &Analysis,
+        problem: &Problem,
+        enc: PositionEncoding,
+    ) -> Vec<Value> {
+        let Problem::Semantic(dotty::SemanticDiagnostic {
+            issue: dotty::SemanticIssue::Typing(error),
+            ..
+        }) = problem
+        else {
+            return Vec::new();
+        };
+        let mut related = Vec::new();
+        let mut add = |source, range, message: &str| {
+            let uri = files.uri(source)?;
+            let range = wire_range(&self.docs.get(uri)?.text, range, enc)?;
+            related.push(json!({"location":{"uri":uri,"range":range},"message":message}));
+            Some(())
+        };
+        for c in error.overload_candidates() {
+            use dotty::typer::{NamedArgumentRejection as N, OverloadRejection as R};
+            let message = match c.reason {
+                Some(R::ArgumentNonConformance {
+                    actual_description,
+                    expected_description,
+                    ..
+                }) => format!("Expected {expected_description}, found {actual_description}"),
+                Some(R::NamedArgument {
+                    reason: N::Unknown(_),
+                    ..
+                }) => format!(
+                    "Unknown parameter {}",
+                    c.argument
+                        .and_then(|a| a.label.as_deref())
+                        .unwrap_or("name")
+                ),
+                Some(R::NamedArgument {
+                    reason: N::Duplicate(_),
+                    ..
+                }) => "Parameter supplied twice".into(),
+                Some(R::NamedArgument {
+                    reason: N::MisplacedPositional,
+                    ..
+                }) => "Misplaced positional argument".into(),
+                Some(R::WrongArity { expected, actual }) => {
+                    format!("Expected {expected} arguments, found {actual}")
+                }
+                Some(R::MissingRequiredArgument { .. }) => {
+                    "Required parameter has no argument".into()
+                }
+                None => "Applicable overload".into(),
+                _ => "Rejected overload".into(),
+            };
+            if let Some(arg) = c.argument {
+                add(arg.location.source(), arg.location.span().range(), &message);
+            }
+            if let Some(target) = c.target {
+                let site = target.parameter.map_or(target.method, |p| p.target);
+                add(site.source, site.name, &message);
+            }
+        }
+        related
+    }
+
     fn publish(&self, conn: &Connection, enc: PositionEncoding) -> Result<(), Box<dyn Error>> {
         if let Some(files) = &self.ready {
             for (uri, file) in &files.files {
@@ -284,7 +350,12 @@ impl Workspace {
                             message: format!("Waiting for the signature of '{name}'"),
                         },
                     };
-                    publish_problem(conn, uri, &doc.text, enc, report, &mut diagnostics)?;
+                    let related = if self.related_information {
+                        self.related_overloads(files, problem, enc)
+                    } else {
+                        Vec::new()
+                    };
+                    publish_problem(conn, uri, &doc.text, enc, report, related, &mut diagnostics)?;
                 }
                 notify(conn, uri, Some(doc.version), diagnostics)?;
             }
@@ -295,7 +366,24 @@ impl Workspace {
 
 fn render_semantic(report: &dotty::SemanticDiagnostic) -> SourceDiagnostic {
     match &report.issue {
-        dotty::SemanticIssue::Typing(error) => error.render(),
+        dotty::SemanticIssue::Typing(error) => {
+            use dotty::typer::TyperError;
+            let message = match error.error() {
+                TyperError::OverloadApplicationNoApplicable { .. } => {
+                    "No overload accepts these arguments"
+                }
+                TyperError::AmbiguousOverloadApplication { .. } => {
+                    "More than one overload accepts these arguments"
+                }
+                _ => return error.render(),
+            };
+            SourceDiagnostic {
+                code: error.code(),
+                location: error.location(),
+                severity: DiagnosticSeverity::Error,
+                message: message.into(),
+            }
+        }
         dotty::SemanticIssue::Warning { source, diagnostic } => {
             SourceDiagnostic::from_typer_warning(*source, diagnostic)
         }
@@ -328,6 +416,7 @@ fn publish_problem(
     text: &DocumentText,
     enc: PositionEncoding,
     problem: &SourceDiagnostic,
+    related: Vec<Value>,
     diagnostics: &mut Vec<Value>,
 ) -> Result<(), Box<dyn Error>> {
     let severity = match problem.severity {
@@ -345,6 +434,9 @@ fn publish_problem(
         });
         if let Some(code) = problem.code {
             diagnostic["code"] = json!(code);
+        }
+        if !related.is_empty() {
+            diagnostic["relatedInformation"] = Value::Array(related);
         }
         diagnostics.push(diagnostic);
     } else {
@@ -438,6 +530,10 @@ fn serve(conn: &Connection) -> Result<(), Box<dyn Error>> {
         }),
     )?;
     let mut ws = Workspace {
+        related_information: params
+            .pointer("/capabilities/textDocument/publishDiagnostics/relatedInformation")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         ready: Some(Analysis::default()),
         ..Workspace::default()
     };

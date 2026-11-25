@@ -32,6 +32,15 @@ impl Client {
         initially_clean: Vec<&'static str>,
         options: Value,
     ) -> Self {
+        Self::start_configured(encoding, initially_clean, options, false)
+    }
+
+    fn start_configured(
+        encoding: &str,
+        initially_clean: Vec<&'static str>,
+        options: Value,
+        related: bool,
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_dotty-lsp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -63,7 +72,7 @@ impl Client {
                     "textDocument": {
                         "definition": {"linkSupport": true},
                         "signatureHelp": {"signatureInformation":{"activeParameterSupport":true}},
-                        "publishDiagnostics": {"versionSupport": true}
+                        "publishDiagnostics": {"versionSupport": true, "relatedInformation": related}
                     }
                 }
             }),
@@ -2136,6 +2145,57 @@ fn editing_the_operand_retargets_only_the_named_argument_label() {
                 );
             }
         }
+        client.shutdown();
+    }
+}
+
+#[test]
+fn rejected_overloads_publish_one_diagnostic_with_negotiated_candidate_locations() {
+    let provider = [
+        "class A {",
+        "  def pick(/* 😀 */ right: Int): Int = right",
+        "  def pick(/* 😀 */ flag: Boolean): Int = if (flag) 1 else 0",
+        "}",
+    ];
+    let caller = "class B { def run(o: A): Int = /* 😀 */ o.pick(right = true) }";
+    for (encoding, related) in [("utf-8", true), ("utf-16", true), ("utf-16", false)] {
+        let mut client = Client::start_configured(encoding, vec![A], Value::Null, related);
+        client.open(A, &provider.join("\n"));
+        client.open(B, caller);
+        let col = |line: &str, token: &str| token_column(encoding, line, token);
+        let start = col(caller, "o.pick");
+        let label = col(caller, "right =");
+        let rhs = col(caller, "true");
+        let int = col(provider[1], "right:");
+        let flag = col(provider[2], "flag:");
+        let pick = col(provider[2], "pick");
+        let mut diagnostic = json!({"severity":1,"source":"dotty","code":"typer.no_applicable_overload","message":"No overload accepts these arguments","range":range(0,start,rhs+5)});
+        if related {
+            let location = |uri, line, start, len, msg| json!({"location":{"uri":uri,"range":range(line,start,start+len)},"message":msg});
+            diagnostic["relatedInformation"] = json!([
+                location(B, 0, rhs, 4, "Expected Int, found Boolean"),
+                location(A, 1, int, 5, "Expected Int, found Boolean"),
+                location(B, 0, label, 5, "Unknown parameter right"),
+                location(A, 2, pick, 4, "Unknown parameter right"),
+            ]);
+        }
+        let jump = json!({"textDocument":{"uri":B},"position":{"line":0,"character":label+1}});
+        client.diagnostics(B, 1, json!([diagnostic]));
+        assert_eq!(
+            client.request("textDocument/definition", jump.clone()),
+            Value::Null
+        );
+        client.edit(B, 2, range(0, label, label + 5), "flag");
+        client.diagnostics(B, 2, json!([]));
+        assert_eq!(
+            client.request("textDocument/definition", jump.clone()),
+            json!([{
+            "originSelectionRange":range(0,label,label+4),"targetUri":A,
+            "targetRange":range(2,flag,flag+13),"targetSelectionRange":range(2,flag,flag+4)}])
+        );
+        client.edit(B, 3, range(0, label, label + 4), "right");
+        client.diagnostics(B, 3, json!([diagnostic]));
+        assert_eq!(client.request("textDocument/definition", jump), Value::Null);
         client.shutdown();
     }
 }

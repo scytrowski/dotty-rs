@@ -14,6 +14,8 @@ impl TyperError {
             Self::ExpectedExpressionTypeMismatch { .. } => {
                 Some("typer.expected_expression_type_mismatch")
             }
+            Self::OverloadApplicationNoApplicable { .. } => Some("typer.no_applicable_overload"),
+            Self::AmbiguousOverloadApplication { .. } => Some("typer.ambiguous_overload"),
             other => other.call_error_code(),
         }
     }
