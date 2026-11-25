@@ -20723,6 +20723,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::AmbiguousMemberConversion { .. } => "AmbiguousMemberConversion",
         TyperError::AmbiguousContextualArgument { .. } => "AmbiguousContextualArgument",
         TyperError::UsingApplicationDeferred { .. } => "UsingApplicationDeferred",
+        TyperError::MissingRequiredArgument { .. } => "MissingRequiredArgument",
         TyperError::UnknownNamedArgument { .. } => "UnknownNamedArgument",
         TyperError::DuplicateNamedArgument { .. } => "DuplicateNamedArgument",
         TyperError::PositionalAfterNamedArgument { .. } => "PositionalAfterNamedArgument",

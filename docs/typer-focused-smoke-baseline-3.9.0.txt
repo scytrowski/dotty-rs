@@ -5821,6 +5821,9 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend.jvm::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend.jvm::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -7529,6 +7532,9 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend.jvm::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools::namespace=type::name=Unit::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend.jvm::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools::namespace=type::name=Boolean::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -11364,9 +11370,9 @@ resolver_metrics:
   package_successes=1299
   package_unresolved=4939
   package_errors=0
-  member_requests=5070
+  member_requests=5076
   member_successes=1230
-  member_unresolved=3840
+  member_unresolved=3846
   member_errors=0
   class_symbol_successes=1230
 materialized_packages:

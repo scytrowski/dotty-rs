@@ -25,7 +25,7 @@ struct IndexedFile {
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
-    named_formals: HashMap<u32, Box<[usize]>>,
+    argument_bindings: HashMap<u32, crate::core::NamedCallBinding>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
     method_declarations: Vec<(SymbolId, SourceMethodTarget)>,
@@ -56,6 +56,8 @@ pub struct ResolvedCallSignature<'a> {
     pub ty: crate::core::TypeId,
     /// Formal names and types in declaration order.
     pub parameters: &'a [crate::SourceSignatureParameter],
+    /// Omitted formals with their canonical getters in declaration order. Empty when all were supplied.
+    pub defaulted: &'a [crate::core::DefaultedArgument],
     /// Explicit or inferred result of the selected declaration.
     pub result: &'a crate::SourceNamedType,
     /// Parentheses and argument expression ranges in the calling file.
@@ -285,9 +287,9 @@ impl ResolvedMemberIndex {
                 index.references.entry(class).or_default().push(span);
             }
             let mut calls = Vec::new();
-            let mut named_formals = HashMap::new();
+            let mut argument_bindings = HashMap::new();
             // A target navigation error is reported once when visiting its file.
-            for (call, formals) in sources
+            for (call, binding) in sources
                 .calls_in_file(file, navigation, bodies, typed_ast, store)
                 .flatten()
             {
@@ -296,8 +298,8 @@ impl ResolvedMemberIndex {
                     .entry(call.method)
                     .or_default()
                     .push(call.origin);
-                if let Some(formals) = formals {
-                    named_formals.insert(call.origin.span().range().start(), formals.into());
+                if let Some(binding) = binding {
+                    argument_bindings.insert(call.origin.span().range().start(), binding.clone());
                 }
                 calls.push(call);
             }
@@ -386,7 +388,7 @@ impl ResolvedMemberIndex {
                     parameters,
                     parameter_uses,
                     calls,
-                    named_formals,
+                    argument_bindings,
                     fields,
                     field_declarations,
                     method_declarations,
@@ -465,8 +467,7 @@ impl ResolvedMemberIndex {
 
     /// Looks up the innermost parenthesized application at a UTF-8 insertion
     /// position. Requires a committed direct call to a source method with one
-    /// plain clause, a retained signature and one written argument
-    /// per formal. A position immediately after a comma selects the next written operand.
+    /// plain clause and a retained signature. Omitted arguments require a checked default binding. A position immediately after a comma selects the next written operand.
     /// Named arguments use the correspondence committed by the typer.
     /// An empty `()` returns a signature without an active parameter. A trailing
     /// comma without another argument, an unsupported or rejected inner call,
@@ -492,21 +493,19 @@ impl ResolvedMemberIndex {
             return None;
         };
         let written = arguments.argument_index(offset);
-        let active_parameter = if arguments.positional {
-            written
-        } else {
-            Some(
-                *file
-                    .named_formals
-                    .get(&arguments.callee?.start())?
-                    .get(written?)?,
-            )
-        };
-        if arguments.arguments.len() != parameters.len()
-            || (!parameters.is_empty() && active_parameter.is_none())
+        let binding = file.argument_bindings.get(&arguments.callee?.start());
+        let defaulted = binding.map_or(&[][..], |b| &*b.defaulted);
+        if arguments.arguments.len() + defaulted.len() != parameters.len()
+            || (!arguments.arguments.is_empty() && written.is_none())
         {
             return None;
         }
+        let active_parameter = match (written, binding) {
+            (Some(i), Some(b)) => Some(*b.written_to_formal.get(i)?),
+            (Some(i), None) if arguments.positional => Some(i),
+            (None, _) => None,
+            _ => return None,
+        };
         Some(ResolvedCallSignature {
             call,
             name: &info.name,
@@ -515,6 +514,7 @@ impl ResolvedMemberIndex {
             result,
             arguments,
             active_parameter,
+            defaulted,
         })
     }
 

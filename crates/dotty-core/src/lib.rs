@@ -91,7 +91,9 @@ pub use source_semantics::{
     GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, SourceContext, SourceContextId,
     SourceDefinition, SourceExportSite, SourceSemanticIndex, SourceSemanticIndexError,
 };
-pub use source_typed_index::{ConflictingTypedTree, NamedCallBinding, SourceTypedIndex};
+pub use source_typed_index::{
+    ConflictingTypedTree, DefaultedArgument, NamedCallBinding, SourceTypedIndex,
+};
 pub use store::{DefaultGetterError, SemanticStore, StoreCheckpoint};
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,

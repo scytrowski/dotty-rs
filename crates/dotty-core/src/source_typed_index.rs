@@ -35,13 +35,24 @@ pub struct SourceTypedIndex {
     synthetic_definitions: HashMap<TreeId<Typed>, SymbolId>,
 }
 
-/// Correspondence retained when a checked ordinary call contains argument labels.
+/// One omitted ordinary argument supplied by a registered getter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultedArgument {
+    /// Zero-based declaration ordinal.
+    pub formal: usize,
+    /// Canonical getter symbol in the call's session.
+    pub getter: SymbolId,
+}
+
+/// Correspondence retained for a checked ordinary call with labels or defaults.
 #[derive(Clone, Debug)]
 pub struct NamedCallBinding {
     /// Original typed callee before capturing the receiver in a temporary.
     pub function: TreeId<Typed>,
     /// Formal ordinal for each written operand, including positional operands.
     pub written_to_formal: Box<[usize]>,
+    /// Omitted formals and their getters in declaration order.
+    pub defaulted: Box<[DefaultedArgument]>,
 }
 
 impl SourceTypedIndex {
@@ -121,13 +132,20 @@ impl SourceTypedIndex {
         function: TreeId<Typed>,
         written_to_formal: Box<[usize]>,
     ) {
-        self.named_calls.insert(
+        self.record_call_binding(
             root,
             NamedCallBinding {
                 function,
                 written_to_formal,
+                defaulted: Box::default(),
             },
         );
+    }
+
+    /// Records a checked call with explicit and defaulted slots. The two sets
+    /// must cover the declaration exactly once. All IDs share this index's session.
+    pub fn record_call_binding(&mut self, root: TreeId<Typed>, binding: NamedCallBinding) {
+        self.named_calls.insert(root, binding);
     }
 
     /// Returns the argument binding of this exact typed call or its evaluation-order block.

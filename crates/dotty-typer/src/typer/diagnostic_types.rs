@@ -22,6 +22,7 @@ impl TyperError {
     /// Other failures, including explicit type-argument errors, return `None`.
     pub fn call_error_code(&self) -> Option<&'static str> {
         match self {
+            Self::MissingRequiredArgument { .. } => Some("typer.missing_required_argument"),
             Self::UnknownNamedArgument { .. } => Some("typer.unknown_named_argument"),
             Self::DuplicateNamedArgument { .. } => Some("typer.duplicate_named_argument"),
             Self::PositionalAfterNamedArgument { .. } => {

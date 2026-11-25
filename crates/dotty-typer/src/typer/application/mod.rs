@@ -805,6 +805,29 @@ impl SourceTyper<'_> {
             == format!("unresolved .tasty class type parameter reference: #{index}")
     }
 
+    fn strict_ordinary_clause(&self, signature: TypeId) -> bool {
+        let Some(Type::Method(method)) = self.store.types.try_get(signature) else {
+            return false;
+        };
+        method.kind == MethodKind::Plain
+            && !matches!(
+                self.store.types.get(method.result),
+                Type::Method(_) | Type::Poly(_)
+            )
+            && method.params.iter().all(|p| {
+                !p.erased
+                    && !p.varargs
+                    && !matches!(self.store.types.get(p.ty), Type::ByName { .. })
+            })
+    }
+
+    fn ordinary_default_method(&self, symbol: SymbolId) -> bool {
+        let entry = self.store.symbols.get(symbol);
+        matches!(entry.origin, SymbolOrigin::Source(_))
+            && !entry.flags.contains(SymbolFlags::SYNTHETIC)
+            && matches!(entry.info, SymbolInfo::Complete(ty) if self.strict_ordinary_clause(ty))
+    }
+
     pub(in crate::typer) fn type_resolved_application(
         &mut self,
         request: ResolvedApplication,
@@ -825,23 +848,20 @@ impl SourceTyper<'_> {
         let named =
             self.bind_named_arguments(application_kind, callable, &argument_trees, tree_index)?;
         let mut inferred_witnesses = HashMap::new();
-        if application_kind == ApplyKind::Regular && named.is_some() {
-            let supported = matches!(self.store.types.try_get(callable), Some(Type::Method(m))
-                if m.kind == MethodKind::Plain && !matches!(self.store.types.get(m.result), Type::Method(_) | Type::Poly(_))
-                && m.params.iter().all(|p| !p.erased && !p.varargs && !matches!(self.store.types.get(p.ty), Type::ByName { .. })));
-            if !supported
+        if application_kind == ApplyKind::Regular
+            && named.is_some()
+            && (!self.strict_ordinary_clause(callable)
                 || is_constructor_application
                 || !matches!(
                     self.typed_arena.get(function).kind,
                     TreeKind::Ident(_) | TreeKind::Select(_)
-                )
-            {
-                return Err(TyperError::UnsupportedExpression {
-                    source: self.source,
-                    tree_index,
-                    expression_kind: "named arguments outside a direct strict ordinary method",
-                });
-            }
+                ))
+        {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index,
+                expression_kind: "named arguments outside a direct strict ordinary method",
+            });
         }
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
@@ -1068,7 +1088,32 @@ impl SourceTyper<'_> {
         let partial_using = application_kind == ApplyKind::Using
             && !argument_trees.is_empty()
             && argument_trees.len() < method.params.len();
-        let defaults = if argument_trees.len() == method.params.len() || partial_using {
+        let original_function = function;
+        let partial_ordinary = if application_kind == ApplyKind::Regular
+            && !is_constructor_application
+            && argument_trees.len() < method.params.len()
+            && matches!(
+                self.typed_arena.get(function).kind,
+                TreeKind::Ident(_) | TreeKind::Select(_)
+            ) {
+            self.store
+                .types
+                .get(self.typed_arena.get(function).ty)
+                .reference_symbol()
+                .filter(|&symbol| {
+                    self.ordinary_default_method(symbol)
+                        && (named.is_some()
+                            || (0..method.params.len())
+                                .any(|i| self.store.default_getter(symbol, i).is_some()))
+                })
+        } else {
+            None
+        };
+        let mut defaulted = Vec::new();
+        let defaults = if argument_trees.len() == method.params.len()
+            || partial_using
+            || partial_ordinary.is_some()
+        {
             Vec::new()
         } else if argument_trees.len() < method.params.len()
             && method.kind == MethodKind::Plain
@@ -1127,7 +1172,7 @@ impl SourceTyper<'_> {
                 ..
             }) if self.is_any_ref_identity_symbol(*symbol)
         );
-        let count = if partial_using {
+        let count = if partial_using || partial_ordinary.is_some() {
             method.params.len()
         } else {
             argument_trees.len()
@@ -1142,6 +1187,36 @@ impl SourceTyper<'_> {
             let (written, argument_tree) = match slot {
                 Some(a) => (a.written, &a.value),
                 None if named.is_some() || argument_index >= argument_trees.len() => {
+                    if let Some(symbol) = partial_ordinary {
+                        let getter = self
+                            .store
+                            .default_getter(symbol, argument_index)
+                            .ok_or_else(|| TyperError::MissingRequiredArgument {
+                                source: self.source,
+                                tree_index,
+                                method: symbol,
+                                parameter_index: argument_index,
+                                parameter_name: self
+                                    .store
+                                    .names
+                                    .resolve(parameter.name.as_name().text())
+                                    .into(),
+                            })?;
+                        arguments.push(self.apply_first_clause_default(
+                            &mut function,
+                            getter,
+                            parameter.ty,
+                            &mut shared,
+                            context,
+                            tree_index,
+                            info_journal,
+                        )?);
+                        defaulted.push(dotty_core::DefaultedArgument {
+                            formal: argument_index,
+                            getter,
+                        });
+                        continue;
+                    }
                     if let Some(witness) = inferred_witnesses.remove(&argument_index) {
                         arguments.push(witness);
                         continue;
@@ -1340,17 +1415,23 @@ impl SourceTyper<'_> {
             )?;
         }
         let root = self.bind_default_operands(shared, call, position);
-        if application_kind == ApplyKind::Regular
-            && let Some(slots) = named
-        {
-            let mut formals = vec![0; argument_trees.len()];
-            for (formal, argument) in slots.iter().enumerate() {
-                if let Some(argument) = argument {
-                    formals[argument.written] = formal;
+        if application_kind == ApplyKind::Regular && (named.is_some() || !defaulted.is_empty()) {
+            let mut formals: Vec<_> = (0..argument_trees.len()).collect();
+            if let Some(slots) = named {
+                for (formal, argument) in slots.iter().enumerate() {
+                    if let Some(argument) = argument {
+                        formals[argument.written] = formal;
+                    }
                 }
             }
-            self.typed_index
-                .record_named_call(root, function, formals.into());
+            self.typed_index.record_call_binding(
+                root,
+                dotty_core::NamedCallBinding {
+                    function: original_function,
+                    written_to_formal: formals.into(),
+                    defaulted: defaulted.into(),
+                },
+            );
         }
         Ok(root)
     }

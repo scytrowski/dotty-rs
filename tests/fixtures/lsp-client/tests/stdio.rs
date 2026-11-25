@@ -2035,3 +2035,30 @@ fn named_signature_help_tracks_each_overload_through_edit_close_and_undo() {
         client.shutdown();
     }
 }
+
+#[test]
+fn removing_a_provider_default_invalidates_the_unchanged_named_call_until_undo() {
+    const OPS: &str = "file:///fixture/Ops.scala";
+    let method = "  /* 😀 */ def diff(left: Int = 9, right: Int = 4): Int = left - right";
+    let use_site = "  def run(o: Ops): Int = /* 😀 */ o.diff(right = 4)";
+    for enc in ["utf-8", "utf-16"] {
+        let mut client = Client::start(enc, vec![OPS]);
+        client.open(OPS, &format!("class Ops {{\r\n{method}\r\n}}"));
+        client.open(B, &format!("class Use {{\r\n{use_site}\r\n}}"));
+        client.diagnostics(B, 1, json!([]));
+        let cursor = token_column(enc, use_site, "right = 4") + 8;
+        let call = token_column(enc, use_site, "o.diff");
+        let edit = token_column(enc, method, " = 9");
+        let help = json!({"activeSignature":0,"activeParameter":1,"signatures":[{"label":"def diff(left: Int = …, right: Int = …): Int","parameters":[{"label":"left: Int = …"},{"label":"right: Int = …"}]}]});
+        assert_eq!(client.signature_help(B, 1, cursor), help);
+        client.edit(OPS, 2, range(1, edit, edit + 4), "");
+        client.diagnostics(B,1,json!([{"range":range(1,call,call+"o.diff(right = 4)".len()),"severity":1,"source":"dotty","code":"typer.missing_required_argument","message":"Missing argument for parameter left"}]));
+        client.diagnostics(OPS, 2, json!([]));
+        assert_eq!(client.signature_help(B, 1, cursor), Value::Null);
+        client.edit(OPS, 3, range(1, edit, edit), " = 9");
+        client.diagnostics(B, 1, json!([]));
+        client.diagnostics(OPS, 3, json!([]));
+        assert_eq!(client.signature_help(B, 1, cursor), help);
+        client.shutdown();
+    }
+}

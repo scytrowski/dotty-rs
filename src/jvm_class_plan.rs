@@ -99,7 +99,7 @@ pub(crate) fn selected_method<'a>(
     source_ast: &AstArena<Untyped>,
     typed_ast: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Option<(SymbolId, Option<&'a [usize]>)> {
+) -> Option<(SymbolId, Option<&'a crate::core::NamedCallBinding>)> {
     let node = source_ast.try_get(call)?;
     let TreeKind::Apply(source_call) = &node.kind else {
         return None;
@@ -127,7 +127,7 @@ pub(crate) fn selected_method<'a>(
         return None;
     };
     (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
-        .then_some((*method, named.map(|binding| &*binding.written_to_formal)))
+        .then_some((*method, named))
 }
 
 /// Class bodies retained for deferred planning in a single naming and typing session.
@@ -214,6 +214,8 @@ pub enum ClassPlanError {
     },
     /// A method could not be projected from the class's typer output.
     MethodPlan(MethodPlanError),
+    /// A registered getter does not match the parameter or its typed initializer.
+    DefaultGetterPlan(SymbolId),
     /// The symbol does not identify an ordinary concrete top-level source class.
     SourceClass(SymbolId),
     /// The parent is unsupported or unresolved, or the template has a self type, derives or uses clause.
@@ -363,7 +365,7 @@ impl<'a> JvmClassPlanner<'a> {
     }
 
     /// Plans every body member from one class's typer output and the current
-    /// session arena. Parent applications use [`Self::with_header_bindings`].
+    /// session arena, including registered default getters and evaluation-order locals. Parent applications use [`Self::with_header_bindings`].
     pub fn plan_typed_class(
         &self,
         class: &SourceClass,
@@ -397,6 +399,7 @@ impl<'a> JvmClassPlanner<'a> {
             }
         }
         let mut methods = Vec::new();
+        let mut getters = Vec::new();
         let mut fields = Vec::new();
         for member in &class.members {
             match member {
@@ -417,11 +420,30 @@ impl<'a> JvmClassPlanner<'a> {
                         typed_index: &body.index,
                         local_bindings: locals.get(&method.symbol).map_or(&[], Vec::as_slice),
                     };
-                    methods.push(
-                        planner
-                            .plan(method.symbol)
-                            .map_err(ClassPlanError::MethodPlan)?,
-                    );
+                    let mut plan = planner
+                        .plan(method.symbol)
+                        .map_err(ClassPlanError::MethodPlan)?;
+                    for mut getter in plan
+                        .source_default_getters(
+                            source,
+                            self.ast,
+                            self.index,
+                            &body.index,
+                            self.store,
+                        )
+                        .map_err(|_| ClassPlanError::DefaultGetterPlan(method.symbol))?
+                    {
+                        getter.locals = planner
+                            .locals_for(
+                                getter.method,
+                                locals.get(&getter.method).map_or(&[], Vec::as_slice),
+                            )
+                            .map_err(ClassPlanError::MethodPlan)?;
+                        getter.bind_generated_locals(typed_ast, &body.index, self.store);
+                        getters.push(getter);
+                    }
+                    plan.bind_generated_locals(typed_ast, &body.index, self.store);
+                    methods.push(plan);
                 }
                 ClassMember::Field(field) => {
                     if self.member(class.symbol, source, field.tree, SymbolKind::Field)
@@ -451,7 +473,9 @@ impl<'a> JvmClassPlanner<'a> {
                 }
             }
         }
-        self.plan_with_fields(class.symbol, methods, typed_ast, fields)
+        let mut plan = self.plan_with_fields(class.symbol, methods, typed_ast, fields)?;
+        plan.methods.extend(getters);
+        Ok(plan)
     }
 
     /// Plans a public primary constructor with at most one value parameter list.

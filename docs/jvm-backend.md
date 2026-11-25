@@ -109,7 +109,7 @@ without introducing storage for the parameter itself.
 When compiling multiple source files, complete constructor signatures and
 public field signatures (in the constructor or class body) with the declaring
 file's typer before typing uses in other files. Contextual, by-name, repeated
-and defaulted parameters are outside this facade's scope. A default yields
+and defaulted constructor parameters are outside this facade's scope. A default yields
 `ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
 For initialized public or unqualified private `val` and `var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
@@ -1366,6 +1366,15 @@ parameters using the canonical `Int.+`. Captured reads must match the closure
 environment. In the source pipeline, `def closure: Int ?=> Int` emits `(I)I`
 and `def capture(x: Int): Int ?=> Int` emits `(II)I`, matching Scala 3.9's
 integration of direct context-function results into the enclosing method.
+
+### Ordinary method defaults
+
+`JvmClassPlanner::plan_typed_class` includes registered getters from the typed
+parameter initializers and binds generated operand temporaries. An ordinary
+one-clause `diff(left: Int = 9, right: Int = 4)` emits `diff(II)I` plus
+`diff$default$1()I` and `diff$default$2()I`. The standalone compiler client
+executes a partial named call, an empty call and a fully supplied call on
+JDK 21 in both file orders.
 
 ### Default arguments in a contextual clause
 

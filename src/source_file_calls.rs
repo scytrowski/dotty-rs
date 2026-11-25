@@ -205,7 +205,7 @@ impl SourceFileCalls {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
         bindings: impl FnOnce(SymbolId) -> Option<&'a SourceTypedIndex>,
-    ) -> Option<(SymbolId, Option<&'a [usize]>)> {
+    ) -> Option<(SymbolId, Option<&'a crate::core::NamedCallBinding>)> {
         if ast.try_get(call)?.position?.source() != self.call_names().source() {
             return None;
         }
@@ -376,8 +376,15 @@ impl crate::NamedClassSources<'_> {
         bodies: &'a crate::CheckedClassBodies,
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
-    ) -> impl Iterator<Item = Result<(ResolvedSourceCall, Option<&'a [usize]>), DeclarationError>>
-    {
+    ) -> impl Iterator<
+        Item = Result<
+            (
+                ResolvedSourceCall,
+                Option<&'a crate::core::NamedCallBinding>,
+            ),
+            DeclarationError,
+        >,
+    > {
         calls.call_names().iter().filter_map(move |entry| {
             let (method, formals) =
                 calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {

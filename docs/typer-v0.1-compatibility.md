@@ -147,7 +147,13 @@ Scala 3.9.0 accepts `diff(right = 4, left = 9)`, `diff(left = 9, 4)` and
 `diff(9, right = 4)`. It rejects the final operand of `diff(right = 4, 9)`.
 Unknown or repeated names point to the written argument. An incompatible
 value points to its RHS. The committed typed root retains the original callee
-and formal ordinal of each operand in written order.
+and formal ordinal of each operand in written order. A source default in this
+clause has a registered parameterless getter whose signature is completed in
+the declaring file. Omitted formals retain their getter symbols in declaration
+order. Evaluation proceeds through the receiver, explicit operands in written
+order, and omitted defaults in parameter order. Overload selection prefers
+applicable alternatives that use no default. A missing required argument of a
+partially bound named call identifies the method and unfilled formal.
 
 For an unambiguously selected method with a known contextual or legacy implicit
 signature, an explicit `using` clause can bind arguments by name. Missing slots

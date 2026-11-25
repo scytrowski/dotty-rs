@@ -829,6 +829,7 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
     use crate::typer::TyperError;
     let text = "class Ops { def diff(left: Int, right: Int): Int = left - right }
        class Bad {
+         def absent(o: Ops): Int = o.diff(right = 4)
          def unknown(o: Ops): Int = o.diff(missing = 9, right = 4)
          def duplicate(o: Ops): Int = o.diff(left = 9, left = 4)
          def misplaced(o: Ops): Int = o.diff(right = 4, 9)
@@ -862,6 +863,16 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
                 panic!()
             };
             let expected = match &error {
+                TyperError::MissingRequiredArgument {
+                    method,
+                    parameter_index: 0,
+                    parameter_name,
+                    ..
+                } if method == &file.classes()[0].methods().next().unwrap().symbol
+                    && &**parameter_name == "left" =>
+                {
+                    "o.diff(right = 4)"
+                }
                 TyperError::UnknownNamedArgument { name, .. }
                     if store.names.resolve(name.text()) == "missing" =>
                 {
@@ -890,7 +901,10 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
             );
             ranges.push(expected);
         }
-        assert_eq!(ranges, ["missing = 9", "left = 4", "9", "false"]);
+        assert_eq!(
+            ranges,
+            ["o.diff(right = 4)", "missing = 9", "left = 4", "9", "false"]
+        );
     }
     let (_, good) = sources
         .check_class_body(
@@ -1073,5 +1087,34 @@ fn unfinished_named_labels_select_each_candidates_formal_before_the_rhs() {
                 .collect::<Vec<_>>(),
             "{args}"
         );
+    }
+}
+
+#[test]
+fn ordinary_default_is_attached_to_the_exact_overload_and_parameter() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let text = "class Ops { def pick(x: Int): Int = x; def pick(x: Int, y: Int = 4): Int = y }";
+    let ops = named(2, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&ops], &store).unwrap();
+    let arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let index =
+        ResolvedMemberIndex::build(&sources, &CheckedClassBodies::default(), &arena, &store);
+    for (i, (offset, _)) in text.match_indices("pick").enumerate() {
+        let (site, info) = index.symbol_info_at(ops.source(), offset as u32).unwrap();
+        let crate::SourceSymbolSignature::Method {
+            parameters: Some(params),
+            ..
+        } = &info.signature
+        else {
+            panic!()
+        };
+        assert_eq!(params.len(), i + 1);
+        assert_eq!(params[0].default_getter, None);
+        if i == 1 {
+            let getter = params[1].default_getter.unwrap();
+            assert_eq!(store.default_getter_origin(getter), Some((site.symbol, 1)));
+        }
     }
 }

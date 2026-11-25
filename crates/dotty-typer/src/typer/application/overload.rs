@@ -2001,6 +2001,7 @@ impl SourceTyper<'_> {
         named: Option<&[TreeId<Untyped>]>,
     ) -> Result<ApplicationCandidate, TyperError> {
         let mut applicable = Vec::new();
+        let mut using_defaults = Vec::new();
         let mut rejected = Vec::new();
         let mut unsupported_candidates = Vec::new();
         for candidate in candidates.iter().copied() {
@@ -2059,7 +2060,13 @@ impl SourceTyper<'_> {
                 ));
                 continue;
             }
-            if let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
+            let partial = application_kind == ApplyKind::Regular
+                && !retain_unsupported_rejections
+                && arguments.len() < method.params.len()
+                && self.ordinary_default_method(candidate.symbol)
+                && (0..method.params.len())
+                    .any(|i| self.store.default_getter(candidate.symbol, i).is_some());
+            if !partial && let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
                 rejected.push((
                     candidate.symbol,
                     OverloadRejection::WrongArity {
@@ -2102,11 +2109,25 @@ impl SourceTyper<'_> {
             };
             let mut argument_rejection = None;
             let mut unsupported_relation = false;
-            for (formal, parameter) in method.params.iter().take(arguments.len()).enumerate() {
-                let argument_index = slots
-                    .as_ref()
-                    .and_then(|s| s[formal].as_ref())
-                    .map_or(formal, |a| a.written);
+            for (formal, parameter) in method.params.iter().enumerate() {
+                let written = match &slots {
+                    Some(slots) => slots[formal].as_ref().map(|argument| argument.written),
+                    None => (formal < arguments.len()).then_some(formal),
+                };
+                let Some(argument_index) = written else {
+                    if partial
+                        && self
+                            .store
+                            .default_getter(candidate.symbol, formal)
+                            .is_none()
+                    {
+                        argument_rejection = Some(OverloadRejection::MissingRequiredArgument {
+                            parameter_index: formal,
+                        });
+                        break;
+                    }
+                    continue;
+                };
                 let argument = &arguments[argument_index];
                 let actual = self.adapt_pre_widened_expression_type_to_expected(
                     argument.own_type,
@@ -2166,7 +2187,14 @@ impl SourceTyper<'_> {
                     candidate: candidate.symbol,
                 });
             }
-            applicable.push(candidate);
+            if partial {
+                using_defaults.push(candidate);
+            } else {
+                applicable.push(candidate);
+            }
+        }
+        if applicable.is_empty() {
+            applicable = using_defaults;
         }
         if !unsupported_candidates.is_empty()
             && (!applicable.is_empty() || !retain_unsupported_rejections)
