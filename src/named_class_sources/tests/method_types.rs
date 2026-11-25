@@ -1017,3 +1017,61 @@ fn checked_named_signature_survives_argument_temporaries() {
         assert_eq!(selected.active_parameter, Some(formal));
     }
 }
+
+#[test]
+fn unfinished_named_labels_select_each_candidates_formal_before_the_rhs() {
+    let methods = "class Ops { def pick(left: Int, right: Boolean): Int = left; def pick(right: Boolean, n: Int): Int = n }";
+    for (args, expected) in [
+        ("right = ", vec![(0, 1), (1, 0)]),
+        ("right = true, ", vec![(0, 0), (1, 1)]),
+        ("right = true, left = ", vec![(0, 0)]),
+        ("right = true, n = ", vec![(1, 1)]),
+        ("right = true, right = ", vec![]),
+        ("missing = ", vec![]),
+        ("right = 7, ", vec![]),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(2, methods, &mut store, &mut packages);
+        let providers = NamedClassSources::new([&ops], &store).unwrap();
+        prepare_bodies(&providers, &mut store, defs, &packages);
+        let methods: Vec<_> = ops.classes()[0].methods().map(|m| m.symbol).collect();
+        let id = SourceId::from_index(1);
+        let text = format!("class Use {{ def run(o: Ops): Int = o.pick({args}");
+        let parsed = crate::parse_source(id, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &providers,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        let get = |offset| {
+            index
+                .at(id, offset)
+                .into_iter()
+                .flat_map(|q| q.candidates)
+                .map(|c| (c.method, c.active_parameter))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            get(text.find(args).unwrap() as u32),
+            if args.starts_with("missing") {
+                vec![]
+            } else {
+                vec![(methods[0], 1), (methods[1], 0)]
+            }
+        );
+        assert_eq!(
+            get(text.len() as u32),
+            expected
+                .iter()
+                .map(|&(i, f)| (methods[i], f))
+                .collect::<Vec<_>>(),
+            "{args}"
+        );
+    }
+}

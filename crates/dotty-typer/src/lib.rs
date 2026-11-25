@@ -42,8 +42,10 @@
 #![deny(missing_docs)]
 #![doc = include_str!("guide.md")]
 
+mod argument_slots;
 mod source_type_index;
 mod source_typed_index;
+pub use argument_slots::{ArgumentSlotError, ArgumentSlots};
 mod typer;
 mod types;
 

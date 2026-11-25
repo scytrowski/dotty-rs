@@ -110,7 +110,10 @@ where
                     let clean_prefix = self.diagnostics.len() == diagnostics_before;
                     let (tree, label) = self.argument_expr(args.len());
                     if let Some(label) = label {
-                        if clean_prefix && label.value.is_none() && self.at_call_recovery_boundary()
+                        if clean_prefix
+                            && label.value.is_none()
+                            && self.at_call_recovery_boundary()
+                            && matches!(&self.diagnostics[diagnostics_before..], [error] if matches!(error.issue(), ParseIssue::Expression(ExpressionIssue::MissingAssignmentRhs { .. })))
                         {
                             missing_slot = Some(args.len());
                         }
@@ -185,7 +188,7 @@ where
         call
     }
 
-    fn at_call_recovery_boundary(&self) -> bool {
+    pub(super) fn at_call_recovery_boundary(&self) -> bool {
         matches!(
             self.current().kind,
             TokenKind::Eof

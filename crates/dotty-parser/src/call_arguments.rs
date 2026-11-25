@@ -102,7 +102,7 @@ impl SourceCallArguments {
             .filter(|list| list.unfinished.is_some())
     }
 
-    /// Visits unfinished lists with an intact positional prefix in opening-token
+    /// Visits unfinished lists with an intact argument prefix in opening-token
     /// order. Inspect `positional` to exclude named or contextual arguments.
     pub fn unfinished_lists(&self) -> impl Iterator<Item = &CallArgumentList> {
         self.0.iter().filter(|list| list.unfinished.is_some())

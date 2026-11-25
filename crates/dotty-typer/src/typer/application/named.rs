@@ -45,7 +45,7 @@ impl SourceTyper<'_> {
             .map(|(i, p)| (*p.name.as_name(), i))
             .collect();
         let mut slots: Vec<_> = (0..method.params.len()).map(|_| None).collect();
-        let mut next_unfilled = 0;
+        let mut order = crate::ArgumentSlots::new(method.params.len());
         for (written, &tree) in trees.iter().enumerate() {
             let node = self
                 .arena
@@ -62,35 +62,30 @@ impl SourceTyper<'_> {
                         tree_index: tree.index(),
                         name: arg.name,
                     })?;
-                (*ordinal, arg.arg)
+                (Some(*ordinal), arg.arg)
             } else {
-                if written != next_unfilled {
-                    return Err(TyperError::PositionalAfterNamedArgument {
+                (None, tree)
+            };
+            let formal = order.bind(ordinal).map_err(|reason| match reason {
+                crate::ArgumentSlotError::Duplicate(i) => TyperError::DuplicateNamedArgument {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: *method.params[i].name.as_name(),
+                },
+                crate::ArgumentSlotError::MisplacedPositional => {
+                    TyperError::PositionalAfterNamedArgument {
                         source: self.source,
                         tree_index: tree.index(),
-                    });
+                    }
                 }
-                (written, tree)
-            };
-            let Some(slot) = slots.get_mut(ordinal) else {
-                return Err(TyperError::ApplicationArityMismatch {
+                crate::ArgumentSlotError::OutsideClause => TyperError::ApplicationArityMismatch {
                     source: self.source,
                     tree_index,
                     expected: method.params.len(),
                     actual: trees.len(),
-                });
-            };
-            if slot.is_some() {
-                return Err(TyperError::DuplicateNamedArgument {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: *method.params[ordinal].name.as_name(),
-                });
-            }
-            *slot = Some(NamedArgument { written, value });
-            while slots.get(next_unfilled).is_some_and(Option::is_some) {
-                next_unfilled += 1;
-            }
+                },
+            })?;
+            slots[formal] = Some(NamedArgument { written, value });
         }
         Ok(Some(slots))
     }
