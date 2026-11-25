@@ -69,3 +69,37 @@ fn rejected_argument_keeps_its_written_and_formal_positions_and_type_description
         }
     ));
 }
+
+#[test]
+fn candidate_declarations_use_the_rejected_method_and_its_own_parameter() {
+    use crate::typer::OverloadRejection;
+    let a = "class Ops { def pick(right: Int): Int = right; def pick(flag: Boolean): Int = 1 }";
+    let mut store = SemanticStore::new();
+    let mut packages = Packages::new();
+    let file = named(8, a, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let absent = NamedClassSources::new([], &store).unwrap();
+    for (method, token) in file.classes()[0].methods().zip(["right:", "flag:"]) {
+        let reason = OverloadRejection::MissingRequiredArgument { parameter_index: 0 };
+        let target = sources
+            .overload_candidate_target(method.symbol, Some(&reason))
+            .unwrap();
+        let p = target.parameter.unwrap();
+        assert_eq!(p.method, method.symbol);
+        assert_eq!(p.target.name.start() as usize, a.find(token).unwrap());
+        assert_eq!(store.symbols.get(p.parameter).owner, Some(method.symbol));
+        assert!(target.method.declaration.start() < p.target.name.start());
+        assert!(
+            sources
+                .overload_candidate_target(method.symbol, None)
+                .unwrap()
+                .parameter
+                .is_none()
+        );
+        assert!(
+            absent
+                .overload_candidate_target(method.symbol, Some(&reason))
+                .is_none()
+        );
+    }
+}
