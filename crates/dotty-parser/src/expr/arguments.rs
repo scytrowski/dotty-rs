@@ -91,6 +91,7 @@ where
             ));
         }
         let mut args = Vec::new();
+        let mut labels = Vec::new();
         let mut comma_ends = Vec::new();
         let mut missing_slot = None;
         let closed = if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
@@ -106,7 +107,16 @@ where
                     }));
                     args.push(self.error_expr(self.current_span()));
                 } else {
-                    args.push(self.argument_expr());
+                    let clean_prefix = self.diagnostics.len() == diagnostics_before;
+                    let (tree, label) = self.argument_expr(args.len());
+                    if let Some(label) = label {
+                        if clean_prefix && label.value.is_none() && self.at_call_recovery_boundary()
+                        {
+                            missing_slot = Some(args.len());
+                        }
+                        labels.push(label);
+                    }
+                    args.push(tree);
                 }
                 self.consume_newlines_before_argument_delimiter();
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
@@ -139,11 +149,7 @@ where
                 .iter()
                 .map(|&tree| Some(self.ast.get(tree).position?.span().range()))
                 .collect::<Option<Box<[_]>>>()?;
-            let positional = kind == ApplyKind::Regular
-                && !written
-                    .iter()
-                    .any(|&tree| matches!(self.ast.get(tree).kind, TreeKind::NamedArg(_)));
-            Some((arguments, positional))
+            Some(arguments)
         });
         let call = self.alloc_from(
             mark,
@@ -153,14 +159,16 @@ where
                 kind,
             }),
         );
-        if let Some((arguments, positional)) = captured
+        if let Some(arguments) = captured
             && let Ok(range) = dotty_core::TextRange::new(open.start(), end)
         {
             self.call_arguments.push(crate::CallArgumentList {
                 callee: name.map(|(_, range)| range),
                 range,
                 arguments,
-                positional,
+                regular: kind == ApplyKind::Regular,
+                positional: kind == ApplyKind::Regular && labels.is_empty(),
+                named_arguments: labels.into_boxed_slice(),
                 unfinished: (!closed).then_some(call),
                 includes_end: !closed
                     && (end == self.source.len_bytes()
@@ -222,26 +230,39 @@ where
         }
     }
 
-    fn argument_expr(&mut self) -> TreeId<Untyped> {
+    fn argument_expr(
+        &mut self,
+        written: usize,
+    ) -> (TreeId<Untyped>, Option<crate::NamedCallArgument>) {
+        let label = self.current().span;
         let tree = self.with_location(crate::Location::InArgs, |parser| parser.expr());
-        self.normalize_named_argument(tree)
-    }
-
-    fn normalize_named_argument(&mut self, tree: TreeId<Untyped>) -> TreeId<Untyped> {
         let TreeKind::Assign(assignment) = self.ast.get(tree).kind else {
-            return tree;
+            return (tree, None);
         };
         let TreeKind::Ident(identifier) = self.ast.get(assignment.lhs).kind else {
-            return tree;
+            return (tree, None);
         };
-
-        self.alloc(
+        let operand = self.ast.get(assignment.rhs);
+        let value = operand.position.map(|p| p.span().range()).filter(|_| {
+            !matches!(
+                operand.kind,
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Error(_))
+            )
+        });
+        let named = crate::NamedCallArgument {
+            written,
+            name: self.names.resolve(identifier.name.text()).into(),
+            label,
+            value,
+        };
+        let arg = self.alloc(
             TreeKind::NamedArg(NamedArg {
                 name: identifier.name,
                 arg: assignment.rhs,
             }),
             self.ast.get(tree).position,
-        )
+        );
+        (arg, Some(named))
     }
 }
 
