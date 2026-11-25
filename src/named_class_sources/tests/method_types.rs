@@ -829,6 +829,7 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
     use crate::typer::TyperError;
     let text = "class Ops { def diff(left: Int, right: Int): Int = left - right }
        class Bad {
+         def absent(o: Ops): Int = o.diff(right = 4)
          def unknown(o: Ops): Int = o.diff(missing = 9, right = 4)
          def duplicate(o: Ops): Int = o.diff(left = 9, left = 4)
          def misplaced(o: Ops): Int = o.diff(right = 4, 9)
@@ -862,6 +863,16 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
                 panic!()
             };
             let expected = match &error {
+                TyperError::MissingRequiredArgument {
+                    method,
+                    parameter_index: 0,
+                    parameter_name,
+                    ..
+                } if method == &file.classes()[0].methods().next().unwrap().symbol
+                    && &**parameter_name == "left" =>
+                {
+                    "o.diff(right = 4)"
+                }
                 TyperError::UnknownNamedArgument { name, .. }
                     if store.names.resolve(name.text()) == "missing" =>
                 {
@@ -890,7 +901,10 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
             );
             ranges.push(expected);
         }
-        assert_eq!(ranges, ["missing = 9", "left = 4", "9", "false"]);
+        assert_eq!(
+            ranges,
+            ["o.diff(right = 4)", "missing = 9", "left = 4", "9", "false"]
+        );
     }
     let (_, good) = sources
         .check_class_body(

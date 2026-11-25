@@ -137,6 +137,9 @@ impl SourceDiagnostic {
                 format!("Expected {expected} {noun}, got {actual}")
             }
             TyperError::TypeNameNotFound { .. } => "Unknown type name".into(),
+            TyperError::MissingRequiredArgument { parameter_name, .. } => {
+                format!("Missing argument for parameter {parameter_name}")
+            }
             TyperError::UnknownNamedArgument { .. } => {
                 "The selected clause has no parameter with this name.".into()
             }

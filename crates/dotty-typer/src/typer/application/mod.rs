@@ -1188,14 +1188,20 @@ impl SourceTyper<'_> {
                 Some(a) => (a.written, &a.value),
                 None if named.is_some() || argument_index >= argument_trees.len() => {
                     if let Some(symbol) = partial_ordinary {
-                        let getter = self.store.default_getter(symbol, argument_index).ok_or(
-                            TyperError::ApplicationArityMismatch {
+                        let getter = self
+                            .store
+                            .default_getter(symbol, argument_index)
+                            .ok_or_else(|| TyperError::MissingRequiredArgument {
                                 source: self.source,
                                 tree_index,
-                                expected: method.params.len(),
-                                actual: argument_trees.len(),
-                            },
-                        )?;
+                                method: symbol,
+                                parameter_index: argument_index,
+                                parameter_name: self
+                                    .store
+                                    .names
+                                    .resolve(parameter.name.as_name().text())
+                                    .into(),
+                            })?;
                         arguments.push(self.apply_first_clause_default(
                             &mut function,
                             getter,

@@ -1781,6 +1781,19 @@ pub enum TyperError {
         /// Observed argument or parameter count.
         actual: usize,
     },
+    /// A partially bound ordinary source call omitted a required formal.
+    MissingRequiredArgument {
+        /// Source containing the application.
+        source: SourceId,
+        /// Original application in that source's untyped arena.
+        tree_index: u32,
+        /// Selected source method in the naming session.
+        method: SymbolId,
+        /// Zero-based ordinal of the first unbound required formal.
+        parameter_index: usize,
+        /// Declared name, retained for presentation after the typing session.
+        parameter_name: Box<str>,
+    },
     /// The selected clause has no parameter with this name.
     UnknownNamedArgument {
         /// Source file containing the explicit argument.

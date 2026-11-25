@@ -50,6 +50,9 @@ pub fn typer_error_span_with<'a>(
         TyperError::ApplicationArityMismatch {
             source, tree_index, ..
         }
+        | TyperError::MissingRequiredArgument {
+            source, tree_index, ..
+        }
         | TyperError::OverloadApplicationNoApplicable {
             source, tree_index, ..
         }
