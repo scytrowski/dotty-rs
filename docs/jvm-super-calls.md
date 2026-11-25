@@ -63,7 +63,9 @@ the canonical parent class and primary-constructor symbols and argument order.
 `dotty-jvm` validates that proof against the child template, typed application,
 class hierarchy, and constructor metadata. It lowers only Int/Boolean literals
 and exact child primary-constructor parameter identifiers of primitive or
-planned reference types. Emission places `aload_0`, source-ordered arguments,
+planned reference types. For named forwarding, the adapter supplies the original
+arguments in written order and the backend checks their committed formal slots.
+Emission places `aload_0`, arguments in parent descriptor order,
 and the parent `<init>` call before child field initializers. Unsupported
 argument forms and unplanned reference types return typed errors without
 publishing class files. The adapter must not retype expressions or infer
@@ -249,7 +251,7 @@ checks owners with `javap -c -v` and executes the chain under
 
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
-| `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
+| `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then arguments in parent formal order, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
 | `super.value()` targeting a method inherited through the direct parent | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical declaring symbol; `dotty-jvm` verifies the ancestor path and emits `invokespecial` with the immediate parent as symbolic owner; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs in the combined source-to-JVM integration from [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `super.add(n)`, Boolean/reference results, or a branched super call | The planned direct-parent method, exact descriptor, argument order, and result are checked; branches receive classfile stack-map frames and the mandatory JDK gate verifies execution | Preserve the approved direct-parent public instance-method subset; broader signatures and call shapes need a scoped issue |
 | Parameterized parent plus explicit direct-super calls in one source-to-JVM run | `SuperCalls.scala` covers the two-class combination; `ThreeLevelConstructorSuper.scala` verifies Base/Middle/Leaf constructor forwarding, both immediate-parent super owners, and inherited virtual dispatch in the full three-class chain | Preserve canonical per-edge and per-method identities; the JDK 21+ gate inspects `javap -c -v` and runs `java -Xverify:all` — [#1407](https://github.com/scytrowski/dotty-rs/issues/1407) |

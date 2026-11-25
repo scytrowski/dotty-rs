@@ -120,7 +120,7 @@ impl JvmDirectSuperConstructorPlan {
         self.source
     }
 
-    /// Source argument identities and corresponding typed roots in order.
+    /// Source argument identities and corresponding typed roots in parent formal order.
     pub fn arguments(&self) -> &[JvmConstructorArgumentBinding] {
         &self.arguments
     }
@@ -615,8 +615,10 @@ impl JvmPrimaryConstructorPlan {
     }
 
     /// Attaches the exact mapped parent application and its typed arguments.
-    /// `arguments` must be copied in order from this session's
-    /// `SourceTypedIndex`; this adapter checks both arenas and the canonical
+    /// Supply `arguments` in written order, including the named wrapper tree for each
+    /// labelled operand. The proof uses the committed permutation from this session's
+    /// `SourceTypedIndex` to place validated operands in parent formal order.
+    /// This adapter checks both arenas and the canonical
     /// selected constructor but never retypes source expressions.
     #[allow(clippy::too_many_arguments)]
     pub fn with_direct_super_constructor(
@@ -748,6 +750,42 @@ impl JvmPrimaryConstructorPlan {
         let parent_class = parent.owner.expect("checked above");
         let dotty_core::SymbolOrigin::Source(parent_source) = parent.origin else {
             return Err(fail(JvmConstructorIssue::ParentConstructorIdentity));
+        };
+        let has_labels = source_apply.args.iter().any(|&arg| {
+            matches!(
+                ast.try_get(arg).map(|node| &node.kind),
+                Some(TreeKind::NamedArg(_))
+            )
+        });
+        let permutation = source_typed_index.named_call(typed_parent_application);
+        let invalid_arguments = || fail(JvmConstructorIssue::ParentConstructorArgumentIdentity);
+        if has_labels != permutation.is_some() {
+            return Err(invalid_arguments());
+        }
+        let arguments = if let Some(binding) = permutation {
+            if binding.function != typed_apply.function
+                || !binding.defaulted.is_empty()
+                || binding.written_to_formal.len() != arguments.len()
+            {
+                return Err(invalid_arguments());
+            }
+            let mut ordered = vec![None; arguments.len()];
+            for (&slot, arg) in binding.written_to_formal.iter().zip(arguments) {
+                if ordered
+                    .get_mut(slot)
+                    .ok_or_else(invalid_arguments)?
+                    .replace(arg)
+                    .is_some()
+                {
+                    return Err(invalid_arguments());
+                }
+            }
+            ordered
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(invalid_arguments)?
+        } else {
+            arguments
         };
         if typed_apply.kind != dotty_core::ast::ApplyKind::Regular
             || typed_apply.args.len() != arguments.len()

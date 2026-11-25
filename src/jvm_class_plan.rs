@@ -730,37 +730,37 @@ impl<'a> JvmClassPlanner<'a> {
         let (typed_ast, index) = self.header.ok_or(unsupported)?;
         let invalid = ClassPlanError::InvalidParentApplication { class, tree };
         let typed_call = index.get(source, tree).ok_or(invalid)?;
-        let [arg] = args else { return Err(unsupported) };
-        let source_arg = self.ast.try_get(*arg).ok_or(invalid)?;
-        if !matches!(&source_arg.kind, TreeKind::Ident(ident) if ident.name.is_term()) {
+        if args.is_empty() {
             return Err(unsupported);
         }
-        let typed = index.get(source, *arg).ok_or(invalid)?;
-        // Only a reference to a formal of this exact child constructor may be forwarded.
-        let node = typed_ast.try_get(typed).ok_or(invalid)?;
-        if !source_arg
-            .position
-            .is_some_and(|pos| pos.source() == source)
-            || node.position != source_arg.position
-            || !matches!(&node.kind, TreeKind::Ident(_))
-            || !matches!(self.store.types.try_get(node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
-                if constructor.parameters().contains(symbol))
-        {
-            return Err(invalid);
+        let mut arguments = Vec::with_capacity(args.len());
+        for &arg in args {
+            let value = match &self.ast.try_get(arg).ok_or(invalid)?.kind {
+                TreeKind::NamedArg(named) => named.arg,
+                _ => arg,
+            };
+            let source_arg = self.ast.try_get(value).ok_or(invalid)?;
+            if !matches!(&source_arg.kind, TreeKind::Ident(ident) if ident.name.is_term()) {
+                return Err(unsupported);
+            }
+            let typed = index.get(source, value).ok_or(invalid)?;
+            // Only a reference to a formal of this exact child constructor may be forwarded.
+            let node = typed_ast.try_get(typed).ok_or(invalid)?;
+            if !source_arg
+                .position
+                .is_some_and(|pos| pos.source() == source)
+                || node.position != source_arg.position
+                || !matches!(&node.kind, TreeKind::Ident(_))
+                || !matches!(self.store.types.try_get(node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                    if constructor.parameters().contains(symbol))
+            {
+                return Err(invalid);
+            }
+            arguments.push(JvmConstructorArgumentBinding { source: arg, typed });
         }
         constructor
             .with_direct_super_constructor(
-                tree,
-                typed_call,
-                vec![JvmConstructorArgumentBinding {
-                    source: *arg,
-                    typed,
-                }],
-                self.ast,
-                self.index,
-                index,
-                self.store,
-                typed_ast,
+                tree, typed_call, arguments, self.ast, self.index, index, self.store, typed_ast,
             )
             .map(JvmClassInitializationPlan::PrimaryConstructor)
             .map_err(|_| invalid)

@@ -3508,7 +3508,9 @@ fn named_parent_labels_and_child_formal_reads_resolve_across_files() {
         let relation = index
             .parent_at(child.0, child.2.find("Base(").unwrap() as u32)
             .unwrap();
-        let args = index.primary_constructor_arguments_at(child.0, label).unwrap();
+        let args = index
+            .primary_constructor_arguments_at(child.0, label)
+            .unwrap();
         assert_eq!(
             args.construction.usage,
             dotty::SourceConstructorUse::DirectParent {
@@ -3544,6 +3546,68 @@ fn named_parent_labels_and_child_formal_reads_resolve_across_files() {
         assert!(index.construction_arguments_at(child.0, label).is_none());
         let body_only =
             dotty::ResolvedMemberIndex::build(&sources, &bodies, &headers.arena, &store);
-        assert!(body_only.primary_constructor_arguments_at(child.0, label).is_none());
+        assert!(
+            body_only
+                .primary_constructor_arguments_at(child.0, label)
+                .is_none()
+        );
     }
+}
+
+#[test]
+fn named_parent_forwards_the_selected_slots_before_invokespecial_on_jdk21() {
+    let base = (
+        SourceId::from_index(6),
+        "Base.scala",
+        "package demo\nclass Base(val id: Int, var count: Int)",
+    );
+    let child = (
+        SourceId::from_index(3),
+        "Derived.scala",
+        "package demo\nclass Derived(id: Int, initial: Int) extends Base(count = initial, id = id)",
+    );
+    for files in [[base, child], [child, base]] {
+        let artifacts = super::with_plan(&files, |plan, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                plan.typed_ast,
+                plan.store,
+            );
+            let parent = index
+                .parent_at(child.0, child.2.find("Base(").unwrap() as u32)
+                .unwrap();
+            checked_parent_emission(plan, defs, parent, "(II)V", &[0x2a, 0x1b, 0x1c])
+        });
+        assert_eq!(
+            super::run_java_client("named-parent", "NamedParentClient", &artifacts).trim(),
+            "9 4"
+        );
+    }
+}
+
+#[test]
+fn named_parent_rejects_swapped_typed_int_operands() {
+    let (mut store, defs, packages, unit) = named(
+        "class Base(val id: Int, var count: Int); class Child(id: Int, initial: Int) extends Base(count = initial, id = id)",
+    );
+    let mut headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let class = &unit.classes()[1];
+    let parent = class.parents[0];
+    let root = headers.bindings.get(unit.source(), parent).unwrap();
+    let TreeKind::Apply(app) = &mut headers.arena.get_mut(root).kind else {
+        panic!()
+    };
+    app.args.swap(0, 1);
+    assert_eq!(
+        JvmClassPlanner::new(&store, unit.ast(), unit.index())
+            .with_header_bindings(&headers.arena, &headers.bindings)
+            .plan(class.symbol, []),
+        Err(ClassPlanError::InvalidParentApplication {
+            class: class.symbol,
+            tree: parent
+        })
+    );
 }
