@@ -972,6 +972,48 @@ fn named_overloads_bind_each_candidates_own_labels_and_types() {
                     .method,
                 syms[i]
             );
+            let signature = index
+                .call_signature_at(caller.source(), (calls.find(name).unwrap() + 5) as u32)
+                .unwrap();
+            assert_eq!(signature.active_parameter, Some(1));
+            assert_eq!(signature.call.method, syms[i]);
         }
+    }
+}
+
+#[test]
+fn checked_named_signature_survives_argument_temporaries() {
+    let methods = "class Ops { def pick(left: Int, right: Boolean): Int = left }";
+    let calls = "class Use { def flag(): Boolean = true; def run(o: Ops): Int = o.pick(right = flag(), left = 9) }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let ops = named(2, methods, &mut store, &mut packages);
+    let caller = named(3, calls, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&caller, &ops], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let (body, report) = sources
+        .check_class_body(
+            caller.classes()[0].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let mut bodies = CheckedClassBodies::default();
+    bodies.record(body).unwrap();
+    let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+    for (token, formal) in [("right =", 1), ("flag(),", 1), ("left =", 0), ("9)", 0)] {
+        let selected = index
+            .call_signature_at(caller.source(), calls.rfind(token).unwrap() as u32)
+            .unwrap();
+        assert_eq!(
+            selected.call.method,
+            ops.classes()[0].methods().next().unwrap().symbol
+        );
+        assert_eq!(selected.active_parameter, Some(formal));
     }
 }

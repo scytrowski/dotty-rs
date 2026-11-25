@@ -67,7 +67,7 @@ impl TypedClassBody {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
     ) -> Option<SymbolId> {
-        selected_method(&self.index, call, source_ast, typed_ast, store)
+        selected_method(&self.index, call, source_ast, typed_ast, store).map(|(method, _)| method)
     }
 
     pub(crate) fn local_bindings(&self) -> &[TypedLocalBinding] {
@@ -93,26 +93,29 @@ impl TypedClassBody {
     }
 }
 
-pub(crate) fn selected_method(
-    index: &SourceTypedIndex,
+pub(crate) fn selected_method<'a>(
+    index: &'a SourceTypedIndex,
     call: TreeId<Untyped>,
     source_ast: &AstArena<Untyped>,
     typed_ast: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Option<SymbolId> {
+) -> Option<(SymbolId, Option<&'a [usize]>)> {
     let node = source_ast.try_get(call)?;
     let TreeKind::Apply(source_call) = &node.kind else {
         return None;
     };
     let source = node.position?.source();
     let typed = index.get(source, call)?;
-    let TreeKind::Apply(application) = &typed_ast.try_get(typed)?.kind else {
-        return None;
+    let named = index.named_call(typed);
+    let function = match (named, &typed_ast.try_get(typed)?.kind) {
+        (Some(binding), _) => binding.function,
+        (None, TreeKind::Apply(application)) => application.function,
+        _ => return None,
     };
-    if index.get(source, source_call.function)? != application.function {
+    if index.get(source, source_call.function)? != function {
         return None;
     }
-    let callee = typed_ast.try_get(application.function)?;
+    let callee = typed_ast.try_get(function)?;
     if !matches!(callee.kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
         return None;
     }
@@ -124,7 +127,7 @@ pub(crate) fn selected_method(
         return None;
     };
     (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
-        .then_some(*method)
+        .then_some((*method, named.map(|binding| &*binding.written_to_formal)))
 }
 
 /// Class bodies retained for deferred planning in a single naming and typing session.
