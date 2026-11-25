@@ -745,7 +745,11 @@ unfinished signature or a type outside this subset yields `None`; the separate
 navigation query can still resolve its declaration.
 
 For an ordinary call with named arguments, [`ResolvedMemberIndex::call_signature_at`]
-returns the active formal of the selected overload. In an unfinished call,
+returns the active formal of the selected overload. Each formal exposes its
+registered default getter, and the checked signature lists the getters actually
+used for omitted arguments. For `diff(left: Int = 9, right: Int = 4)`,
+`diff(right = 4)` selects formal 1 at the operand and uses the getter for
+formal 0. `diff()` supplies both defaults and has no active written operand. In an unfinished call,
 [`IncompleteCallIndex::at`] returns one [`ActiveCallSignature`] per viable
 overload. For example, `pick(right = ` can highlight formal 1 in
 `pick(left: Int, right: Boolean)` and formal 0 in `pick(right: Boolean, n: Int)`.

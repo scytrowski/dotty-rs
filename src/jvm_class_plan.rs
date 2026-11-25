@@ -99,7 +99,7 @@ pub(crate) fn selected_method<'a>(
     source_ast: &AstArena<Untyped>,
     typed_ast: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Option<(SymbolId, Option<&'a [usize]>)> {
+) -> Option<(SymbolId, Option<&'a crate::core::NamedCallBinding>)> {
     let node = source_ast.try_get(call)?;
     let TreeKind::Apply(source_call) = &node.kind else {
         return None;
@@ -127,7 +127,7 @@ pub(crate) fn selected_method<'a>(
         return None;
     };
     (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
-        .then_some((*method, named.map(|binding| &*binding.written_to_formal)))
+        .then_some((*method, named))
 }
 
 /// Class bodies retained for deferred planning in a single naming and typing session.
