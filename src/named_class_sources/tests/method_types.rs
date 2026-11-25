@@ -823,3 +823,84 @@ fn inherited_identifier_reports_the_missing_provider_and_defers_multiple_methods
         }
     }
 }
+
+#[test]
+fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
+    use crate::typer::TyperError;
+    let text = "class Ops { def diff(left: Int, right: Int): Int = left - right }
+       class Bad {
+         def unknown(o: Ops): Int = o.diff(missing = 9, right = 4)
+         def duplicate(o: Ops): Int = o.diff(left = 9, left = 4)
+         def misplaced(o: Ops): Int = o.diff(right = 4, 9)
+         def wrong(o: Ops): Int = o.diff(right = false, left = 9)
+       }
+       class Good { def run(o: Ops): Int = o.diff(right = 4, left = 9) }";
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let file = named(8, text, &mut store, &mut packages);
+    let sources = NamedClassSources::new([&file], &store).unwrap();
+    let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+    let before = store.checkpoint();
+    let trees = arena.iter().count();
+    for _ in 0..2 {
+        let (_, report) = sources
+            .check_class_body(
+                file.classes()[1].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        assert_eq!(store.checkpoint(), before);
+        assert_eq!(arena.iter().count(), trees);
+        let mut ranges = Vec::new();
+        for failure in report.errors {
+            let crate::ClassBodyError::Member { error, .. } = failure else {
+                panic!()
+            };
+            let expected = match &error {
+                TyperError::UnknownNamedArgument { name, .. }
+                    if store.names.resolve(name.text()) == "missing" =>
+                {
+                    "missing = 9"
+                }
+                TyperError::DuplicateNamedArgument { name, .. }
+                    if store.names.resolve(name.text()) == "left" =>
+                {
+                    "left = 4"
+                }
+                TyperError::PositionalAfterNamedArgument { .. } => "9",
+                TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    expected,
+                    ..
+                } if *expected == defs.int => "false",
+                other => panic!("{other:?}"),
+            };
+            let range = crate::typer_error_span(&error, file.ast())
+                .unwrap()
+                .span()
+                .range();
+            assert_eq!(
+                &text[range.start() as usize..range.end() as usize],
+                expected
+            );
+            ranges.push(expected);
+        }
+        assert_eq!(ranges, ["missing = 9", "left = 4", "9", "false"]);
+    }
+    let (_, good) = sources
+        .check_class_body(
+            file.classes()[2].symbol,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            crate::core::NoResolver,
+        )
+        .into_parts();
+    assert!(good.errors.is_empty(), "{:?}", good.errors);
+}
