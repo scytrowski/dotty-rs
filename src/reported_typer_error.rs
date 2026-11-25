@@ -79,7 +79,7 @@ impl ReportedTyperError {
 
     /// Enriches a report with the exact label and per-candidate source locations
     /// from the original revision. Both caller and provider may be omitted.
-    /// Symbols must belong to the same naming session. Body and member-signature
+    /// Symbols must belong to the same naming session. Header, body and member-signature
     /// semantic diagnostics with named sources apply this enrichment automatically.
     pub fn with_named_sources(mut self, sources: &crate::NamedClassSources<'_>) -> Self {
         if let Failure::Other {

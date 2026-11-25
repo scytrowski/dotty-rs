@@ -1221,13 +1221,6 @@ impl SourceTyper<'_> {
         else {
             return Ok(());
         };
-        if application.kind == ApplyKind::Regular && self.has_named_arguments(&application.args) {
-            return Err(TyperError::UnsupportedExpression {
-                source: self.source,
-                tree_index: parent_tree.index(),
-                expression_kind: "named primary constructor arguments in a parent clause",
-            });
-        }
         let valid_constructor_selection = application.kind == ApplyKind::Regular
             && self
                 .arena
@@ -1270,6 +1263,13 @@ impl SourceTyper<'_> {
         let typed_parent = typed_parent_result?;
 
         let parent_class = self.instantiable_class_of_type(parent_type, info_journal)?;
+        if matches!(self.typed_arena.get(typed_parent).kind, TreeKind::Block(_)) {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: parent_tree.index(),
+                expression_kind: "parent constructor argument evaluation requiring temporaries",
+            });
+        }
         let Some(TreeKind::Apply(typed_application)) = self
             .typed_arena
             .try_get(typed_parent)

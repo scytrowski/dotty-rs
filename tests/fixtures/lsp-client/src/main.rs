@@ -194,7 +194,10 @@ impl Workspace {
                     call.active_parameter,
                 ));
             }
-            if let Some(ctor) = analysis.members.construction_signature_at(source, pos) {
+            if let Some(ctor) = analysis
+                .members
+                .primary_constructor_signature_at(source, pos)
+            {
                 use dotty::ConstructorParameterKind::{Plain, Val, Var};
                 let labels: Vec<_> = ctor
                     .parameters
@@ -209,7 +212,11 @@ impl Workspace {
                         format!("{prefix}{}: {}", p.name, p.ty.name)
                     })
                     .collect();
-                let label = format!("new {}({})", ctor.instance.name, labels.join(", "));
+                let prefix = match ctor.construction.usage {
+                    dotty::SourceConstructorUse::Allocation => "new",
+                    dotty::SourceConstructorUse::DirectParent { .. } => "extends",
+                };
+                let label = format!("{prefix} {}({})", ctor.instance.name, labels.join(", "));
                 return Some(signature_help(
                     labelled_signature(label, labels),
                     ctor.active_parameter,

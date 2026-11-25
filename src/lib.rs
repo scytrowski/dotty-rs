@@ -171,6 +171,7 @@ pub use source_parameters::{SourceConstructorParameter, SourceMethodParameter};
 mod source_construction;
 pub use source_construction::{
     ResolvedConstructionArguments, ResolvedConstructionSignature, ResolvedSourceConstruction,
+    SourceConstructorUse,
 };
 mod source_field_access;
 pub use source_field_access::{

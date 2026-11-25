@@ -906,6 +906,10 @@ For a public constructor `val` or `var`, the class-owned symbol is the field.
 Its references include named argument labels, reads and writes in source order.
 Use [`ResolvedMemberIndex::value_access_at`] to distinguish reads and writes.
 A label binds a formal and has no value access kind.
+[`ResolvedMemberIndex::primary_constructor_arguments_at`] includes both explicit allocations
+and checked direct superclass calls. Match [`SourceConstructorUse`] to distinguish
+them. In `extends Base(count = initial, id = id)`, the labels refer to the base
+class parameters and the values refer to the child constructor parameters.
 
 [`ResolvedMemberIndex::parent_at`] uses the same completed class information
 as the JVM planner for both `extends Base` and `extends Base(left)`. The
@@ -954,6 +958,9 @@ for (text, base, selected, unused) in [
     assert_eq!(relation.parent, declaration.symbol);
     assert_eq!(index.references_to(relation.parent), &[relation.origin]);
 
+    let signature = index.primary_constructor_signature_at(source, arg).ok_or("missing signature")?;
+    assert_eq!(signature.active_parameter, Some(0));
+    assert_eq!(signature.construction.usage, dotty::SourceConstructorUse::DirectParent { child: relation.child });
     let p = index.constructor_parameter_at(source, arg).ok_or("missing parent argument")?;
     assert_eq!(p.target.name.start() as usize, text.find(selected).unwrap());
     assert_ne!(p.parameter, p.formal);

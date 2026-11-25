@@ -220,12 +220,12 @@ impl<'a> NamedClassSources<'a> {
         member: Option<SymbolId>,
         error: TyperError,
     ) -> ClassHeaderError {
-        ClassHeaderError::Typing(Box::new(ReportedTyperError::from_class(
-            error,
-            class,
-            member,
-            |id| self.file(id).map(NamedClassSource::ast),
-        )))
+        ClassHeaderError::Typing(Box::new(
+            ReportedTyperError::from_class(error, class, member, |id| {
+                self.file(id).map(NamedClassSource::ast)
+            })
+            .with_named_sources(self),
+        ))
     }
 
     /// Attempts one header using the declaring file and the indexed classes

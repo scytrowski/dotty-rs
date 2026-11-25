@@ -1,29 +1,43 @@
-//! Navigation from an explicit source allocation to its selected primary constructor.
+//! Navigation from a source constructor invocation to its selected primary constructor.
 use crate::core::{
     AstArena, SemanticStore, SourceSpan, SourceTypedIndex, SymbolId, TermRefTarget, TreeId,
     TreeKind, Type, TypeRefTarget, Typed, Untyped,
 };
 use crate::{NamedClassSource, SourceMemberTarget};
 
-/// A committed explicit `new` of an indexed ordinary class. Identities and
+/// How an ordinary source primary constructor is invoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceConstructorUse {
+    /// A written allocation in a checked class body.
+    Allocation,
+    /// Initialization of the immediate superclass in a checked class header.
+    DirectParent {
+        /// Class whose constructor forwards the arguments.
+        child: SymbolId,
+    },
+}
+
+/// A committed constructor invocation of an indexed ordinary class. Identities and
 /// byte ranges belong to the original naming and typing revision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedSourceConstruction {
-    /// Canonical class of the constructed instance.
+    /// Source context of the invocation.
+    pub usage: SourceConstructorUse,
+    /// Canonical class declaring the invoked constructor.
     pub class: SymbolId,
     /// Primary constructor selected by the typed application.
     pub constructor: SymbolId,
-    /// Written class-name token at the allocation site.
+    /// Written class-name token at the invocation site.
     pub origin: SourceSpan,
     /// Source declaration and name of the constructed class.
     pub target: SourceMemberTarget,
 }
 
-/// Arguments of a checked explicit source allocation with one required primary clause.
+/// Arguments of a checked source constructor invocation with one required primary clause.
 /// Both declaration and use identities belong to the indexed revision.
 #[derive(Debug)]
 pub struct ResolvedConstructionArguments {
-    /// Allocation site and selected primary constructor.
+    /// Invocation site and selected primary constructor.
     pub construction: ResolvedSourceConstruction,
     /// Supplied arguments in source order, paired with constructor-owned formals
     /// and their class-owned source declarations.
@@ -34,7 +48,7 @@ pub struct ResolvedConstructionArguments {
 /// All references borrow the same retained revision.
 #[derive(Debug)]
 pub struct ResolvedConstructionSignature<'a> {
-    /// Written allocation and canonical identities.
+    /// Written invocation and canonical identities.
     pub construction: ResolvedSourceConstruction,
     /// Constructed source class, including its semantic name.
     pub instance: &'a crate::SourceNamedType,
