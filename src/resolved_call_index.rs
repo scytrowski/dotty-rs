@@ -24,7 +24,9 @@ struct IndexedFile {
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
+    argument_labels: Vec<(SourceSpan, SourceMethodParameter)>,
     calls: Vec<ResolvedSourceCall>,
+    resolved_arguments: HashMap<u32, crate::ResolvedCallArguments>,
     argument_bindings: HashMap<u32, crate::core::NamedCallBinding>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -100,7 +102,7 @@ fn use_at<T: Copy>(uses: &[(SourceSpan, T)], offset: u32) -> Option<(SourceSpan,
 
 // Each input is already ordered within one file. Keep reference collection linear
 // when declarations, parent clauses and allocations occur in interleaved order.
-fn merge_class_sites(
+fn merge_sites(
     left: impl Iterator<Item = (SymbolId, SourceSpan)>,
     right: impl Iterator<Item = (SymbolId, SourceSpan)>,
 ) -> impl Iterator<Item = (SymbolId, SourceSpan)> {
@@ -165,6 +167,7 @@ impl ResolvedMemberIndex {
         let headers = (!headers.index.is_empty()).then_some(headers);
         let mut index = Self::default();
         let mut targets = HashMap::new();
+        let mut method_formals: HashMap<SymbolId, Vec<SourceMethodParameter>> = HashMap::new();
         let mut valid_files = Vec::new();
         for file in sources.files() {
             let navigation = match file.navigation() {
@@ -221,6 +224,14 @@ impl ResolvedMemberIndex {
             field_declarations.sort_unstable_by_key(|(_, target)| target.name.start());
             let parameters =
                 crate::source_parameters::declarations(file, store, &mut index.diagnostics);
+            for p in &parameters {
+                if let ParameterDeclaration::Method(formal) = p {
+                    method_formals
+                        .entry(formal.method)
+                        .or_default()
+                        .push(*formal);
+                }
+            }
             valid_files.push((
                 file,
                 navigation,
@@ -276,23 +287,50 @@ impl ResolvedMemberIndex {
             let method_types = crate::source_signature_types::method_types(file, &targets, store);
             let parent_sites = parents.iter().map(|s| (s.parent, s.origin));
             let construction_sites = constructions.iter().map(|s| (s.class, s.origin));
-            let signature_sites = merge_class_sites(
+            let signature_sites = merge_sites(
                 method_types.iter().map(|s| (s.class, s.origin)),
                 constructor_types.iter().map(|s| (s.class, s.origin)),
             );
-            for (class, span) in merge_class_sites(
-                merge_class_sites(parent_sites, construction_sites),
+            for (class, span) in merge_sites(
+                merge_sites(parent_sites, construction_sites),
                 signature_sites,
             ) {
                 index.references.entry(class).or_default().push(span);
             }
             let mut calls = Vec::new();
+            let mut resolved_arguments = HashMap::new();
+            let mut argument_labels = Vec::new();
             let mut argument_bindings = HashMap::new();
             // A target navigation error is reported once when visiting its file.
-            for (call, binding) in sources
+            for site in sources
                 .calls_in_file(file, navigation, bodies, typed_ast, store)
                 .flatten()
             {
+                let call = site.call;
+                let binding = site.binding;
+                // The closing parenthesis identifies this exact list even for nested calls.
+                if let Some(arguments) = file
+                    .ast()
+                    .get(site.tree)
+                    .position
+                    .and_then(|p| p.span().range().end().checked_sub(1))
+                    .and_then(|end| file.named().syntax().call_arguments.at(end))
+                    .and_then(|list| {
+                        crate::ResolvedCallArguments::capture(
+                            call,
+                            list,
+                            method_formals.get(&call.method).map_or(&[], Vec::as_slice),
+                            binding,
+                            store,
+                        )
+                    })
+                {
+                    argument_labels.extend(arguments.written.iter().filter_map(|arg| {
+                        let span = SourceSpan::new(file.source(), Span::without_point(arg.label?));
+                        Some((span, arg.parameter))
+                    }));
+                    resolved_arguments.insert(call.origin.span().range().start(), arguments);
+                }
                 index
                     .references
                     .entry(call.method)
@@ -303,6 +341,8 @@ impl ResolvedMemberIndex {
                 }
                 calls.push(call);
             }
+            // An outer call can have labels on both sides of a nested call.
+            argument_labels.sort_unstable_by_key(|(span, _)| span.span().range().start());
             let locals = crate::source_locals::declarations(file, navigation, bodies, store);
             let mut local_uses = Vec::new();
             let mut slots: HashMap<_, _> = parameters
@@ -331,7 +371,7 @@ impl ResolvedMemberIndex {
                             continue;
                         };
                         parameter_uses.push((origin, slot));
-                        parameters[slot].symbol()
+                        continue;
                     }
                     TermAccess::Local(id, kind) => {
                         let Some(&slot) = slots.get(&id) else {
@@ -354,6 +394,13 @@ impl ResolvedMemberIndex {
                     }
                 };
                 index.references.entry(symbol).or_default().push(origin);
+            }
+            let reads = parameter_uses
+                .iter()
+                .map(|(span, slot)| (parameters[*slot].symbol(), *span));
+            let labels = argument_labels.iter().map(|(span, p)| (p.parameter, *span));
+            for (parameter, span) in merge_sites(reads, labels) {
+                index.references.entry(parameter).or_default().push(span);
             }
             let method_declarations = navigation.method_targets();
             let symbols = class_declarations
@@ -387,7 +434,9 @@ impl ResolvedMemberIndex {
                     local_uses,
                     parameters,
                     parameter_uses,
+                    argument_labels,
                     calls,
+                    resolved_arguments,
                     argument_bindings,
                     fields,
                     field_declarations,
@@ -518,6 +567,23 @@ impl ResolvedMemberIndex {
         })
     }
 
+    /// Returns written argument ranges and canonical formals for the checked
+    /// call whose callee token contains this UTF-8 byte offset. Both files must
+    /// be indexed in the same revision. Requires a direct call to a source method
+    /// with one strict ordinary value clause. Rejected and unfinished calls yield
+    /// `None`. The result borrows the index and does not require the semantic arenas.
+    pub fn call_arguments_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedCallArguments> {
+        let call = self.call_at(source, offset)?;
+        self.files
+            .get(&source)?
+            .resolved_arguments
+            .get(&call.origin.span().range().start())
+    }
+
     /// Looks up a written callee token by half-open UTF-8 byte offset.
     /// Missing files, unchecked calls and offsets outside a name yield `None`.
     pub fn call_at(&self, source: SourceId, offset: u32) -> Option<&ResolvedSourceCall> {
@@ -543,7 +609,8 @@ impl ResolvedMemberIndex {
         declaration_at(&self.files.get(&source)?.method_declarations, offset)
     }
 
-    /// Finds a named parameter at its declaration or a committed bare read.
+    /// Finds a method parameter at its declaration, a committed bare read, or
+    /// an exact argument label at a checked call to that overload.
     /// Includes unused declarations and successful members of a partial body.
     /// Only ordinary parameters of class methods with one value list are indexed.
     /// Supply a UTF-8 byte offset from this revision; the token end is exclusive.
@@ -599,8 +666,11 @@ impl ResolvedMemberIndex {
         offset: u32,
     ) -> Option<(SourceSpan, ParameterDeclaration)> {
         let file = self.files.get(&source)?;
-        let (origin, slot) = use_at(&file.parameter_uses, offset)?;
-        Some((origin, file.parameters[slot]))
+        if let Some((origin, slot)) = use_at(&file.parameter_uses, offset) {
+            return Some((origin, file.parameters[slot]));
+        }
+        let (origin, p) = use_at(&file.argument_labels, offset)?;
+        Some((origin, ParameterDeclaration::Method(p)))
     }
 
     /// Gets the committed read or write at a written field name. The
@@ -733,7 +803,9 @@ impl ResolvedMemberIndex {
     /// Committed uses of this exact symbol, in input file order then
     /// token order. For classes, covers single unqualified explicit parents and committed
     /// simple `new` expressions, as well as simple written class types in supported method and constructor signatures. Omits declarations. Unknown and unused symbols yield an
-    /// empty slice. Supply a symbol from the original session.
+    /// empty slice. Method parameter references include committed reads and written
+    /// argument labels at calls to that overload. Omitted arguments have no source
+    /// token. Supply a symbol from the original session.
     pub fn references_to(&self, symbol: SymbolId) -> &[SourceSpan] {
         self.references.get(&symbol).map_or(&[], Vec::as_slice)
     }

@@ -175,3 +175,10 @@ analysis. After deleting only `External.class`, the test reopens the same
 document to trigger a new analysis and checks the constructor diagnostic in
 UTF-8 and UTF-16. The client also tests the underlying typed error before
 publishing it.
+
+For a checked `a.pick(right = right)`, definition, hover and references use
+the retained member index for both tokens. The label targets the formal of
+the selected overload; the operand targets the caller's local declaration.
+The stdio test changes only the local initializer from `4` to `true` and
+back. It verifies both reference lists and both definition ranges after each
+edit in UTF-8 and UTF-16.

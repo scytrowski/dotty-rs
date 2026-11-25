@@ -143,6 +143,11 @@ pub use incomplete_calls::{
     ActiveCallSignature, CallSignatureCandidate, CallSignatureCandidates, IncompleteCallIndex,
 };
 
+mod source_call_bindings;
+pub use source_call_bindings::{
+    ResolvedCallArguments, ResolvedDefaultArgument, ResolvedWrittenArgument,
+};
+
 mod resolved_call_index;
 pub use resolved_call_index::{
     ResolvedCallIndex, ResolvedCallSignature, ResolvedMemberIndex, ResolvedSourceParent,

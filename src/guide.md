@@ -730,6 +730,11 @@ let signature = index.call_signature_at(id, cursor).ok_or("missing positional ca
 assert_eq!(signature.call.method, call.method);
 assert_eq!(signature.active_parameter, Some(0));
 assert_eq!(signature.parameters[0].ty.name.as_ref(), "Int");
+let arguments = index.call_arguments_at(id, offset).ok_or("missing checked call")?;
+let [argument] = &*arguments.written else { panic!("expected one argument") };
+assert_eq!(argument.ordinal, 0);
+assert_eq!(argument.parameter.method, call.method);
+assert_eq!(argument.label, None);
 assert_eq!(index.references_to(method), &[call.origin]);
 assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -743,6 +748,15 @@ IDs in the original session. The projection covers named class and trait types,
 including builtins, and methods with zero or one ordinary value clause. An
 unfinished signature or a type outside this subset yields `None`; the separate
 navigation query can still resolve its declaration.
+
+Use [`ResolvedMemberIndex::call_arguments_at`] on the callee name to inspect
+written arguments in evaluation order and omitted parameters with their selected
+getters. Each argument identifies the canonical source parameter on the selected
+overload. Argument and label ranges belong to the caller; parameter declaration
+ranges belong to its defining file. In `o.diff(right = right)`, [`ResolvedMemberIndex::symbol_at`]
+on the label resolves the formal, and the operand resolves its own lexical symbol.
+[`ResolvedMemberIndex::references_to`] includes the written label alongside reads
+of that formal. An implicit default has no source reference in the caller.
 
 For an ordinary call with named arguments, [`ResolvedMemberIndex::call_signature_at`]
 returns the active formal of the selected overload. Each formal exposes its
