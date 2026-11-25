@@ -932,7 +932,10 @@ For the tested subset, source Typer completion currently supports:
   `SourceTypedIndex`. `ClassInfo.parents` remains a list of parent types; it
   does not carry constructor expressions. Parent arguments cannot read the
   uninitialized child receiver through `this` or unqualified instance members;
-  constructor parameters remain directly available. Curried, contextual, erased,
+  constructor parameters remain directly available. Named arguments to a public
+  source primary constructor retain their written-to-formal ordinals, including
+  reordered child parameters. Reordering that needs evaluation temporaries is
+  unsupported in a parent header. Curried, contextual, erased,
   by-name, repeated, defaulted, generic, secondary, and private parent
   constructors are rejected.
 - For an inherited binary member class of a directly applied generic parent,

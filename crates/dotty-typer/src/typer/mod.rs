@@ -18664,9 +18664,45 @@ mod tests {
     }
 
     #[test]
-    fn named_primary_constructor_parent_arguments_remain_unsupported() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class Parent(x: Int); class Child extends Parent(x = 1)");
+    fn named_parent_arguments_bind_to_the_selected_primary_clause() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base(val id: Int, var count: Int); class Child(id: Int, initial: Int) extends Base(count = initial, id = id)",
+        );
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(child).unwrap();
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(child).unwrap() else {
+            panic!()
+        };
+        let TreeKind::TypeDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(def.rhs).kind else {
+            panic!()
+        };
+        let root = typer.typed_index.get(source, template.parents[0]).unwrap();
+        assert_eq!(
+            &*typer
+                .typed_index
+                .named_call(root)
+                .unwrap()
+                .written_to_formal,
+            &[1, 0]
+        );
+    }
+
+    #[test]
+    fn named_parent_arguments_reject_reordering_that_needs_temporaries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Probe { def read(): Int = 4 }; class Base(x: Int, y: Int); class Child(p: Probe) extends Base(y = p.read(), x = 9)",
+        );
         let child = class_symbol(&parsed, &store, &index, source, "Child");
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -18679,7 +18715,7 @@ mod tests {
         assert!(matches!(
             typer.complete_symbol(child),
             Err(TyperError::UnsupportedExpression {
-                expression_kind: "named primary constructor arguments in a parent clause",
+                expression_kind: "parent constructor argument evaluation requiring temporaries",
                 ..
             })
         ));
