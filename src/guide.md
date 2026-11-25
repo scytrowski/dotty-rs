@@ -730,6 +730,11 @@ let signature = index.call_signature_at(id, cursor).ok_or("missing positional ca
 assert_eq!(signature.call.method, call.method);
 assert_eq!(signature.active_parameter, Some(0));
 assert_eq!(signature.parameters[0].ty.name.as_ref(), "Int");
+let arguments = index.call_arguments_at(id, offset).ok_or("missing checked call")?;
+let [argument] = &*arguments.written else { panic!("expected one argument") };
+assert_eq!(argument.ordinal, 0);
+assert_eq!(argument.parameter.method, call.method);
+assert_eq!(argument.label, None);
 assert_eq!(index.references_to(method), &[call.origin]);
 assert!(index.call_at(id, text.find("only(false)").unwrap() as u32).is_none());
 # Ok::<(), Box<dyn std::error::Error>>(())

@@ -525,6 +525,7 @@ mod tests {
         assert!(sources.class(other.classes()[0].symbol).is_none());
     }
 
+    mod call_bindings;
     mod constructions;
     mod constructor_parameters;
     mod constructor_types;

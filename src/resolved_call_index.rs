@@ -25,6 +25,7 @@ struct IndexedFile {
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
     calls: Vec<ResolvedSourceCall>,
+    resolved_arguments: HashMap<u32, crate::ResolvedCallArguments>,
     argument_bindings: HashMap<u32, crate::core::NamedCallBinding>,
     fields: Vec<ResolvedFieldAccess>,
     field_declarations: Vec<(SymbolId, SourceMemberTarget)>,
@@ -165,6 +166,7 @@ impl ResolvedMemberIndex {
         let headers = (!headers.index.is_empty()).then_some(headers);
         let mut index = Self::default();
         let mut targets = HashMap::new();
+        let mut method_formals: HashMap<SymbolId, Vec<SourceMethodParameter>> = HashMap::new();
         let mut valid_files = Vec::new();
         for file in sources.files() {
             let navigation = match file.navigation() {
@@ -221,6 +223,14 @@ impl ResolvedMemberIndex {
             field_declarations.sort_unstable_by_key(|(_, target)| target.name.start());
             let parameters =
                 crate::source_parameters::declarations(file, store, &mut index.diagnostics);
+            for p in &parameters {
+                if let ParameterDeclaration::Method(formal) = p {
+                    method_formals
+                        .entry(formal.method)
+                        .or_default()
+                        .push(*formal);
+                }
+            }
             valid_files.push((
                 file,
                 navigation,
@@ -287,12 +297,34 @@ impl ResolvedMemberIndex {
                 index.references.entry(class).or_default().push(span);
             }
             let mut calls = Vec::new();
+            let mut resolved_arguments = HashMap::new();
             let mut argument_bindings = HashMap::new();
             // A target navigation error is reported once when visiting its file.
-            for (call, binding) in sources
+            for site in sources
                 .calls_in_file(file, navigation, bodies, typed_ast, store)
                 .flatten()
             {
+                let call = site.call;
+                let binding = site.binding;
+                // The closing parenthesis identifies this exact list even for nested calls.
+                if let Some(arguments) = file
+                    .ast()
+                    .get(site.tree)
+                    .position
+                    .and_then(|p| p.span().range().end().checked_sub(1))
+                    .and_then(|end| file.named().syntax().call_arguments.at(end))
+                    .and_then(|list| {
+                        crate::ResolvedCallArguments::capture(
+                            call,
+                            list,
+                            method_formals.get(&call.method).map_or(&[], Vec::as_slice),
+                            binding,
+                            store,
+                        )
+                    })
+                {
+                    resolved_arguments.insert(call.origin.span().range().start(), arguments);
+                }
                 index
                     .references
                     .entry(call.method)
@@ -388,6 +420,7 @@ impl ResolvedMemberIndex {
                     parameters,
                     parameter_uses,
                     calls,
+                    resolved_arguments,
                     argument_bindings,
                     fields,
                     field_declarations,
@@ -516,6 +549,23 @@ impl ResolvedMemberIndex {
             active_parameter,
             defaulted,
         })
+    }
+
+    /// Returns written argument ranges and canonical formals for the checked
+    /// call whose callee token contains this UTF-8 byte offset. Both files must
+    /// be indexed in the same revision. Requires a direct call to a source method
+    /// with one strict ordinary value clause. Rejected and unfinished calls yield
+    /// `None`. The result borrows the index and does not require the semantic arenas.
+    pub fn call_arguments_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedCallArguments> {
+        let call = self.call_at(source, offset)?;
+        self.files
+            .get(&source)?
+            .resolved_arguments
+            .get(&call.origin.span().range().start())
     }
 
     /// Looks up a written callee token by half-open UTF-8 byte offset.

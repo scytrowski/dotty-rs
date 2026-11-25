@@ -33,6 +33,12 @@ pub struct ResolvedSourceCall {
     pub target: SourceMethodTarget,
 }
 
+pub(crate) struct CheckedFileCall<'a> {
+    pub call: ResolvedSourceCall,
+    pub binding: Option<&'a crate::core::NamedCallBinding>,
+    pub tree: TreeId<Untyped>,
+}
+
 #[derive(Debug)]
 enum CallNames {
     Owned(SourceCallNames),
@@ -365,7 +371,7 @@ impl crate::NamedClassSources<'_> {
             return Ok(Vec::new());
         };
         self.calls_in_file(caller, caller.navigation()?, bodies, typed_ast, store)
-            .map(|result| result.map(|(call, _)| call))
+            .map(|result| result.map(|site| site.call))
             .collect()
     }
 
@@ -376,15 +382,7 @@ impl crate::NamedClassSources<'_> {
         bodies: &'a crate::CheckedClassBodies,
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
-    ) -> impl Iterator<
-        Item = Result<
-            (
-                ResolvedSourceCall,
-                Option<&'a crate::core::NamedCallBinding>,
-            ),
-            DeclarationError,
-        >,
-    > {
+    ) -> impl Iterator<Item = Result<CheckedFileCall<'a>, DeclarationError>> {
         calls.call_names().iter().filter_map(move |entry| {
             let (method, formals) =
                 calls.method_for_call(entry, caller.ast(), typed_ast, store, |owner| {
@@ -392,7 +390,13 @@ impl crate::NamedClassSources<'_> {
                 })?;
             self.resolved_target(caller.source(), entry.0, method, store)
                 .transpose()
-                .map(|result| result.map(|call| (call, formals)))
+                .map(|result| {
+                    result.map(|call| CheckedFileCall {
+                        call,
+                        binding: formals,
+                        tree: entry.1,
+                    })
+                })
         })
     }
 
