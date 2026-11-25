@@ -3003,15 +3003,12 @@ impl Namer<'_> {
                 }
             }
         }
-        let mut constructor_spec = self.source_symbol_spec(
+        let constructor_spec = self.source_symbol_spec(
             template.constructor,
             &constructor.metadata,
             symbol,
             SymbolKind::Constructor,
         )?;
-        if plain_primary_clause {
-            constructor_spec.flags = constructor_spec.flags | SymbolFlags::PLAIN_PRIMARY_CLAUSE;
-        }
         let constructor_symbol = self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
@@ -3019,6 +3016,11 @@ impl Namer<'_> {
             scope,
             constructor_spec,
         )?;
+        if plain_primary_clause {
+            self.store
+                .symbols
+                .record_plain_primary_clause(constructor_symbol);
+        }
         self.index
             .record_declaration_context(constructor_symbol, class_source_context)?;
         let constructor_scope = self

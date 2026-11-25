@@ -8,6 +8,8 @@ use crate::symbols::symbol::Symbol;
 #[derive(Debug, Default)]
 pub struct SymbolTable {
     symbols: Vec<Symbol>,
+    // Sorted by identity. Naming registers constructors in allocation order.
+    plain_primary_clauses: Vec<SymbolId>,
 }
 
 impl SymbolTable {
@@ -36,6 +38,40 @@ impl SymbolTable {
     /// Drops every symbol allocated after the table held `len` symbols.
     pub(crate) fn truncate(&mut self, len: usize) {
         self.symbols.truncate(len);
+        self.plain_primary_clauses.truncate(
+            self.plain_primary_clauses
+                .partition_point(|id| (id.index() as usize) < len),
+        );
+    }
+
+    /// Records a source primary constructor with no type parameters and one
+    /// clause of required, strict, plain parameters. The source frontend must
+    /// establish this shape in the original declaration before registration.
+    /// Repeated registration is idempotent. Truncating a constructor also drops its record.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the ID identifies a source constructor in this table.
+    pub fn record_plain_primary_clause(&mut self, constructor: SymbolId) {
+        let symbol = self.get(constructor);
+        assert!(
+            symbol.kind == crate::SymbolKind::Constructor
+                && matches!(symbol.origin, crate::SymbolOrigin::Source(_))
+        );
+        if let Err(slot) = self
+            .plain_primary_clauses
+            .binary_search_by_key(&constructor.index(), |id| id.index())
+        {
+            self.plain_primary_clauses.insert(slot, constructor);
+        }
+    }
+
+    /// Whether naming established a plain primary clause for this constructor
+    /// in this session. Binary and unregistered symbols return `false`.
+    pub fn has_plain_primary_clause(&self, constructor: SymbolId) -> bool {
+        self.plain_primary_clauses
+            .binary_search_by_key(&constructor.index(), |id| id.index())
+            .is_ok()
     }
 
     /// Returns the symbol for an ID from this session.
@@ -117,6 +153,22 @@ mod tests {
             position: None,
             links: SymbolLinks::default(),
         }
+    }
+
+    #[test]
+    fn truncated_constructor_identity_loses_its_clause() {
+        let mut table = SymbolTable::new();
+        let mut entry = minimal_symbol(None);
+        entry.kind = SymbolKind::Constructor;
+        entry.origin = SymbolOrigin::Source(crate::SourceId::from_index(0));
+        let first = table.alloc(entry.clone());
+        table.record_plain_primary_clause(first);
+        let last = table.alloc(entry.clone());
+        table.record_plain_primary_clause(last);
+        table.truncate(1);
+        assert_eq!(table.alloc(entry), last);
+        assert!(!table.has_plain_primary_clause(last));
+        assert!(table.has_plain_primary_clause(first));
     }
 
     #[test]

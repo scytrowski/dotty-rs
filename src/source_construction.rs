@@ -40,9 +40,9 @@ impl ResolvedConstructionArguments {
         store: &SemanticStore,
     ) -> Option<(u32, Self)> {
         let constructor = store.symbols.get(construction.constructor);
-        if !constructor
-            .flags
-            .contains(crate::core::SymbolFlags::PLAIN_PRIMARY_CLAUSE)
+        if !store
+            .symbols
+            .has_plain_primary_clause(construction.constructor)
             || constructor.visibility != crate::core::Visibility::Public
         {
             return None;

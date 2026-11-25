@@ -74,9 +74,6 @@ flag_bits! {
     /// The case-class companion's generated `apply` was deliberately omitted
     /// because this source subset cannot represent its constructor shape.
     CASE_CLASS_APPLY_DEFERRED = 19;
-    /// Source primary constructor with no type parameters and a single clause
-    /// consisting entirely of required, plain class parameters (no fields).
-    PLAIN_PRIMARY_CLAUSE = 20;
 }
 
 impl SymbolFlags {

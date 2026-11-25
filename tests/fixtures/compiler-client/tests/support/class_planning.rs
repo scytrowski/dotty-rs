@@ -3347,3 +3347,54 @@ fn named_construction_labels_target_class_parameters_across_files() {
         });
     }
 }
+
+#[test]
+fn reordered_constructor_operands_execute_once_in_written_order_on_jdk21() {
+    let pair = (
+        SourceId::from_index(9),
+        "Pair.scala",
+        "package demo
+class Pair(left: Int, right: Int) {
+  private val l: Int = left
+  private val r: Int = right
+  def code(): Int = l * 10 + r
+}",
+    );
+    let probe = (
+        SourceId::from_index(2),
+        "Probe.scala",
+        "package demo
+class Probe {
+  def left(): Int = 9
+  def right(): Int = 4
+  def make(probe: Probe): Pair = new Pair(right = probe.right(), left = probe.left())
+}",
+    );
+    for files in [[probe, pair], [pair, probe]] {
+        let artifacts = super::with_plan(&files, |plan, defs, sources, bodies, _| {
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            let args = index
+                .construction_arguments_at(probe.0, probe.2.find("right =").unwrap() as u32)
+                .unwrap();
+            let metadata = plan.metadata(defs).unwrap();
+            let class = metadata
+                .iter()
+                .find(|c| c.identity().symbol() == args.construction.class)
+                .unwrap();
+            let ctor = class.constructor().unwrap();
+            assert_eq!(ctor.descriptor().as_str(), "(II)V");
+            for arg in &args.written {
+                assert_eq!(
+                    ctor.parameters()[arg.ordinal].symbol(),
+                    arg.parameter.formal
+                );
+            }
+            super::checked_emission(plan, defs)
+        });
+        assert_eq!(
+            super::run_java_client("named-primary", "NamedPrimaryClient", &artifacts).trim(),
+            "94 RL"
+        );
+    }
+}
