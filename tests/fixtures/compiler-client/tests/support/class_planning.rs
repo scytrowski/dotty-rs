@@ -3447,3 +3447,27 @@ fn mixed_constructor_arguments_expose_source_roles_and_runtime_formals() {
         });
     }
 }
+
+#[test]
+fn reordered_mixed_constructor_executes_once_per_operand_on_jdk21() {
+    let counter = (
+        SourceId::from_index(9),
+        "Counter.scala",
+        include_str!("../../mixed-constructor/Counter.scala"),
+    );
+    let probe = (
+        SourceId::from_index(2),
+        "Probe.scala",
+        include_str!("../../mixed-constructor/Probe.scala"),
+    );
+    for files in [[probe, counter], [counter, probe]] {
+        let artifacts = super::with_plan(&files, |plan, defs, _, _, _| {
+            super::checked_emission(plan, defs)
+        });
+        assert_eq!(
+            super::run_java_client("mixed-named-fields", "MixedConstructorClient", &artifacts)
+                .trim(),
+            "CSICSI 9 2 4 7 4"
+        );
+    }
+}
