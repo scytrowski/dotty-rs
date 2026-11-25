@@ -1208,6 +1208,72 @@ impl SourceTyper<'_> {
         )
     }
 
+    /// Inspects the sole parent application of a source class in its primary
+    /// constructor context, without completing the class header. Supply the class
+    /// symbol and exact parent tree from this driver's naming revision. An
+    /// unrelated tree or class yields `Ok(None)`. The primary signature must be
+    /// available or completable. Access to the uninitialized child receiver is
+    /// rejected while typing operands, just as during normal header completion.
+    ///
+    /// The callback's contexts and typed trees belong to a temporary driver.
+    /// Successful semantic allocations remain in the shared store. Use a
+    /// disposable revision for speculative source inspection.
+    pub fn inspect_parent_arguments<T>(
+        &mut self,
+        class: SymbolId,
+        parent: TreeId<Untyped>,
+        inspect: impl FnOnce(&mut SourceTyper<'_>, ExpressionContext) -> T,
+    ) -> Result<Option<T>, TyperError> {
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
+        else {
+            return Ok(None);
+        };
+        if source != self.source
+            || self.index.symbol_at(source, tree) != Some(class)
+            || !self.store.symbols.contains(class)
+            || self.store.symbols.get(class).kind != SymbolKind::Class
+        {
+            return Ok(None);
+        }
+        let Some(TreeKind::TypeDef(def)) = self.arena.try_get(tree).map(|n| &n.kind) else {
+            return Ok(None);
+        };
+        let Some(TreeKind::Template(template)) = self.arena.try_get(def.rhs).map(|n| &n.kind)
+        else {
+            return Ok(None);
+        };
+        if template.parents.as_slice() != [parent]
+            || !matches!(
+                self.arena.try_get(parent).map(|n| &n.kind),
+                Some(TreeKind::Apply(_))
+            )
+        {
+            return Ok(None);
+        }
+        let Some(ctor) = self.index.symbol_at(source, template.constructor) else {
+            return Ok(None);
+        };
+        if !self.store.symbols.contains(ctor)
+            || self.store.symbols.get(ctor).kind != SymbolKind::Constructor
+            || self.store.symbols.owner(ctor) != Some(class)
+        {
+            return Ok(None);
+        }
+        let mut probe = SourceTyper::new(
+            self.arena,
+            source,
+            self.index,
+            self.store,
+            self.definitions,
+            self.packages,
+        )
+        .with_resolver(Box::new(&mut *self.resolver));
+        probe.complete_symbol(ctor)?;
+        let context = probe.expression_context_for(ctor)?;
+        probe.uninitialized_parent_receiver = Some(class);
+        Ok(Some(inspect(&mut probe, context)))
+    }
+
     fn type_parent_constructor_application(
         &mut self,
         class: SymbolId,

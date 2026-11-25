@@ -18699,6 +18699,45 @@ mod tests {
     }
 
     #[test]
+    fn parent_inspection_authenticates_the_root_and_guards_this_without_committing_it() {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+            "class Base(x: Int, y: Int); class Child(val n: Int) extends Base(n, this.n)",
+        );
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let (root, app) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, n)| match &n.kind {
+                TreeKind::Apply(app) if app.args.len() == 2 => Some((tree, app)),
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        assert_eq!(
+            typer
+                .inspect_parent_arguments(base, root, |_, _| ())
+                .unwrap(),
+            None
+        );
+        let error = typer
+            .inspect_parent_arguments(child, root, |probe, ctx| {
+                probe.type_expression(app.args[0], ctx).unwrap();
+                probe.type_expression(app.args[1], ctx).unwrap_err()
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(error, TyperError::UninitializedParentArgumentReceiver { receiver, .. } if receiver == child)
+        );
+        assert!(typer.typed_index.get(source, root).is_none());
+        assert!(matches!(
+            typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
+    }
+
+    #[test]
     fn named_parent_arguments_reject_reordering_that_needs_temporaries() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Probe { def read(): Int = 4 }; class Base(x: Int, y: Int); class Child(p: Probe) extends Base(y = p.read(), x = 9)",

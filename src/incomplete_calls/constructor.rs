@@ -66,6 +66,16 @@ impl ConstructorCandidate {
         };
         let store = typer.store();
         let (provider, class) = sources.class(candidate.owner)?;
+        if let SourceConstructorUse::DirectParent { child } = usage
+            && (child == class.symbol
+                || store
+                    .symbols
+                    .get(class.symbol)
+                    .flags
+                    .contains(crate::core::SymbolFlags::FINAL))
+        {
+            return None;
+        }
         if class.constructor != candidate.symbol
             || store.symbols.get(candidate.symbol).visibility != crate::core::Visibility::Public
         {

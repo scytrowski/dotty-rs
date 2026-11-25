@@ -226,3 +226,46 @@ fn unfinished_constructor_prefix_uses_written_types_and_formal_ordinals() {
         }
     }
 }
+
+#[test]
+fn unfinished_parent_uses_the_child_formal_and_rejects_its_uninitialized_receiver() {
+    for reversed in [false, true] {
+        for (arg, valid) in [("initial", true), ("this.initial", false), ("false", false)] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let packages = Packages::new();
+            let child_id = SourceId::from_index(8);
+            let child = format!("class Child(val initial: Int) extends Base(count = {arg}, id = ");
+            let mut files = [
+                (
+                    SourceId::from_index(1),
+                    "Base.scala",
+                    "class Base(val id: Int, var count: Int); class Other { def bad = missing(",
+                ),
+                (child_id, "Child.scala", child.as_str()),
+            ];
+            if reversed {
+                files.reverse();
+            }
+            let parsed = files.map(|(id, name, text)| {
+                (
+                    name,
+                    crate::parse_source(id, text, Default::default())
+                        .unwrap()
+                        .bind(&mut store.names),
+                )
+            });
+            let sources = NamedClassSources::new([], &store).unwrap();
+            let index = crate::IncompleteCallIndex::build(&sources, parsed, store, defs, packages);
+            let sig = index.primary_constructor_at(child_id, child.len() as u32);
+            assert_eq!(sig.is_some(), valid, "{child}");
+            if let Some(sig) = sig {
+                assert_eq!(sig.declarations[0].target.source, SourceId::from_index(1));
+                assert_eq!((sig.active_parameter, &*sig.parameters[0].name), (0, "id"));
+                assert!(
+                    matches!(sig.usage, crate::SourceConstructorUse::DirectParent { child } if child != sig.instance.symbol)
+                );
+            }
+        }
+    }
+}

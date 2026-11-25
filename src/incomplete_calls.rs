@@ -187,6 +187,16 @@ impl IncompleteCallIndex {
                 defs,
                 &packages,
             );
+            let parent_owners: HashMap<_, _> = file
+                .classes()
+                .iter()
+                .filter_map(|class| {
+                    let [parent] = class.parents.as_slice() else {
+                        return None;
+                    };
+                    Some((*parent, class.symbol))
+                })
+                .collect();
             let mut constructors = HashMap::new();
             let mut matches = HashMap::new();
             for list in syntax.unfinished_lists().filter(|list| list.regular) {
@@ -195,7 +205,25 @@ impl IncompleteCallIndex {
                 };
                 let allocation = match list.constructor {
                     Some(crate::parser::ConstructorSyntax::Allocation(name)) => Some(name),
-                    _ => None,
+                    Some(crate::parser::ConstructorSyntax::DirectParent(_)) => {
+                        if let Some(&child) = parent_owners.get(&tree)
+                            && let Ok(Some(Some(candidate))) =
+                                typer.inspect_parent_arguments(child, tree, |probe, context| {
+                                    ConstructorCandidate::capture(
+                                        file,
+                                        list,
+                                        &all,
+                                        probe,
+                                        context,
+                                        crate::SourceConstructorUse::DirectParent { child },
+                                    )
+                                })
+                        {
+                            constructors.insert(tree, candidate);
+                        }
+                        continue;
+                    }
+                    None => None,
                 };
                 let Some(callee) = allocation.or(list.callee) else {
                     continue;
@@ -207,7 +235,7 @@ impl IncompleteCallIndex {
                     methods.next();
                 }
                 let Some(&(range, owner)) = methods.peek() else {
-                    break;
+                    continue;
                 };
                 if !range.contains(callee.start()) {
                     continue;
@@ -250,7 +278,9 @@ impl IncompleteCallIndex {
     }
 
     /// Looks up the source primary constructor at a UTF-8 insertion point after
-    /// an unfinished `new C(` inside a method. Requires a public constructor with
+    /// an unfinished `new C(` inside a method or a direct `extends C(` header.
+    /// Parent operands are inspected in the uninitialized child constructor context.
+    /// Requires a public constructor with
     /// a single required parameter list and simple named types in this revision.
     /// Completed operands constrain the prefix up to the cursor. Named labels
     /// select their declared ordinal, including before a value has been entered.

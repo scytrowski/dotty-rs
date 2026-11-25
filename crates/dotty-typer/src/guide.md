@@ -57,6 +57,11 @@ assert!(matches!(typer.typed_ast().get(typed).kind, TreeKind::DefDef(_)));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+For a direct superclass application, [`SourceTyper::inspect_parent_arguments`]
+provides the primary constructor's scope and guards the uninitialized child
+receiver. Pass the exact parent tree and inspect only the already written operands.
+The probe can run before the child header completes.
+
 Unsupported or ambiguous cases return [`TyperError`], rather than choosing a
 plausible declaration or manufacturing a type. A failed public typing
 transaction restores its semantic and typed state; earlier successful calls
