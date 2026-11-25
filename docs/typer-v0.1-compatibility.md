@@ -2625,3 +2625,10 @@ dependency completes. The client queries the phase's recorded
 dependency for the blocked provider and reports the closed cycle path. Both methods in the two-file cycle
 remain incomplete. The JVM client fixture also compares class bytes for both
 input orders and executes the inferred call on JDK 21.
+
+A regular explicit allocation may name and reorder the required parameters of
+a public, monomorphic source primary constructor with one ordinary clause of
+plain parameters. The class must have a single constructor. Argument checking
+uses declaration slots. Strict operands that move are evaluated once in written
+order, before the constructor invocation. The committed typed root retains the
+written-to-formal permutation, including when evaluation requires a block.

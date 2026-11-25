@@ -1221,6 +1221,13 @@ impl SourceTyper<'_> {
         else {
             return Ok(());
         };
+        if application.kind == ApplyKind::Regular && self.has_named_arguments(&application.args) {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: parent_tree.index(),
+                expression_kind: "named primary constructor arguments in a parent clause",
+            });
+        }
         let valid_constructor_selection = application.kind == ApplyKind::Regular
             && self
                 .arena

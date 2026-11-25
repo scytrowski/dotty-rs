@@ -851,7 +851,6 @@ impl SourceTyper<'_> {
         if application_kind == ApplyKind::Regular
             && named.is_some()
             && (!self.strict_ordinary_clause(callable)
-                || is_constructor_application
                 || !matches!(
                     self.typed_arena.get(function).kind,
                     TreeKind::Ident(_) | TreeKind::Select(_)

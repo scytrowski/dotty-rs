@@ -18550,6 +18550,96 @@ mod tests {
     }
 
     #[test]
+    fn plain_primary_constructor_binds_named_arguments_to_declaration_slots() {
+        for (args, expected) in [
+            ("y = false, x = 9", [1, 0]),
+            ("9, y = false", [0, 1]),
+            ("x = 9, y = false", [0, 1]),
+        ] {
+            let text = format!(
+                "class Point(x: Int, y: Boolean); class Use {{ def make: Point = new Point({args}) }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let root = typer.type_expression(rhs, context).unwrap();
+            assert_eq!(
+                &*typer
+                    .typed_index
+                    .named_call(root)
+                    .unwrap()
+                    .written_to_formal,
+                &expected
+            );
+        }
+    }
+
+    #[test]
+    fn named_primary_constructor_leaves_other_constructor_shapes_unsupported() {
+        for declaration in [
+            "class Point(val x: Int)",
+            "class Point(var x: Int)",
+            "class Point(x: Int = 2)",
+            "class Point private (x: Int)",
+            "class Point(x: Int) { def this() = this(0) }",
+        ] {
+            let text = format!("{declaration}; class Use {{ def make: Point = new Point(x = 9) }}");
+            let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(TyperError::UnsupportedExpression {
+                        expression_kind: "named arguments outside a plain source primary constructor",
+                        ..
+                    })
+                ),
+                "{text}"
+            );
+            assert!(typer.typed_index.get(source, rhs).is_none());
+        }
+    }
+
+    #[test]
+    fn named_primary_constructor_parent_arguments_remain_unsupported() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent(x: Int); class Child extends Parent(x = 1)");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.complete_symbol(child),
+            Err(TyperError::UnsupportedExpression {
+                expression_kind: "named primary constructor arguments in a parent clause",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn generic_primary_constructor_infers_arguments_and_finalizes_new_after_inference() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Box[A](value: A); class Use { def make = new Box(1) }");

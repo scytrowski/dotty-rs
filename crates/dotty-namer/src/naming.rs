@@ -2889,6 +2889,8 @@ impl Namer<'_> {
         };
         let constructor = constructor.clone();
         let mut private_local_parameters = Vec::new();
+        let mut plain_primary_clause =
+            constructor.type_params.is_empty() && constructor.value_param_clauses.len() == 1;
         for parameter_tree in &constructor.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -2937,6 +2939,16 @@ impl Namer<'_> {
                         expected: "constructor ValDef with ParamAccessor metadata",
                     });
                 }
+                plain_primary_clause &= parameter.rhs.is_none()
+                    && parameter.metadata.modifiers
+                        == [Modifier::ParamAccessor, Modifier::PrivateLocal]
+                    && self.arena.try_get(parameter.tpt).is_some_and(|ty| {
+                        !matches!(
+                            ty.kind,
+                            TreeKind::ByNameTypeTree(_)
+                                | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                        )
+                    });
                 let private_local = parameter
                     .metadata
                     .modifiers
@@ -2991,12 +3003,15 @@ impl Namer<'_> {
                 }
             }
         }
-        let constructor_spec = self.source_symbol_spec(
+        let mut constructor_spec = self.source_symbol_spec(
             template.constructor,
             &constructor.metadata,
             symbol,
             SymbolKind::Constructor,
         )?;
+        if plain_primary_clause {
+            constructor_spec.flags = constructor_spec.flags | SymbolFlags::PLAIN_PRIMARY_CLAUSE;
+        }
         let constructor_symbol = self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
