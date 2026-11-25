@@ -249,43 +249,25 @@ impl ResolvedMemberIndex {
             ));
         }
         for (file, navigation, class_declarations, field_declarations, parameters) in valid_files {
-            let parents: Vec<_> = file
-                .classes()
-                .iter()
-                .filter_map(|class| {
-                    let [tree] = class.parents.as_slice() else {
-                        return None;
-                    };
-                    let name = file.named().syntax().member_names.parent_name(*tree)?;
-                    let parent =
-                        crate::source_declarations::direct_source_parent(store, class.symbol)?;
-                    Some(ResolvedSourceParent {
-                        child: class.symbol,
-                        parent,
-                        origin: SourceSpan::new(file.source(), Span::without_point(name)),
-                        target: *targets.get(&parent)?,
-                    })
-                })
-                .collect();
             let mut argument_labels = Vec::new();
             let mut construction_arguments = HashMap::new();
-            let constructions: Vec<_> = file
-                .named()
-                .syntax()
-                .member_names
-                .constructions()
-                .iter()
-                .filter_map(|&(root, name)| {
-                    let owner = navigation.class_at(name.start())?;
-                    let bindings = bodies.bindings(owner)?;
+            let mut capture_constructor =
+                |root,
+                 name,
+                 bindings: &crate::core::SourceTypedIndex,
+                 usage,
+                 expected: Option<SymbolId>| {
                     let (class, constructor) = crate::source_construction::selected_constructor(
                         file, root, bindings, typed_ast, store,
                     )?;
                     let (_, declaration) = sources.class(class)?;
-                    if declaration.constructor != constructor {
+                    if declaration.constructor != constructor
+                        || expected.is_some_and(|parent| class != parent)
+                    {
                         return None;
                     }
                     let construction = crate::ResolvedSourceConstruction {
+                        usage,
                         class,
                         constructor,
                         origin: SourceSpan::new(file.source(), Span::without_point(name)),
@@ -310,8 +292,54 @@ impl ResolvedMemberIndex {
                         construction_arguments.insert(start, arguments);
                     }
                     Some(construction)
+                };
+            let parents = file
+                .classes()
+                .iter()
+                .filter_map(|class| {
+                    let [root] = class.parents.as_slice() else {
+                        return None;
+                    };
+                    let name = file.named().syntax().member_names.parent_name(*root)?;
+                    let parent =
+                        crate::source_declarations::direct_source_parent(store, class.symbol)?;
+                    let site = ResolvedSourceParent {
+                        child: class.symbol,
+                        parent,
+                        origin: SourceSpan::new(file.source(), Span::without_point(name)),
+                        target: *targets.get(&parent)?,
+                    };
+                    if let Some(headers) = headers {
+                        capture_constructor(
+                            *root,
+                            name,
+                            &headers.index,
+                            crate::SourceConstructorUse::DirectParent {
+                                child: class.symbol,
+                            },
+                            Some(parent),
+                        );
+                    }
+                    Some(site)
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let constructions = file
+                .named()
+                .syntax()
+                .member_names
+                .constructions()
+                .iter()
+                .filter_map(|&(root, name)| {
+                    let owner = navigation.class_at(name.start())?;
+                    capture_constructor(
+                        root,
+                        name,
+                        bodies.bindings(owner)?,
+                        crate::SourceConstructorUse::Allocation,
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>();
             let constructor_types =
                 crate::source_signature_types::constructor_types(file, &targets, store);
             let method_types = crate::source_signature_types::method_types(file, &targets, store);
@@ -550,6 +578,19 @@ impl ResolvedMemberIndex {
         source: SourceId,
         offset: u32,
     ) -> Option<&crate::ResolvedConstructionArguments> {
+        self.primary_constructor_arguments_at(source, offset)
+            .filter(|args| args.construction.usage == crate::SourceConstructorUse::Allocation)
+    }
+
+    /// Returns the checked primary constructor arguments at a UTF-8 insertion position
+    /// for an explicit allocation or a direct superclass application. Parent applications
+    /// require [`Self::build_with_headers`] and the committed bindings from this revision.
+    /// The innermost list wins. Arguments are returned in written order.
+    pub fn primary_constructor_arguments_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedConstructionArguments> {
         let file = self.files.get(&source)?;
         let list = file.call_arguments.at(offset)?;
         file.construction_arguments.get(&list.range.start())
@@ -560,6 +601,18 @@ impl ResolvedMemberIndex {
     /// [`Self::construction_arguments_at`], with retained named parameter types.
     /// A cursor after a trailing comma or within an inner method call yields `None`.
     pub fn construction_signature_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<crate::ResolvedConstructionSignature<'_>> {
+        self.primary_constructor_signature_at(source, offset)
+            .filter(|sig| sig.construction.usage == crate::SourceConstructorUse::Allocation)
+    }
+
+    /// Returns the selected primary signature for [`Self::primary_constructor_arguments_at`].
+    /// Parameters follow declaration order. The active parameter is the formal ordinal
+    /// of the operand at the cursor, including for reordered parent arguments.
+    pub fn primary_constructor_signature_at(
         &self,
         source: SourceId,
         offset: u32,
