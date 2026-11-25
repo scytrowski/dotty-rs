@@ -184,14 +184,28 @@ impl Workspace {
                 return Some(signature_help(call));
             }
             let pending = analysis.unfinished.at(source, pos)?;
+            let first = pending.candidates.first()?.active_parameter;
+            let shared = pending
+                .candidates
+                .iter()
+                .all(|c| c.active_parameter == first);
             let signatures: Vec<_> = pending
                 .candidates
                 .iter()
-                .map(|c| signature_information(&c.name, &c.parameters, &c.result.name))
+                .map(|c| {
+                    let mut signature =
+                        signature_information(&c.name, &c.parameters, &c.result.name);
+                    if !shared {
+                        signature["activeParameter"] = json!(c.active_parameter);
+                    }
+                    signature
+                })
                 .collect();
-            return Some(
-                json!({"signatures":signatures,"activeParameter":pending.active_parameter}),
-            );
+            let mut help = json!({"signatures":signatures});
+            if shared {
+                help["activeParameter"] = json!(first);
+            }
+            return Some(help);
         }
         if method == "textDocument/hover" {
             let (site, info) = analysis.members.symbol_info_at(source, pos)?;

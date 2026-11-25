@@ -39,13 +39,15 @@ a rejected call returns JSON `null` until repaired.
 
 For `textDocument/signatureHelp`, the client passes the insertion position to
 `ResolvedMemberIndex::call_signature_at`. It renders the selected method and
-its formal parameters, highlighting the next formal immediately after a comma.
+its formal parameters, highlighting the formal bound to the written argument at the cursor.
 The stdio regression checks nested calls, a change of overload after an edit,
 and a rejected sibling call in both negotiated encodings. The request covers
-completed positional applications with a committed source target. For an
+completed ordinary positional and named applications with a committed source target. For an
 unfinished call the fixture keeps the parser diagnostics, then builds an
 `IncompleteCallIndex` at the end of the revision. It returns the compatible
-signatures in lookup order and the cursor slot. Hover continues to require a
+signatures in lookup order. When a written name selects different formal
+ordinals, each signature carries its own `activeParameter`. Agreement uses
+the shared top-level field. Hover continues to require a
 committed target. The four-parameter stdio test keeps two overloads through
 the first two arguments and narrows them when the third argument is typed.
 A second stdio test keeps the call unchanged, edits the local third argument’s
