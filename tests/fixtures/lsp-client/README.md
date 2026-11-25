@@ -188,3 +188,10 @@ With `publishDiagnostics.relatedInformation`, it includes each candidate's opera
 or label and its available provider declaration. The stdio fixture changes
 `pick(right = true)` to `pick(flag = true)`, checks the repaired definition link,
 then undoes the edit and verifies the restored evidence in UTF-8 and UTF-16.
+
+For a checked direct superclass call, signature help displays the parent clause
+in declaration order. In `extends Base(count = initial, id = id)` the first
+label selects formal 1 and the second selects formal 0. The two `id` tokens
+navigate to the parent field and child parameter respectively. Renaming
+`Base.count` invalidates the old label in the unchanged child document.
+Updating the child restores its signature, references and definition link.
