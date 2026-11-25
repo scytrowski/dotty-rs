@@ -49,7 +49,7 @@ impl ClassBodyError {
             Self::Member { class, .. } => *class,
         };
         let issue = match self.capture(|id| sources.file(id).map(|file| file.ast())) {
-            Ok(error) => crate::SemanticIssue::Typing(Box::new(error)),
+            Ok(error) => crate::SemanticIssue::Typing(Box::new(error.with_named_sources(sources))),
             Err(id) => crate::SemanticIssue::InvalidClass(id),
         };
         crate::SemanticDiagnostic {

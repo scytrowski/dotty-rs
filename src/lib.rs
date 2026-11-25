@@ -87,6 +87,7 @@ pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_sou
 mod semantic_diagnostic;
 pub use semantic_diagnostic::{SemanticDiagnostic, SemanticIssue, SemanticPhase};
 
+mod rejected_call;
 mod reported_typer_error;
 pub use reported_typer_error::ReportedTyperError;
 

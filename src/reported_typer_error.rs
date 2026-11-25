@@ -75,6 +75,21 @@ impl ReportedTyperError {
         }
     }
 
+    pub(crate) fn with_named_sources(mut self, sources: &crate::NamedClassSources<'_>) -> Self {
+        if let Failure::Other {
+            error:
+                TyperError::UnknownNamedArgument { .. } | TyperError::DuplicateNamedArgument { .. },
+            location: Some(site),
+            ..
+        } = &mut self.failure
+            && let Some(file) = sources.file(site.source())
+            && let Some(label) = crate::rejected_call::written_label(file, *site)
+        {
+            *site = SourceSpan::new(site.source(), crate::core::Span::without_point(label.label));
+        }
+        self
+    }
+
     /// Canonical enclosing class if supplied by the phase or caller.
     pub fn class(&self) -> Option<SymbolId> {
         self.class
