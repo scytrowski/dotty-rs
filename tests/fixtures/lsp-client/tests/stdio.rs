@@ -2062,3 +2062,80 @@ fn removing_a_provider_default_invalidates_the_unchanged_named_call_until_undo()
         client.shutdown();
     }
 }
+
+#[test]
+fn editing_the_operand_retargets_only_the_named_argument_label() {
+    let provider = [
+        "class A {",
+        "  def pick(/* 😀 */ right: Int): Int = right",
+        "  def pick(n: Int = 9, /* 😀 */ right: Boolean): Int = if (right) n else 0",
+        "}",
+    ];
+    let caller = [
+        "class B {",
+        "  def run(a: A): Int = { /* 😀 */ val right = 4;",
+        "    /* 😀 */ a.pick(right = right) }",
+        "}",
+    ];
+    for encoding in ["utf-8", "utf-16"] {
+        let mut client = Client::start(encoding, vec![A]);
+        client.open(A, &provider.join("\n"));
+        client.open(B, &caller.join("\n"));
+        let col = |line: &str, token: &str| token_column(encoding, line, token);
+        let local = col(caller[1], "right =");
+        let init = col(caller[1], "4;");
+        let label = col(caller[2], "right =");
+        let rhs = col(caller[2], "right)");
+        for (version, ty, literal, prev_len) in [
+            (1, "Int", "4", 0),
+            (2, "Boolean", "true", 1),
+            (3, "Int", "4", 4),
+        ] {
+            if version != 1 {
+                client.edit(B, version, range(1, init, init + prev_len), literal);
+            }
+            client.diagnostics(B, version, json!([]));
+            for (line, formal_type, read) in [(1, "Int", "= right"), (2, "Boolean", "(right)")] {
+                let decl = col(provider[line], "right:");
+                let body = col(provider[line], read) + read.find("right").unwrap();
+                let mut sites = vec![json!({"uri":A,"range":range(line,body,body+5)})];
+                if formal_type == ty {
+                    sites.push(json!({"uri":B,"range":range(2,label,label+5)}));
+                    assert_eq!(client.references(B, 2, label, false), json!(sites));
+                    let definition = client.request(
+                        "textDocument/definition",
+                        json!({"textDocument":{"uri":B},"position":{"line":2,"character":label+1}}),
+                    );
+                    assert_eq!(
+                        definition,
+                        json!([{"originSelectionRange":range(2,label,label+5),
+                        "targetUri":A,"targetRange":range(line,decl,decl+7+ty.len()),
+                        "targetSelectionRange":range(line,decl,decl+5)}])
+                    );
+                }
+                assert_eq!(client.references(A, line, decl, false), json!(sites));
+            }
+            let definition = client.request(
+                "textDocument/definition",
+                json!({"textDocument":{"uri":B},"position":{"line":2,"character":rhs+1}}),
+            );
+            assert_eq!(
+                definition,
+                json!([{"originSelectionRange":range(2,rhs,rhs+5),
+                "targetUri":B,"targetRange":range(1,local-4,init+literal.len()),
+                "targetSelectionRange":range(1,local,local+5)}])
+            );
+            let local_uses = json!([{"uri":B,"range":range(2,rhs,rhs+5)}]);
+            assert_eq!(client.references(B, 1, local, false), local_uses);
+            assert_eq!(client.references(B, 2, rhs, false), local_uses);
+            for start in [label, rhs] {
+                assert_eq!(
+                    client.hover(B, 2, start),
+                    json!({"range":range(2,start,start+5),
+                    "contents":{"kind":"plaintext","value":format!("right: {ty}")}})
+                );
+            }
+        }
+        client.shutdown();
+    }
+}
