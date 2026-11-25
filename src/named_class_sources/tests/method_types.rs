@@ -436,6 +436,10 @@ fn incomplete_calls_respect_failed_arguments_receiver_scope_and_written_arity() 
         ("ops.pick(1, true, ", false),
         ("other.pick(1, ", false),
         ("{ val ops = other; ops.pick(1, ", false),
+        ("{ val broken = unknown; ops.pick(1, ", false),
+        ("{ def local: Int = 1; ops.pick(1, ", false),
+        ("{ lazy val local = 1; ops.pick(1, ", false),
+        ("{ import other.*; ops.pick(1, ", false),
         ("ops.pick(ops.pick(1, ", true),
     ] {
         let mut store = SemanticStore::new();
@@ -460,6 +464,48 @@ fn incomplete_calls_respect_failed_arguments_receiver_scope_and_written_arity() 
             index.at(id, text.len() as u32).is_some(),
             has_candidate,
             "{body}"
+        );
+    }
+}
+
+#[test]
+fn unfinished_calls_use_the_local_receiver_and_typed_third_argument() {
+    for (local, ordinal) in [("val third: Int = 2", 0), ("var third = false", 1)] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(
+            1,
+            "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }; class Other { def pick(a: Int, b: Boolean, n: Int, wrong: Int): Int = n }",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&ops], &store).unwrap();
+        prepare_bodies(&sources, &mut store, defs, &packages);
+        let expected = ops.classes()[0].methods().nth(ordinal).unwrap().symbol;
+        let id = SourceId::from_index(4);
+        let text = format!(
+            "class Use {{ def run(ops: Other, actual: Ops): Int = {{ val ops = actual; {local}; ops.pick(1, true, third, "
+        );
+        let parsed = crate::parse_source(id, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &sources,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        let help = index.at(id, text.len() as u32).unwrap();
+        assert_eq!(help.active_parameter, 3);
+        let [candidate] = &help.candidates[..] else {
+            panic!("{help:?}")
+        };
+        assert_eq!(candidate.method, expected);
+        assert_eq!(
+            candidate.parameters[3].ty.ty,
+            [defs.boolean, defs.int][ordinal]
         );
     }
 }

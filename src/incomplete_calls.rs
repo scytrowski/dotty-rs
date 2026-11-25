@@ -66,7 +66,9 @@ impl IncompleteCallIndex {
     /// Clean provider signatures must already be complete. Public source methods
     /// with one plain positional list and named parameter and result types are
     /// supported. The receiver and prefix are typed in the enclosing method
-    /// context; positions requiring additional block-local scopes are omitted.
+    /// context, including preceding ordinary eager local `val` and `var`
+    /// statements in enclosing blocks. Unsupported scopes or ill-typed
+    /// preceding statements suppress candidates for that call.
     /// Filtering uses value-type conformance and requires a formal at the active
     /// slot. The probe uses source declarations and types available in this
     /// session and performs no external classpath loading.
@@ -127,26 +129,45 @@ impl IncompleteCallIndex {
         };
         for file in &files {
             let syntax = &file.named().syntax().call_arguments;
-            let owners = method_expression_owners(file, syntax);
+            // Both iterators are in source order. Use the callee token to
+            // locate a method even when the closing parenthesis is missing.
+            // The typer checks ancestry using the actual application tree.
+            let mut methods = file
+                .classes()
+                .iter()
+                .flat_map(|c| c.methods())
+                .filter_map(|m| Some((file.ast().get(m.tree).position?.span().range(), m.symbol)))
+                .peekable();
+            let mut typer = SourceTyper::new(
+                file.ast(),
+                file.source(),
+                file.index(),
+                &mut store,
+                defs,
+                &packages,
+            );
             let mut matches = HashMap::new();
             for list in syntax.unfinished_lists().filter(|list| list.positional) {
                 let Some(tree) = list.unfinished else {
                     continue;
                 };
-                let Some(owner) = owners.get(&tree) else {
-                    continue;
+                let Some(callee) = list.callee else { continue };
+                while methods
+                    .peek()
+                    .is_some_and(|(range, _)| range.end() <= callee.start())
+                {
+                    methods.next();
+                }
+                let Some(&(range, owner)) = methods.peek() else {
+                    break;
                 };
-                let mut typer = SourceTyper::new(
-                    file.ast(),
-                    file.source(),
-                    file.index(),
-                    &mut store,
-                    defs,
-                    &packages,
-                );
-                if let Ok(context) = typer.expression_context_for(*owner)
-                    && let Some(found) =
-                        prefix_candidates(file, tree, list, &all, &mut typer, context)
+                if !range.contains(callee.start()) {
+                    continue;
+                }
+                if let Ok(Some(Some(found))) =
+                    typer.inspect_method_expression(owner, tree, |probe, context| {
+                        prefix_candidates(file, tree, list, &all, probe, context)
+                    })
                 {
                     matches.insert(tree, found);
                 }
@@ -186,45 +207,6 @@ impl IncompleteCallIndex {
             candidates,
         })
     }
-}
-
-// Descend only along expression paths that preserve the method's original scope.
-// In particular, never resolve a shadowed receiver against a method parameter.
-fn method_expression_owners(
-    file: &NamedClassSource,
-    syntax: &SourceCallArguments,
-) -> HashMap<TreeId<Untyped>, SymbolId> {
-    let mut wanted: HashMap<_, _> = syntax
-        .unfinished_lists()
-        .filter_map(|l| Some((l.unfinished?, None)))
-        .collect();
-    for method in file.classes().iter().flat_map(|c| c.methods()) {
-        let TreeKind::DefDef(def) = &file.ast().get(method.tree).kind else {
-            continue;
-        };
-        let mut work: Vec<_> = def.rhs.into_iter().collect();
-        while let Some(tree) = work.pop() {
-            if let Some(owner) = wanted.get_mut(&tree) {
-                *owner = Some(method.symbol);
-            }
-            match &file.ast().get(tree).kind {
-                TreeKind::Apply(app) => {
-                    work.push(app.function);
-                    work.extend(&app.args);
-                }
-                TreeKind::Select(select) => work.push(select.qualifier),
-                TreeKind::Block(block) if block.stats.is_empty() => work.push(block.expr),
-                TreeKind::PhaseSpecific(crate::core::ast::UntypedNode::Parens(p)) => {
-                    work.push(p.inner)
-                }
-                _ => {}
-            }
-        }
-    }
-    wanted
-        .into_iter()
-        .filter_map(|(tree, owner)| Some((tree, owner?)))
-        .collect()
 }
 
 fn value_type(

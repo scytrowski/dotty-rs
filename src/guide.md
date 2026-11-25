@@ -1213,7 +1213,7 @@ let mut store = SemanticStore::new();
 let defs = Definitions::bootstrap(&mut store);
 let providers = NamedClassSources::new([], &store)?;
 let id = SourceId::from_index(0);
-let text = "class Ops { def pick(i: Int, b: Boolean): Int = i }; class Use { def run(o: Ops): Int = o.pick(1, ";
+let text = "class Ops { def pick(i: Int, b: Boolean): Int = i }; class Use { def run(o: Ops): Int = { val receiver = o; var first = 1; receiver.pick(first, ";
 let parsed = parse_source(id, text, Default::default())?.bind(&mut store.names);
 assert!(!parsed.diagnostics.is_empty());
 let pending = IncompleteCallIndex::build(&providers, [("Use.scala", parsed)], store, defs, Packages::new());
