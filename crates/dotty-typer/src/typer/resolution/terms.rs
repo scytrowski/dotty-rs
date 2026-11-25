@@ -436,17 +436,26 @@ impl SourceTyper<'_> {
                         }
                         let candidate = methods[0];
                         let symbol = self.store.symbols.get(candidate.symbol);
+                        // Another source unit owns its trees and completion. Its
+                        // prepared declaration scope identifies this method here.
+                        let other_source = matches!(symbol.origin, SymbolOrigin::Source(file)
+                            if file != self.source && symbol.origin == self.store.symbols.get(parent).origin);
                         if candidate.inheritance_depth != 1
                             || candidate.declaring_class != parent
                             || symbol.owner != Some(parent)
                             || symbol.flags.contains(SymbolFlags::STATIC)
                             || symbol.flags.contains(SymbolFlags::ABSTRACT)
-                            || !self.is_current_source_symbol(candidate.symbol)
+                            || !(other_source || self.is_current_source_symbol(candidate.symbol))
                         {
                             return Err(TyperError::OverloadedSelectionDeferred {
                                 source: self.source,
                                 tree_index,
                                 name,
+                            });
+                        }
+                        if other_source && matches!(symbol.info, SymbolInfo::Missing) {
+                            return Err(TyperError::MemberTypeUnavailable {
+                                symbol: candidate.symbol,
                             });
                         }
                         let info =
@@ -743,9 +752,14 @@ impl SourceTyper<'_> {
         else {
             return Ok(None);
         };
-        Ok((self.is_current_source_symbol(*parent)
-            && self.store.symbols.contains(*parent)
-            && self.store.symbols.get(*parent).kind == SymbolKind::Class)
+        if !self.store.symbols.contains(*parent) {
+            return Ok(None);
+        }
+        let declaration = self.store.symbols.get(*parent);
+        let prepared_parent = matches!(declaration.origin, SymbolOrigin::Source(file) if file != self.source)
+            && matches!(declaration.info, SymbolInfo::Complete(_));
+        Ok((declaration.kind == SymbolKind::Class
+            && (self.is_current_source_symbol(*parent) || prepared_parent))
             .then_some(*parent))
     }
 

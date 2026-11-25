@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::TreeKind;
 use crate::{CheckedClassBodies, MethodTypeRole, ResolvedMemberIndex};
 
 #[test]
@@ -666,5 +667,136 @@ fn unfinished_calls_offer_plain_private_overloads_only_inside_the_owner() {
             (!expected.is_empty()).then_some(expected.as_slice()),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn inherited_bare_call_uses_the_direct_source_parent_in_either_file_order() {
+    let child = "class Child extends Base { def run: Int = pick(1, ";
+    for (extra_method, local, offered) in [
+        ("", "", true),
+        ("", "{ val pick = 0; ", false),
+        ("def pick(b: Boolean, tail: Int): Int = tail;", "", false),
+    ] {
+        // Each parse contains an unfinished call, so both files go through
+        // recovered naming, header scheduling and signature preparation.
+        let base = format!(
+            "class Base {{ def pick(n: Int, tail: Boolean): Int = n; {extra_method} def edit: Int = pick("
+        );
+        let child = child.replace("= pick", &format!("= {local}pick"));
+        for reverse in [false, true] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let providers = NamedClassSources::new([], &store).unwrap();
+            let (a, b) = (SourceId::from_index(19), SourceId::from_index(3));
+            let mut files = [
+                (a, "Base.scala", base.as_str()),
+                (b, "Child.scala", child.as_str()),
+            ];
+            if reverse {
+                files.reverse();
+            }
+            let parses = files.map(|(id, name, text)| {
+                (
+                    name,
+                    crate::parse_source(id, text, Default::default())
+                        .unwrap()
+                        .bind(&mut store.names),
+                )
+            });
+            let index =
+                crate::IncompleteCallIndex::build(&providers, parses, store, defs, Packages::new());
+            let help = index.at(b, child.len() as u32);
+            if offered {
+                let help = help.expect("direct inherited method");
+                let [candidate] = help.candidates.as_slice() else {
+                    panic!("{help:?}")
+                };
+                assert_eq!(candidate.target.source, a);
+                assert_eq!(
+                    candidate.target.name.start(),
+                    base.find("pick").unwrap() as u32
+                );
+                assert_eq!(
+                    candidate.parameters[help.active_parameter].ty.name.as_ref(),
+                    "Boolean"
+                );
+            } else {
+                assert!(help.is_none(), "{base} / {child}");
+            }
+        }
+    }
+}
+
+#[test]
+fn inherited_identifier_reports_the_missing_provider_and_defers_multiple_methods() {
+    for overloaded in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let extra = if overloaded {
+            "; def pick(b: Boolean): Boolean = b"
+        } else {
+            ""
+        };
+        let base = named(
+            1,
+            &format!("class Base {{ def pick(n: Int): Int = n{extra} }}"),
+            &mut store,
+            &mut packages,
+        );
+        let child = named(
+            2,
+            "class Child extends Base { def run: Int = pick(1) }",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&child, &base], &store).unwrap();
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        let mut headers = crate::ClassHeaderPhase::prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        );
+        headers.complete_all();
+        assert_eq!(headers.finish().ready.len(), 2);
+        let chosen = base.classes()[0].methods().next().unwrap().symbol;
+        let run = child.classes()[0].methods().next().unwrap();
+        let TreeKind::DefDef(d) = &child.ast().get(run.tree).kind else {
+            unreachable!()
+        };
+        let TreeKind::Apply(app) = &child.ast().get(d.rhs.unwrap()).kind else {
+            unreachable!()
+        };
+        let query = |store: &mut SemanticStore| {
+            let mut typer = crate::typer::SourceTyper::new(
+                child.ast(),
+                child.source(),
+                child.index(),
+                store,
+                defs,
+                &packages,
+            );
+            let ctx = typer.expression_context_for(run.symbol).unwrap();
+            typer.lookup_identifier_candidates(app.function, ctx)
+        };
+        if overloaded {
+            assert!(
+                matches!(query(&mut store), Err(crate::typer::TyperError::OverloadedSelectionDeferred { tree_index, .. }) if tree_index == app.function.index())
+            );
+        } else {
+            assert!(
+                matches!(query(&mut store), Err(crate::typer::TyperError::MemberTypeUnavailable { symbol }) if symbol == chosen)
+            );
+            assert!(matches!(
+                sources.try_complete_member_signature(chosen, &mut store, defs, &packages),
+                Ok(crate::typer::SignatureCompletion::Complete(_))
+            ));
+            assert_eq!(query(&mut store).unwrap(), [chosen]);
+        }
     }
 }
