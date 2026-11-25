@@ -69,3 +69,55 @@ fn written_arguments_preserve_ranges_order_and_formal_identity() {
         assert!(idx.call_arguments_at(CALLER, offset + 4).is_none());
     }
 }
+
+#[test]
+fn omissions_and_labels_belong_to_the_selected_overload() {
+    let a = "class Ops { def diff(left: Int = 9, right: Int = 4): Int = left - right; def pick(right: Boolean, n: Int): Int = 1; def pick(n: Int, right: Int): Int = 2; def both(i: Int, b: Boolean): Int = 1; def both(b: Boolean, i: Int): Int = 2 }";
+    let b = "class Use { def all(o: Ops): Int = o.diff(); def partial(o: Ops): Int = o.diff(right = 4); def bool(o: Ops): Int = o.pick(right = true, n = 1); def int(o: Ops): Int = o.pick(right = 4, n = 1); def bad(o: Ops): Int = o.diff(nope = 2); def ambiguous(o: Ops): Int = o.both(i = 1, b = true) }";
+    for reverse in [false, true] {
+        let idx = index(a, b, reverse, 2);
+        let query = |token| idx.call_arguments_at(CALLER, pos(b, token));
+        let all = query("diff()").unwrap();
+        let partial = query("diff(right").unwrap();
+        assert!(all.written.is_empty());
+        assert_eq!(partial.written[0].ordinal, 1);
+        let (site, info) = idx.symbol_info_at(PROVIDER, pos(a, "diff")).unwrap();
+        let crate::SourceSymbolSignature::Method {
+            parameters: Some(params),
+            ..
+        } = &info.signature
+        else {
+            panic!()
+        };
+        assert_eq!(site.symbol, all.call.method);
+        assert_eq!(all.defaulted.len(), 2);
+        for (i, d) in all.defaulted.iter().enumerate() {
+            assert_eq!(d.ordinal, i);
+            assert_eq!(
+                d.parameter,
+                idx.parameter_at(PROVIDER, pos(a, ["left: Int", "right: Int"][i]))
+                    .unwrap()
+            );
+            assert_eq!(Some(d.getter), params[i].default_getter);
+        }
+        assert_eq!(&*partial.defaulted, &all.defaulted[..1]);
+        for (token, target, ordinal) in [
+            ("pick(right = true", "right: Boolean", 0),
+            ("pick(right = 4", "right: Int):", 1),
+        ] {
+            let call = query(token).unwrap();
+            let p = idx.parameter_at(PROVIDER, pos(a, target)).unwrap();
+            assert_eq!(
+                (
+                    call.call.method,
+                    call.written[0].parameter,
+                    call.written[0].ordinal
+                ),
+                (p.method, p, ordinal)
+            );
+            assert!(call.defaulted.is_empty());
+        }
+        assert!(query("diff(nope").is_none());
+        assert!(query("both(i").is_none());
+    }
+}

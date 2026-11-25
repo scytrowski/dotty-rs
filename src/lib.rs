@@ -144,7 +144,9 @@ pub use incomplete_calls::{
 };
 
 mod source_call_bindings;
-pub use source_call_bindings::{ResolvedCallArguments, ResolvedWrittenArgument};
+pub use source_call_bindings::{
+    ResolvedCallArguments, ResolvedDefaultArgument, ResolvedWrittenArgument,
+};
 
 mod resolved_call_index;
 pub use resolved_call_index::{
