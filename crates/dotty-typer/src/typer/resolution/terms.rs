@@ -3,6 +3,46 @@
 use super::super::*;
 
 impl SourceTyper<'_> {
+    /// Resolves a source term identifier to the declarations visible at its use
+    /// site, before argument applicability or overload selection. A nearer
+    /// value or parameter shadows methods from an enclosing scope. Candidates
+    /// are returned in the same lookup order as for an unqualified application.
+    ///
+    /// Supply the identifier tree from this driver's source and the lexical
+    /// context at that tree. Errors report unsupported trees, missing names,
+    /// invalid contexts, or deferred resolution. Lookup may complete symbols
+    /// in this session; failed lookup rolls back its semantic changes.
+    pub fn lookup_identifier_candidates(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let node = self
+            .arena
+            .try_get(tree)
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        let TreeKind::Ident(ident) = &node.kind else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: tree_kind_name(&node.kind),
+            });
+        };
+        let (name, position) = (ident.name, node.position);
+        self.run_atomic(|typer, journal| {
+            typer.expression_term_candidates_with_inherited(
+                name,
+                context,
+                tree.index(),
+                position,
+                journal,
+            )
+        })
+    }
+
     pub(in crate::typer) fn resolve_expression_term(
         &mut self,
         name: dotty_core::Name,
@@ -396,17 +436,26 @@ impl SourceTyper<'_> {
                         }
                         let candidate = methods[0];
                         let symbol = self.store.symbols.get(candidate.symbol);
+                        // Another source unit owns its trees and completion. Its
+                        // prepared declaration scope identifies this method here.
+                        let other_source = matches!(symbol.origin, SymbolOrigin::Source(file)
+                            if file != self.source && symbol.origin == self.store.symbols.get(parent).origin);
                         if candidate.inheritance_depth != 1
                             || candidate.declaring_class != parent
                             || symbol.owner != Some(parent)
                             || symbol.flags.contains(SymbolFlags::STATIC)
                             || symbol.flags.contains(SymbolFlags::ABSTRACT)
-                            || !self.is_current_source_symbol(candidate.symbol)
+                            || !(other_source || self.is_current_source_symbol(candidate.symbol))
                         {
                             return Err(TyperError::OverloadedSelectionDeferred {
                                 source: self.source,
                                 tree_index,
                                 name,
+                            });
+                        }
+                        if other_source && matches!(symbol.info, SymbolInfo::Missing) {
+                            return Err(TyperError::MemberTypeUnavailable {
+                                symbol: candidate.symbol,
                             });
                         }
                         let info =
@@ -703,9 +752,14 @@ impl SourceTyper<'_> {
         else {
             return Ok(None);
         };
-        Ok((self.is_current_source_symbol(*parent)
-            && self.store.symbols.contains(*parent)
-            && self.store.symbols.get(*parent).kind == SymbolKind::Class)
+        if !self.store.symbols.contains(*parent) {
+            return Ok(None);
+        }
+        let declaration = self.store.symbols.get(*parent);
+        let prepared_parent = matches!(declaration.origin, SymbolOrigin::Source(file) if file != self.source)
+            && matches!(declaration.info, SymbolInfo::Complete(_));
+        Ok((declaration.kind == SymbolKind::Class
+            && (self.is_current_source_symbol(*parent) || prepared_parent))
             .then_some(*parent))
     }
 

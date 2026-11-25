@@ -2,8 +2,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
-    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SymbolId, TreeId,
-    TreeKind, TypeId, Untyped, Visibility,
+    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SymbolId, SymbolKind,
+    TreeId, TreeKind, TypeId, Untyped,
 };
 use crate::parser::{CallArgumentList, SourceCallArguments};
 use crate::typer::{ExpressionContext, SourceTyper};
@@ -63,9 +63,10 @@ impl IncompleteCallIndex {
     /// Recovered naming and signature preparation use the consumed store and
     /// packages. Only owned candidate data escapes. Unavailable declarations,
     /// rejected contexts and unsupported calls contribute no candidates.
-    /// Clean provider signatures must already be complete. Public source methods
+    /// Clean provider signatures must already be complete. Accessible source methods
     /// with one plain positional list and named parameter and result types are
-    /// supported. The receiver and written arguments are typed in their lexical
+    /// supported for unqualified calls and explicit receivers. The written
+    /// arguments and any receiver are typed in their lexical
     /// context, including inside the initializer of an ordinary local `val` or
     /// `var`. Earlier statements in each enclosing block are typed in order.
     /// Unsupported scopes or ill-typed preceding statements suppress candidates.
@@ -232,11 +233,31 @@ fn prefix_candidates(
     let TreeKind::Apply(app) = &file.ast().get(tree).kind else {
         return None;
     };
-    let TreeKind::Select(select) = &file.ast().get(app.function).kind else {
-        return None;
+    let methods = match &file.ast().get(app.function).kind {
+        TreeKind::Ident(_) => {
+            let bucket = typer
+                .lookup_identifier_candidates(app.function, context)
+                .ok()?;
+            // A value in the winning scope can shadow every class overload.
+            if bucket
+                .iter()
+                .any(|&id| typer.store().symbols.get(id).kind != SymbolKind::Method)
+            {
+                return None;
+            }
+            bucket
+        }
+        TreeKind::Select(select) => {
+            let receiver = value_type(typer, select.qualifier, context)?;
+            typer
+                .lookup_members(receiver, select.name)
+                .ok()?
+                .into_iter()
+                .map(|member| member.symbol)
+                .collect()
+        }
+        _ => return None,
     };
-    let receiver = value_type(typer, select.qualifier, context)?;
-    let methods = typer.lookup_members(receiver, select.name).ok()?;
     let prefix: Vec<_> = app
         .args
         .iter()
@@ -244,9 +265,11 @@ fn prefix_candidates(
         .map_while(|&arg| value_type(typer, arg, context))
         .collect();
     let mut found = Vec::new();
-    for member in methods {
-        let method = member.symbol;
-        if typer.store().symbols.get(method).visibility != Visibility::Public {
+    for method in methods {
+        if !typer
+            .is_member_accessible_at(method, app.function, context)
+            .ok()?
+        {
             continue;
         }
         let Some((provider, _)) = all.declaration(method) else {

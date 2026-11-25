@@ -27695,6 +27695,47 @@ mod tests {
     }
 
     #[test]
+    fn identifier_candidates_preserve_the_winning_scope_and_report_missing_names() {
+        let text = "class C { def pick(i: Int): Int = i; def pick(b: Boolean): Boolean = b; def unique: Int = 1; def one: Int = unique; def both: Int = pick; def param(pick: Int): Int = pick; def local: Int = { val pick = 1; pick }; def bad: Int = missing }";
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+        let picks: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(d) if store.names.resolve(d.name.as_name().text()) == "pick" => {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(picks.len(), 2);
+        let (unique, _) = method_definition_and_rhs(&parsed, &store, &index, source, "unique");
+        for label in ["one", "both", "param", "local", "bad"] {
+            let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, label);
+            let target = match &parsed.ast.get(rhs).kind {
+                TreeKind::Block(b) => b.expr,
+                _ => rhs,
+            };
+            let mut typer =
+                SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+            typer.complete_symbol(owner).unwrap();
+            typer.inspect_method_expression(owner, target, |probe, ctx| {
+                let candidates = probe.lookup_identifier_candidates(target, ctx);
+                match label {
+                    "one" => assert_eq!(candidates.unwrap(), [unique]),
+                    "both" => assert_eq!(candidates.unwrap(), picks),
+                    "param" => assert_eq!(candidates.unwrap(), [method_parameter_symbol(&parsed, &index, source, owner, 0)]),
+                    "local" => {
+                        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else { unreachable!() };
+                        assert_eq!(candidates.unwrap(), [probe.local_symbol_at(source, block.stats[0]).unwrap()]);
+                    }
+                    _ => assert!(matches!(candidates, Err(TyperError::TermNameNotFound { tree_index, .. }) if tree_index == target.index())),
+                }
+            }).unwrap().unwrap();
+        }
+    }
+
+    #[test]
     fn inspect_method_expression_types_only_the_enclosing_block_prefixes() {
         let (parsed, mut store, packages, defs, index, source) = parse_and_name(
             "class C { def run: Int = { val n: Int = 1; var copy = n; { val n = true; n }; copy; missing } }",

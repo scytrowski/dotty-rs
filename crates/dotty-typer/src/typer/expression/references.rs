@@ -1689,6 +1689,42 @@ impl SourceTyper<'_> {
         )
     }
 
+    /// Checks a class member's visibility from a source expression using the
+    /// same access rules as ordinary member selection. Pass a declaration
+    /// symbol and use-site tree from this session, with this driver's lexical
+    /// context at the use site. This does not perform lookup or choose an overload.
+    /// Unknown declarations and declarations without a class-like owner yield
+    /// `false`. Invalid use-site trees and scopes return errors.
+    pub fn is_member_accessible_at(
+        &self,
+        member: SymbolId,
+        site: TreeId<Untyped>,
+        context: ExpressionContext,
+    ) -> Result<bool, TyperError> {
+        if self.arena.try_get(site).is_none() {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: site.index(),
+            });
+        }
+        self.validate_expression_scope_stack(context.local_scopes)?;
+        if !self.store.symbols.contains(member) {
+            return Ok(false);
+        }
+        let Some(owner) = self.store.symbols.get(member).owner else {
+            return Ok(false);
+        };
+        if !self.store.symbols.contains(owner)
+            || !matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            )
+        {
+            return Ok(false);
+        }
+        self.is_selected_member_accessible(member, owner, context, site.index())
+    }
+
     pub(in crate::typer) fn is_selected_member_accessible(
         &self,
         symbol: SymbolId,

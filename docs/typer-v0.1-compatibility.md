@@ -1228,6 +1228,13 @@ non-value inferred infos return a focused error. Both typed explicit and
 inferred locals are entered with one stable symbol identity; a later failure in
 the block rolls back local symbols, source mappings, and typed nodes.
 
+Unqualified calls can resolve one ordinary public, concrete method declared
+directly on a single source superclass in another file. The superclass header
+must be complete in the shared store. A missing method signature is reported
+as `MemberTypeUnavailable` for the provider symbol. Overloaded inherited
+methods in this lookup remain deferred. Local values and parameters retain
+precedence over the superclass member.
+
 Local value symbol flags use the shared `dotty-core::source_modifier_flag`
 mapping, with a bounded Typer policy for the source forms measured by #929.
 `var` preserves `MUTABLE`, and `final val` preserves `FINAL`; the supported

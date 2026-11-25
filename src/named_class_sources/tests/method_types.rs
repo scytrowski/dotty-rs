@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::TreeKind;
 use crate::{CheckedClassBodies, MethodTypeRole, ResolvedMemberIndex};
 
 #[test]
@@ -511,74 +512,314 @@ fn unfinished_calls_use_the_local_receiver_and_typed_third_argument() {
 }
 
 #[test]
-fn unfinished_initializer_and_checked_call_select_the_same_source_overload() {
+fn provisional_and_checked_calls_agree_for_bare_this_and_explicit_receivers() {
     for declaration in ["val result", "var result: Int"] {
         for (third, tail, ordinal) in [("2", "false", 0), ("false", "2", 1)] {
+            // Use one shared base declaration for an inherited bare call.
+            // Both explicit receiver shapes can compare competing overloads.
+            let single = PICKS.split("; ").nth(ordinal).unwrap();
+            for (callee, parent, methods, winner) in [
+                ("pick", " extends Ops", single, 0),
+                ("this.pick", " extends Ops", PICKS, ordinal),
+                ("ops.pick", "", PICKS, ordinal),
+            ] {
+                let mut store = SemanticStore::new();
+                let defs = Definitions::bootstrap(&mut store);
+                let mut packages = Packages::new();
+                let ops = named(
+                    1,
+                    &format!("class Ops {{ {methods} }}"),
+                    &mut store,
+                    &mut packages,
+                );
+                // Both callers share the same provider symbols and types, so the
+                // committed and provisional identities can be compared directly.
+                let prefix = format!(
+                    "def run(ops: Ops): Int = {{ val third = {third}; {declaration} = {callee}(1, true, third, "
+                );
+                let closed = format!("class Checked{parent} {{ {prefix}{tail}); result }} }}");
+                let checked = named(2, &closed, &mut store, &mut packages);
+                let sources = NamedClassSources::new([&ops, &checked], &store).unwrap();
+                let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+                let (body, report) = sources
+                    .check_class_body(
+                        checked.classes()[0].symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                        &mut arena,
+                        crate::core::NoResolver,
+                    )
+                    .into_parts();
+                assert!(report.errors.is_empty(), "{report:?}");
+                let mut bodies = CheckedClassBodies::default();
+                bodies.record(body).unwrap();
+                let resolved = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+                let cursor = closed.find("third, ").unwrap() + "third, ".len();
+                let selected = resolved
+                    .call_signature_at(checked.source(), cursor as u32)
+                    .unwrap();
+                assert_eq!(selected.active_parameter, Some(3));
+                assert_eq!(
+                    selected.call.method,
+                    ops.classes()[0].methods().nth(winner).unwrap().symbol
+                );
+                assert_eq!(
+                    selected.parameters[3].ty.ty,
+                    [defs.boolean, defs.int][ordinal]
+                );
+
+                let id = SourceId::from_index(3);
+                let open = format!("class Editing{parent} {{ {prefix}");
+                let parsed = crate::parse_source(id, &open, Default::default())
+                    .unwrap()
+                    .bind(&mut store.names);
+                let pending = crate::IncompleteCallIndex::build(
+                    &sources,
+                    [("Editing.scala", parsed)],
+                    store,
+                    defs,
+                    packages,
+                );
+                let before_third = open.rfind("true,").unwrap() + "true,".len();
+                let earlier = pending.at(id, before_third as u32).unwrap();
+                assert_eq!(earlier.active_parameter, 2);
+                assert_eq!(
+                    earlier
+                        .candidates
+                        .iter()
+                        .map(|c| c.method)
+                        .collect::<Vec<_>>(),
+                    ops.classes()[0]
+                        .methods()
+                        .map(|m| m.symbol)
+                        .collect::<Vec<_>>()
+                );
+                let help = pending.at(id, open.len() as u32).unwrap();
+                assert_eq!(help.active_parameter, 3);
+                let [candidate] = help.candidates.as_slice() else {
+                    panic!("{help:?}")
+                };
+                assert_eq!(candidate.method, selected.call.method);
+                assert_eq!(candidate.parameters[3].ty.ty, selected.parameters[3].ty.ty);
+            }
+        }
+    }
+}
+
+const PICKS: &str = "def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail";
+
+fn unfinished_in_one_file(text: &str) -> (crate::IncompleteCallIndex, SourceId) {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let sources = NamedClassSources::new([], &store).unwrap();
+    let id = SourceId::from_index(1);
+    let parsed = crate::parse_source(id, text, Default::default())
+        .unwrap()
+        .bind(&mut store.names);
+    assert!(!parsed.diagnostics.is_empty());
+    (
+        crate::IncompleteCallIndex::build(
+            &sources,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            Packages::new(),
+        ),
+        id,
+    )
+}
+
+#[test]
+fn bare_initializer_call_narrows_only_after_its_third_argument() {
+    let text = format!(
+        "class Use {{ {PICKS}; def run: Int = {{ val third = false; val result = pick(1, true, third, "
+    );
+    let (index, id) = unfinished_in_one_file(&text);
+    let names: Vec<_> = text
+        .match_indices("def pick")
+        .map(|(i, _)| i as u32 + 4)
+        .collect();
+    for (suffix, slot, expected) in [
+        ("pick(", 0, &names[..]),
+        ("1,", 1, &names[..]),
+        ("true,", 2, &names[..]),
+        ("third,", 3, &names[1..]),
+    ] {
+        let cursor = text.rfind(suffix).unwrap() + suffix.len();
+        let help = index.at(id, cursor as u32).unwrap();
+        assert_eq!(help.active_parameter, slot);
+        assert_eq!(
+            help.candidates
+                .iter()
+                .map(|c| c.target.name.start())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert_eq!(
+        index.at(id, text.len() as u32).unwrap().candidates[0].parameters[3]
+            .ty
+            .name
+            .as_ref(),
+        "Int"
+    );
+}
+
+#[test]
+fn unfinished_calls_offer_plain_private_overloads_only_inside_the_owner() {
+    let methods = "def pick(n: Int, tail: Int): Int = n; private def pick(b: Boolean, tail: Boolean): Boolean = b";
+    for (caller, prefix, expected) in [
+        ("", "this.pick(", vec!["Int", "Boolean"]),
+        ("", "pick(false, ", vec!["Boolean"]),
+        ("", "other.pick(false, ", vec!["Boolean"]),
+        ("}; class Outside {", "other.pick(", vec!["Int"]),
+        ("}; class Outside {", "other.pick(false, ", vec![]),
+    ] {
+        let text = format!("class Ops {{ {methods}; {caller} def run(other: Ops): Int = {prefix}");
+        let (index, id) = unfinished_in_one_file(&text);
+        let help = index.at(id, text.len() as u32);
+        let names = help.as_ref().map(|h| {
+            h.candidates
+                .iter()
+                .map(|c| c.parameters[1].ty.name.as_ref())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            names.as_deref(),
+            (!expected.is_empty()).then_some(expected.as_slice()),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn inherited_bare_call_uses_the_direct_source_parent_in_either_file_order() {
+    let child = "class Child extends Base { def run: Int = pick(1, ";
+    for (extra_method, local, offered) in [
+        ("", "", true),
+        ("", "{ val pick = 0; ", false),
+        ("def pick(b: Boolean, tail: Int): Int = tail;", "", false),
+    ] {
+        // Each parse contains an unfinished call, so both files go through
+        // recovered naming, header scheduling and signature preparation.
+        let base = format!(
+            "class Base {{ def pick(n: Int, tail: Boolean): Int = n; {extra_method} def edit: Int = pick("
+        );
+        let child = child.replace("= pick", &format!("= {local}pick"));
+        for reverse in [false, true] {
             let mut store = SemanticStore::new();
             let defs = Definitions::bootstrap(&mut store);
-            let mut packages = Packages::new();
-            let ops = named(
-                1,
-                "class Ops { def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail }",
-                &mut store,
-                &mut packages,
-            );
-            // Both callers share the same provider symbols and types, so the
-            // committed and provisional identities can be compared directly.
-            let prefix = format!(
-                "def run(ops: Ops): Int = {{ val third = {third}; {declaration} = ops.pick(1, true, third, "
-            );
-            let closed = format!("class Checked {{ {prefix}{tail}); result }} }}");
-            let checked = named(2, &closed, &mut store, &mut packages);
-            let sources = NamedClassSources::new([&ops, &checked], &store).unwrap();
-            let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
-            let (body, report) = sources
-                .check_class_body(
-                    checked.classes()[0].symbol,
-                    &mut store,
-                    defs,
-                    &packages,
-                    &mut arena,
-                    crate::core::NoResolver,
+            let providers = NamedClassSources::new([], &store).unwrap();
+            let (a, b) = (SourceId::from_index(19), SourceId::from_index(3));
+            let mut files = [
+                (a, "Base.scala", base.as_str()),
+                (b, "Child.scala", child.as_str()),
+            ];
+            if reverse {
+                files.reverse();
+            }
+            let parses = files.map(|(id, name, text)| {
+                (
+                    name,
+                    crate::parse_source(id, text, Default::default())
+                        .unwrap()
+                        .bind(&mut store.names),
                 )
-                .into_parts();
-            assert!(report.errors.is_empty(), "{report:?}");
-            let mut bodies = CheckedClassBodies::default();
-            bodies.record(body).unwrap();
-            let resolved = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
-            let cursor = closed.find("third, ").unwrap() + "third, ".len();
-            let selected = resolved
-                .call_signature_at(checked.source(), cursor as u32)
-                .unwrap();
-            assert_eq!(selected.active_parameter, Some(3));
-            assert_eq!(
-                selected.call.method,
-                ops.classes()[0].methods().nth(ordinal).unwrap().symbol
-            );
-            assert_eq!(
-                selected.parameters[3].ty.ty,
-                [defs.boolean, defs.int][ordinal]
-            );
+            });
+            let index =
+                crate::IncompleteCallIndex::build(&providers, parses, store, defs, Packages::new());
+            let help = index.at(b, child.len() as u32);
+            if offered {
+                let help = help.expect("direct inherited method");
+                let [candidate] = help.candidates.as_slice() else {
+                    panic!("{help:?}")
+                };
+                assert_eq!(candidate.target.source, a);
+                assert_eq!(
+                    candidate.target.name.start(),
+                    base.find("pick").unwrap() as u32
+                );
+                assert_eq!(
+                    candidate.parameters[help.active_parameter].ty.name.as_ref(),
+                    "Boolean"
+                );
+            } else {
+                assert!(help.is_none(), "{base} / {child}");
+            }
+        }
+    }
+}
 
-            let id = SourceId::from_index(3);
-            let open = format!("class Editing {{ {prefix}");
-            let parsed = crate::parse_source(id, &open, Default::default())
-                .unwrap()
-                .bind(&mut store.names);
-            let pending = crate::IncompleteCallIndex::build(
-                &sources,
-                [("Editing.scala", parsed)],
+#[test]
+fn inherited_identifier_reports_the_missing_provider_and_defers_multiple_methods() {
+    for overloaded in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let extra = if overloaded {
+            "; def pick(b: Boolean): Boolean = b"
+        } else {
+            ""
+        };
+        let base = named(
+            1,
+            &format!("class Base {{ def pick(n: Int): Int = n{extra} }}"),
+            &mut store,
+            &mut packages,
+        );
+        let child = named(
+            2,
+            "class Child extends Base { def run: Int = pick(1) }",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&child, &base], &store).unwrap();
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        let mut headers = crate::ClassHeaderPhase::prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        );
+        headers.complete_all();
+        assert_eq!(headers.finish().ready.len(), 2);
+        let chosen = base.classes()[0].methods().next().unwrap().symbol;
+        let run = child.classes()[0].methods().next().unwrap();
+        let TreeKind::DefDef(d) = &child.ast().get(run.tree).kind else {
+            unreachable!()
+        };
+        let TreeKind::Apply(app) = &child.ast().get(d.rhs.unwrap()).kind else {
+            unreachable!()
+        };
+        let query = |store: &mut SemanticStore| {
+            let mut typer = crate::typer::SourceTyper::new(
+                child.ast(),
+                child.source(),
+                child.index(),
                 store,
                 defs,
-                packages,
+                &packages,
             );
-            let help = pending.at(id, open.len() as u32).unwrap();
-            assert_eq!(help.active_parameter, 3);
-            let [candidate] = help.candidates.as_slice() else {
-                panic!("{help:?}")
-            };
-            assert_eq!(candidate.method, selected.call.method);
-            assert_eq!(candidate.parameters[3].ty.ty, selected.parameters[3].ty.ty);
+            let ctx = typer.expression_context_for(run.symbol).unwrap();
+            typer.lookup_identifier_candidates(app.function, ctx)
+        };
+        if overloaded {
+            assert!(
+                matches!(query(&mut store), Err(crate::typer::TyperError::OverloadedSelectionDeferred { tree_index, .. }) if tree_index == app.function.index())
+            );
+        } else {
+            assert!(
+                matches!(query(&mut store), Err(crate::typer::TyperError::MemberTypeUnavailable { symbol }) if symbol == chosen)
+            );
+            assert!(matches!(
+                sources.try_complete_member_signature(chosen, &mut store, defs, &packages),
+                Ok(crate::typer::SignatureCompletion::Complete(_))
+            ));
+            assert_eq!(query(&mut store).unwrap(), [chosen]);
         }
     }
 }
