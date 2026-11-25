@@ -170,3 +170,59 @@ fn partial_bodies_publish_only_successful_method_and_field_constructions() {
     expected.sort_by_key(|s| s.span().range().start());
     assert_eq!(index.references_to(base.classes()[0].symbol), expected);
 }
+
+#[test]
+fn unfinished_constructor_prefix_uses_written_types_and_formal_ordinals() {
+    for (args, slot) in [
+        ("count = ", Some(3)),
+        ("count = 4, enabled = ", Some(2)),
+        ("1, 9, true, ", Some(3)),
+        ("count = 4, ", Some(0)),
+        ("count = 4, count = ", None),
+        ("missing = ", None),
+        ("count = false, ", None),
+        ("0, 1, true, 4, ", None),
+        ("count = 4, 1, ", None),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let base = named(
+            3,
+            "class Base(seed: Int, val id: Int, enabled: Boolean, var count: Int)",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&base], &store).unwrap();
+        prepare_bodies(&sources, &mut store, defs, &packages);
+        let source = SourceId::from_index(7);
+        let text = format!("class Use {{ def make(): Base = new Base({args}");
+        let parsed = crate::parse_source(source, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &sources,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        assert_eq!(
+            index
+                .primary_constructor_at(source, text.len() as u32)
+                .map(|s| s.active_parameter),
+            slot,
+            "{args}"
+        );
+        if args.starts_with("count = false") {
+            let before = text.find("false").unwrap() as u32;
+            assert_eq!(
+                index
+                    .primary_constructor_at(source, before)
+                    .unwrap()
+                    .active_parameter,
+                3
+            );
+        }
+    }
+}

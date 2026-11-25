@@ -62,6 +62,11 @@ impl std::ops::Deref for ActiveCallSignature<'_> {
 #[derive(Debug)]
 struct CandidatePrefix {
     signature: CallSignatureCandidate,
+    prefix: PrefixMatch,
+}
+
+#[derive(Debug)]
+struct PrefixMatch {
     compatible: usize,
     // Empty for positional lists, whose mapping is the identity.
     named_slots: Vec<SlotHint>,
@@ -208,19 +213,17 @@ impl IncompleteCallIndex {
                     continue;
                 }
                 if allocation.is_some() {
-                    if list.positional
-                        && list.arguments.is_empty()
-                        && let Ok(Some(Some(candidate))) =
-                            typer.inspect_method_expression(owner, tree, |probe, context| {
-                                ConstructorCandidate::capture(
-                                    file,
-                                    list,
-                                    &all,
-                                    probe,
-                                    context,
-                                    crate::SourceConstructorUse::Allocation,
-                                )
-                            })
+                    if let Ok(Some(Some(candidate))) =
+                        typer.inspect_method_expression(owner, tree, |probe, context| {
+                            ConstructorCandidate::capture(
+                                file,
+                                list,
+                                &all,
+                                probe,
+                                context,
+                                crate::SourceConstructorUse::Allocation,
+                            )
+                        })
                     {
                         constructors.insert(tree, candidate);
                     }
@@ -249,6 +252,8 @@ impl IncompleteCallIndex {
     /// Looks up the source primary constructor at a UTF-8 insertion point after
     /// an unfinished `new C(` inside a method. Requires a public constructor with
     /// a single required parameter list and simple named types in this revision.
+    /// Completed operands constrain the prefix up to the cursor. Named labels
+    /// select their declared ordinal, including before a value has been entered.
     pub fn primary_constructor_at(
         &self,
         source: SourceId,
@@ -257,7 +262,8 @@ impl IncompleteCallIndex {
         let file = self.files.get(&source)?;
         let list = file.syntax.unfinished_at(offset)?;
         let candidate = file.constructors.get(&list.application)?;
-        Some(candidate.at(0))
+        let cursor = PrefixCursor::new(list, offset)?;
+        Some(candidate.at(cursor.formal(&candidate.prefix, candidate.parameters.len())?))
     }
 
     /// Returns the innermost unfinished call's alternatives at a UTF-8 insertion
@@ -268,6 +274,34 @@ impl IncompleteCallIndex {
     pub fn at(&self, source: SourceId, offset: u32) -> Option<CallSignatureCandidates<'_>> {
         let file = self.files.get(&source)?;
         let list = file.syntax.unfinished_at(offset)?;
+        let cursor = PrefixCursor::new(list, offset)?;
+        let candidates: Vec<_> = file
+            .matches
+            .get(&list.unfinished?)?
+            .iter()
+            .filter_map(|c| {
+                let formal = cursor.formal(&c.prefix, c.signature.parameters.len())?;
+                Some(ActiveCallSignature {
+                    signature: &c.signature,
+                    active_parameter: formal,
+                })
+            })
+            .collect();
+        (!candidates.is_empty()).then_some(CallSignatureCandidates {
+            active_parameter: cursor.slot,
+            candidates,
+        })
+    }
+}
+
+struct PrefixCursor {
+    slot: usize,
+    written: usize,
+    before_operand: bool,
+}
+
+impl PrefixCursor {
+    fn new(list: &CallArgumentList, offset: u32) -> Option<Self> {
         let active_parameter = list.slot_at(offset)?;
         let written = list
             .arguments
@@ -284,32 +318,26 @@ impl IncompleteCallIndex {
                 },
                 |i| offset < list.named_arguments[i].label.start(),
             );
-        let candidates: Vec<_> = file
-            .matches
-            .get(&list.unfinished?)?
-            .iter()
-            .filter(|c| c.compatible >= written)
-            .filter_map(|c| {
-                let formal = if list.positional {
-                    (active_parameter < c.signature.parameters.len()).then_some(active_parameter)?
-                } else {
-                    let hint = c.named_slots.get(active_parameter)?;
-                    if before_operand {
-                        hint.before?
-                    } else {
-                        hint.bound?
-                    }
-                };
-                Some(ActiveCallSignature {
-                    signature: &c.signature,
-                    active_parameter: formal,
-                })
-            })
-            .collect();
-        (!candidates.is_empty()).then_some(CallSignatureCandidates {
-            active_parameter,
-            candidates,
+        Some(Self {
+            slot: active_parameter,
+            written,
+            before_operand,
         })
+    }
+
+    fn formal(&self, prefix: &PrefixMatch, parameter_count: usize) -> Option<usize> {
+        if self.written > prefix.compatible {
+            return None;
+        }
+        if prefix.named_slots.is_empty() {
+            return (self.slot < parameter_count).then_some(self.slot);
+        }
+        let hint = prefix.named_slots.get(self.slot)?;
+        if self.before_operand {
+            hint.before
+        } else {
+            hint.bound
+        }
     }
 }
 
@@ -361,18 +389,7 @@ fn prefix_candidates(
         }
         _ => return None,
     };
-    let prefix: Vec<_> = app
-        .args
-        .iter()
-        .take(list.arguments.len())
-        .map_while(|&arg| {
-            let value = match &file.ast().get(arg).kind {
-                TreeKind::NamedArg(named) => named.arg,
-                _ => arg,
-            };
-            value_type(typer, value, context)
-        })
-        .collect();
+    let prefix = written_types(typer, context, file, list, &app.args);
     let mut found = Vec::new();
     for method in methods {
         if !typer
@@ -403,10 +420,51 @@ fn prefix_candidates(
         else {
             continue;
         };
+        let prefix = PrefixMatch::new(list, &parameters, &prefix, typer);
+        found.push(CandidatePrefix {
+            signature: CallSignatureCandidate {
+                method,
+                target,
+                name,
+                parameters,
+                result,
+            },
+            prefix,
+        });
+    }
+    Some(found)
+}
+
+fn written_types(
+    typer: &mut SourceTyper<'_>,
+    context: ExpressionContext,
+    file: &NamedClassSource,
+    list: &CallArgumentList,
+    args: &[TreeId<Untyped>],
+) -> Vec<TypeId> {
+    args.iter()
+        .take(list.arguments.len())
+        .map_while(|&arg| {
+            let value = match &file.ast().get(arg).kind {
+                TreeKind::NamedArg(named) => named.arg,
+                _ => arg,
+            };
+            value_type(typer, value, context)
+        })
+        .collect()
+}
+
+impl PrefixMatch {
+    fn new(
+        list: &CallArgumentList,
+        parameters: &[SourceSignatureParameter],
+        prefix: &[TypeId],
+        typer: &mut SourceTyper<'_>,
+    ) -> Self {
         let named_slots = if list.positional {
             Vec::new()
         } else {
-            candidate_slots(list, &parameters)
+            candidate_slots(list, parameters)
         };
         let compatible = prefix
             .iter()
@@ -422,19 +480,11 @@ fn prefix_candidates(
                     .is_some_and(|p| typer.conforms(**arg, p.ty.ty).unwrap_or(false))
             })
             .count();
-        found.push(CandidatePrefix {
-            signature: CallSignatureCandidate {
-                method,
-                target,
-                name,
-                parameters,
-                result,
-            },
+        Self {
             compatible,
             named_slots,
-        });
+        }
     }
-    Some(found)
 }
 
 fn candidate_slots(

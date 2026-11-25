@@ -23,7 +23,8 @@ pub struct ProvisionalConstructorSignature<'a> {
 
 #[derive(Debug)]
 pub(super) struct ConstructorCandidate {
-    pub(super) usage: SourceConstructorUse,
+    usage: SourceConstructorUse,
+    pub(super) prefix: PrefixMatch,
     constructor: SymbolId,
     instance: SourceNamedType,
     pub(super) parameters: Box<[SourceSignatureParameter]>,
@@ -87,7 +88,10 @@ impl ConstructorCandidate {
         {
             return None;
         }
+        let written = written_types(typer, context, file, list, &app.args);
+        let prefix = PrefixMatch::new(list, &parameters, &written, typer);
         Some(Self {
+            prefix,
             usage,
             constructor: candidate.symbol,
             instance,
