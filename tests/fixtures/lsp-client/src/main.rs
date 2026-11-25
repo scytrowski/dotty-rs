@@ -45,6 +45,33 @@ fn signature_information(
     labelled_signature(method, labels)
 }
 
+fn constructor_information(
+    usage: dotty::SourceConstructorUse,
+    instance: &dotty::SourceNamedType,
+    parameters: &[SourceSignatureParameter],
+    declarations: &[dotty::SourceConstructorParameter],
+) -> Value {
+    use dotty::ConstructorParameterKind::{Plain, Val, Var};
+    let labels: Vec<_> = parameters
+        .iter()
+        .zip(declarations)
+        .map(|(p, decl)| {
+            let prefix = match decl.kind {
+                Plain => "",
+                Val => "val ",
+                Var => "var ",
+            };
+            format!("{prefix}{}: {}", p.name, p.ty.name)
+        })
+        .collect();
+    let prefix = match usage {
+        dotty::SourceConstructorUse::Allocation => "new",
+        dotty::SourceConstructorUse::DirectParent { .. } => "extends",
+    };
+    let label = format!("{prefix} {}({})", instance.name, labels.join(", "));
+    labelled_signature(label, labels)
+}
+
 fn labelled_signature(label: String, labels: Vec<String>) -> Value {
     let parameters: Vec<_> = labels
         .into_iter()
@@ -198,29 +225,24 @@ impl Workspace {
                 .members
                 .primary_constructor_signature_at(source, pos)
             {
-                use dotty::ConstructorParameterKind::{Plain, Val, Var};
-                let labels: Vec<_> = ctor
-                    .parameters
-                    .iter()
-                    .zip(ctor.declarations)
-                    .map(|(p, decl)| {
-                        let prefix = match decl.kind {
-                            Plain => "",
-                            Val => "val ",
-                            Var => "var ",
-                        };
-                        format!("{prefix}{}: {}", p.name, p.ty.name)
-                    })
-                    .collect();
-                let prefix = match ctor.construction.usage {
-                    dotty::SourceConstructorUse::Allocation => "new",
-                    dotty::SourceConstructorUse::DirectParent { .. } => "extends",
-                };
-                let label = format!("{prefix} {}({})", ctor.instance.name, labels.join(", "));
                 return Some(signature_help(
-                    labelled_signature(label, labels),
+                    constructor_information(
+                        ctor.construction.usage,
+                        ctor.instance,
+                        ctor.parameters,
+                        ctor.declarations,
+                    ),
                     ctor.active_parameter,
                 ));
+            }
+            if let Some(ctor) = analysis.unfinished.primary_constructor_at(source, pos) {
+                let info = constructor_information(
+                    ctor.usage,
+                    ctor.instance,
+                    ctor.parameters,
+                    ctor.declarations,
+                );
+                return Some(json!({"signatures":[info],"activeParameter":ctor.active_parameter}));
             }
             let pending = analysis.unfinished.at(source, pos)?;
             let first = pending.candidates.first()?.active_parameter;

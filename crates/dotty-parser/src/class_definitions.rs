@@ -1344,7 +1344,27 @@ where
             }
             parents.push(self.parse_parent());
         }
+        if let [root] = parents.as_slice()
+            && let Some(name) = self.member_names.parent_name(*root)
+        {
+            self.mark_constructor_list(*root, crate::ConstructorSyntax::DirectParent(name));
+        }
         parents
+    }
+
+    pub(crate) fn mark_constructor_list(
+        &mut self,
+        tree: TreeId<Untyped>,
+        syntax: crate::ConstructorSyntax,
+    ) {
+        // Lists are appended as their applications finish, including after nested calls.
+        if let Some(list) = self
+            .call_arguments
+            .last_mut()
+            .filter(|list| list.application == tree)
+        {
+            list.constructor = Some(syntax);
+        }
     }
 
     fn consume_newlines_before_parent_keyword(&mut self) {

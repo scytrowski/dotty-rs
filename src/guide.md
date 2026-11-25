@@ -1308,3 +1308,29 @@ assert_eq!(help.active_parameter, 1);
 assert_eq!(help.candidates[0].parameters[1].ty.name.as_ref(), "Boolean");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+For an unfinished source allocation or direct superclass clause, use
+[`IncompleteCallIndex::primary_constructor_at`]. The candidate carries
+the class and its primary constructor, formal types, source declarations
+and field roles. A named label can select a formal before its value exists.
+Once the list closes, query the new revision with
+[`ResolvedMemberIndex::primary_constructor_signature_at`]. Compare unchanged
+source locations across edits. Symbol IDs belong to a single naming session.
+
+```rust
+use dotty::{IncompleteCallIndex, NamedClassSources, parse_source};
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+
+let mut store = SemanticStore::new();
+let defs = Definitions::bootstrap(&mut store);
+let providers = NamedClassSources::new([], &store)?;
+let id = SourceId::from_index(0);
+let text = "class Base(val id: Int, var count: Int); class Child(x: Int) extends Base(count = x, id = ";
+let parsed = parse_source(id, text, Default::default())?.bind(&mut store.names);
+assert!(!parsed.diagnostics.is_empty());
+let pending = IncompleteCallIndex::build(&providers, [("Classes.scala", parsed)], store, defs, Packages::new());
+let sig = pending.primary_constructor_at(id, text.len() as u32).ok_or("missing parent signature")?;
+assert_eq!((sig.active_parameter, sig.parameters[0].name.as_ref()), (0, "id"));
+assert_eq!(sig.declarations[1].kind, dotty::ConstructorParameterKind::Var);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```

@@ -170,3 +170,102 @@ fn partial_bodies_publish_only_successful_method_and_field_constructions() {
     expected.sort_by_key(|s| s.span().range().start());
     assert_eq!(index.references_to(base.classes()[0].symbol), expected);
 }
+
+#[test]
+fn unfinished_constructor_prefix_uses_written_types_and_formal_ordinals() {
+    for (args, slot) in [
+        ("count = ", Some(3)),
+        ("count = 4, enabled = ", Some(2)),
+        ("1, 9, true, ", Some(3)),
+        ("count = 4, ", Some(0)),
+        ("count = 4, count = ", None),
+        ("missing = ", None),
+        ("count = false, ", None),
+        ("0, 1, true, 4, ", None),
+        ("count = 4, 1, ", None),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let base = named(
+            3,
+            "class Base(seed: Int, val id: Int, enabled: Boolean, var count: Int)",
+            &mut store,
+            &mut packages,
+        );
+        let sources = NamedClassSources::new([&base], &store).unwrap();
+        prepare_bodies(&sources, &mut store, defs, &packages);
+        let source = SourceId::from_index(7);
+        let text = format!("class Use {{ def make(): Base = new Base({args}");
+        let parsed = crate::parse_source(source, &text, Default::default())
+            .unwrap()
+            .bind(&mut store.names);
+        let index = crate::IncompleteCallIndex::build(
+            &sources,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            packages,
+        );
+        assert_eq!(
+            index
+                .primary_constructor_at(source, text.len() as u32)
+                .map(|s| s.active_parameter),
+            slot,
+            "{args}"
+        );
+        if args.starts_with("count = false") {
+            let before = text.find("false").unwrap() as u32;
+            assert_eq!(
+                index
+                    .primary_constructor_at(source, before)
+                    .unwrap()
+                    .active_parameter,
+                3
+            );
+        }
+    }
+}
+
+#[test]
+fn unfinished_parent_uses_the_child_formal_and_rejects_its_uninitialized_receiver() {
+    for reversed in [false, true] {
+        for (arg, valid) in [("initial", true), ("this.initial", false), ("false", false)] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let packages = Packages::new();
+            let child_id = SourceId::from_index(8);
+            let child = format!("class Child(val initial: Int) extends Base(count = {arg}, id = ");
+            let mut files = [
+                (
+                    SourceId::from_index(1),
+                    "Base.scala",
+                    "class Base(val id: Int, var count: Int); class Other { def bad = missing(",
+                ),
+                (child_id, "Child.scala", child.as_str()),
+            ];
+            if reversed {
+                files.reverse();
+            }
+            let parsed = files.map(|(id, name, text)| {
+                (
+                    name,
+                    crate::parse_source(id, text, Default::default())
+                        .unwrap()
+                        .bind(&mut store.names),
+                )
+            });
+            let sources = NamedClassSources::new([], &store).unwrap();
+            let index = crate::IncompleteCallIndex::build(&sources, parsed, store, defs, packages);
+            let sig = index.primary_constructor_at(child_id, child.len() as u32);
+            assert_eq!(sig.is_some(), valid, "{child}");
+            if let Some(sig) = sig {
+                assert_eq!(sig.declarations[0].target.source, SourceId::from_index(1));
+                assert_eq!((sig.active_parameter, &*sig.parameters[0].name), (0, "id"));
+                assert!(
+                    matches!(sig.usage, crate::SourceConstructorUse::DirectParent { child } if child != sig.instance.symbol)
+                );
+            }
+        }
+    }
+}

@@ -1727,6 +1727,10 @@ fn pick_signature(third: &str, tail: &str) -> Value {
 }
 
 fn expect_missing_argument(client: &mut Client, version: i32) {
+    expect_syntax_diagnostic(client, version, "parser.expression.missing_argument")
+}
+
+fn expect_syntax_diagnostic(client: &mut Client, version: i32, code: &str) {
     let Message::Notification(n) = client.receive() else {
         panic!("syntax diagnostics")
     };
@@ -1738,7 +1742,7 @@ fn expect_missing_argument(client: &mut Client, version: i32) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["code"] == "parser.expression.missing_argument")
+            .any(|d| d["code"] == code)
     );
 }
 
@@ -2418,5 +2422,74 @@ fn parent_label_diagnostic_tracks_a_provider_rename_and_consumer_repair() {
             json!([{"uri": B, "range":range(0,label,label+5)}])
         );
         client.shutdown();
+    }
+}
+
+#[test]
+fn unfinished_constructor_help_tracks_label_provider_and_repaired_call() {
+    for encoding in ["utf-8", "utf-16"] {
+        for (prefix, use_name, close) in [
+            (
+                "class Use { def make(id: Int, initial: Int): Base = /* 😀 */ new Base(",
+                "new",
+                ") }",
+            ),
+            (
+                "class Child(id: Int, initial: Int) extends /* 😀 */ Base(",
+                "extends",
+                ")",
+            ),
+        ] {
+            let mut client = Client::start(encoding, vec![A]);
+            client.open(A, PARENT);
+            client.open(B, prefix);
+            expect_missing_argument(&mut client, 1);
+            let start = token_column(encoding, prefix, "Base(") + 5;
+            let expected = |name, slot| {
+                json!({
+                    "signatures":[{"label":format!("{use_name} Base(val id: Int, var {name}: Int)"),
+                        "parameters":[{"label":"val id: Int"},{"label":format!("var {name}: Int")}]}],
+                    "activeParameter":slot
+                })
+            };
+            assert_eq!(client.signature_help(B, 0, start), expected("count", 0));
+            let label = "count = ";
+            let end = start + label.len();
+            client.edit(B, 2, range(0, start, start), label);
+            expect_syntax_diagnostic(&mut client, 2, "parser.expression.missing_assignment_rhs");
+            assert_eq!(client.signature_help(B, 0, end), expected("count", 1));
+            let formal = token_column(encoding, PARENT, "count:");
+            client.edit(A, 2, range(0, formal, formal + 5), "total");
+            client.diagnostics(A, 2, json!([]));
+            expect_syntax_diagnostic(&mut client, 2, "parser.expression.missing_assignment_rhs");
+            assert_eq!(client.signature_help(B, 0, end), Value::Null);
+            client.edit(B, 3, range(0, start, start + 5), "total");
+            client.diagnostics(A, 2, json!([]));
+            expect_syntax_diagnostic(&mut client, 3, "parser.expression.missing_assignment_rhs");
+            assert_eq!(client.signature_help(B, 0, end), expected("total", 1));
+            let jump = json!({"textDocument":{"uri":B},"position":{"line":0,"character":start}});
+            assert_eq!(
+                client.request("textDocument/definition", jump.clone()),
+                Value::Null
+            );
+            client.edit(
+                B,
+                4,
+                range(0, end, end),
+                &format!("initial, id = id{close}"),
+            );
+            client.diagnostics(A, 2, json!([]));
+            client.diagnostics(B, 4, json!([]));
+            let mut checked = expected("total", 1);
+            checked["activeSignature"] = json!(0);
+            assert_eq!(client.signature_help(B, 0, start), checked);
+            let target = client.request("textDocument/definition", jump);
+            assert_eq!(target[0]["targetUri"], A);
+            assert_eq!(
+                target[0]["targetSelectionRange"],
+                range(0, formal, formal + 5)
+            );
+            client.shutdown();
+        }
     }
 }
