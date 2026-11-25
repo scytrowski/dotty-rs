@@ -143,7 +143,7 @@ fn a_blocked_recursive_attempt_and_a_later_rejection_preserve_header_bindings() 
     let mut packages = Packages::new();
     let derived = named(
         9,
-        "class Good(x: Int) extends Mid(x); class Mid(y: Int) extends Base(y)",
+        "class Good(x: Int) extends Mid(x); class Mid(y: Int) extends Base(z = y)",
         &mut store,
         &mut packages,
     );
@@ -669,5 +669,76 @@ fn header_root_order_controls_attempts_and_skips_repeated_ready_roots() {
                 && report.remaining.is_empty()
                 && report.blockages.is_empty()
         );
+    }
+}
+
+#[test]
+fn named_parent_failures_point_to_the_written_label_or_value_and_preserve_other_headers() {
+    for (args, token) in [
+        ("unknown = id, count = 1", "unknown"),
+        ("count = 1, count = 2", "count"),
+        ("count = initial, id = id", "initial"),
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let base = named(
+            3,
+            "class Base(val id: Int, var count: Int)",
+            &mut store,
+            &mut packages,
+        );
+        let text = format!(
+            "class Bad(id: Int, initial: Boolean) extends Base({args}); class Good(x: Int) extends Base(count = x, id = x)"
+        );
+        let children = named(7, &text, &mut store, &mut packages);
+        let sources = NamedClassSources::new([&base, &children], &store).unwrap();
+        let (mut arena, mut bindings) = (AstArena::new(), ClassHeaderBindings::default());
+        let mut phase = crate::ClassHeaderPhase::prepare(
+            &sources,
+            &mut store,
+            defs,
+            &packages,
+            &mut arena,
+            &mut bindings,
+        );
+        for (_, class) in sources.classes() {
+            assert_eq!(
+                phase.attempt(class.symbol).is_err(),
+                class.symbol == children.classes()[0].symbol
+            );
+        }
+        let report = phase.finish();
+        let [bad, good] = children.classes() else {
+            panic!()
+        };
+        assert!(report.ready.contains(&good.symbol));
+        assert!(bindings.get(children.source(), good.parents[0]).is_some());
+        assert!(bindings.get(children.source(), bad.parents[0]).is_none());
+        let [failure] = report.failures.as_slice() else {
+            panic!("{report:?}")
+        };
+        let ClassHeaderError::Typing(error) = &failure.error else {
+            panic!()
+        };
+        assert_eq!(failure.class, bad.symbol);
+        match token {
+            "unknown" => assert!(matches!(
+                error.error(),
+                TyperError::UnknownNamedArgument { .. }
+            )),
+            "count" => assert!(matches!(
+                error.error(),
+                TyperError::DuplicateNamedArgument { .. }
+            )),
+            _ => assert!(
+                matches!(error.error(), TyperError::ApplicationArgumentTypeMismatch { argument_index: 0, expected, .. } if *expected == defs.int)
+            ),
+        }
+        let span = error.location().unwrap();
+        let start = text.find(args).unwrap() + args.rfind(token).unwrap();
+        assert_eq!(span.source(), children.source());
+        assert_eq!(span.span().range().start() as usize, start);
+        assert_eq!(span.span().range().len() as usize, token.len());
     }
 }
