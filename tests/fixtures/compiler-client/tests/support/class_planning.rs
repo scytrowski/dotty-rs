@@ -3672,3 +3672,95 @@ fn unfinished_allocation_uses_the_visible_primary_constructor() {
         );
     }
 }
+
+#[test]
+fn unfinished_parent_becomes_a_checked_jvm_call_after_the_operand_and_close() {
+    let base = (
+        SourceId::from_index(8),
+        "Base.scala",
+        "package demo\nclass Base(val id: Int, var count: Int)",
+    );
+    let child = (
+        SourceId::from_index(3),
+        "Derived.scala",
+        "package demo\nclass Derived(id: Int, initial: Int) extends Base(count = initial, id = ",
+    );
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &[base],
+        parsing::parse_files(&[base], 1),
+        &mut store,
+        &mut packages,
+    );
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    let parsed = dotty::parse_source(child.0, child.2, Default::default())
+        .unwrap()
+        .bind(&mut store.names);
+    let Err(dotty::NameSourceError::Syntax(parsed)) =
+        parsed.name(child.1, &mut store, &mut packages)
+    else {
+        panic!("unfinished child entered normal naming")
+    };
+    assert!(parsed.diagnostics.iter().any(|d| matches!(d, dotty::SyntaxDiagnostic::Parser(d) if matches!(d.issue(),
+        dotty::parser::ParseIssue::Expression(dotty::parser::ExpressionIssue::MissingAssignmentRhs { .. })))));
+    let checked = dotty::ResolvedMemberIndex::build_with_headers(
+        &sources,
+        &Default::default(),
+        &headers.bindings,
+        &headers.arena,
+        &store,
+    );
+    let end = child.2.len() as u32;
+    let first = child.2.find("count =").unwrap() as u32;
+    let pending =
+        dotty::IncompleteCallIndex::build(&sources, [(child.1, *parsed)], store, defs, packages);
+    for pos in [first, end] {
+        assert!(
+            checked
+                .primary_constructor_signature_at(child.0, pos)
+                .is_none()
+        );
+    }
+    // The repaired parse uses a fresh naming session. Compare the unchanged source declarations.
+    let targets = [first, end].map(|pos| {
+        let sig = pending.primary_constructor_at(child.0, pos).unwrap();
+        assert_eq!(sig.constructor, units[0].classes()[0].constructor);
+        (
+            sig.active_parameter,
+            sig.declarations[sig.active_parameter].target,
+        )
+    });
+    assert_eq!(targets.map(|(slot, _)| slot), [1, 0]);
+    let repaired = format!("{}id)", child.2);
+    let fixed = (child.0, child.1, repaired.as_str());
+    for files in [[base, fixed], [fixed, base]] {
+        let artifacts = super::with_plan(&files, |plan, defs, sources, bodies, headers| {
+            let index = dotty::ResolvedMemberIndex::build_with_headers(
+                sources,
+                bodies,
+                headers,
+                plan.typed_ast,
+                plan.store,
+            );
+            for (pos, (slot, target)) in [first, end].into_iter().zip(targets) {
+                let sig = index
+                    .primary_constructor_signature_at(child.0, pos)
+                    .unwrap();
+                assert_eq!(sig.active_parameter, Some(slot));
+                assert_eq!(sig.declarations[slot].target, target);
+                assert_eq!(
+                    sig.construction.constructor,
+                    sources.class(sig.construction.class).unwrap().1.constructor
+                );
+            }
+            super::checked_emission(plan, defs)
+        });
+        assert_eq!(
+            super::run_java_client("repaired-parent", "NamedParentClient", &artifacts).trim(),
+            "9 4"
+        );
+    }
+}
