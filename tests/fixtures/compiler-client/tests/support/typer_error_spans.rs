@@ -422,3 +422,124 @@ fn overload_errors_locate_the_whole_call_and_keep_its_candidates() {
         },
     );
 }
+
+#[test]
+fn rejected_named_overloads_explain_both_files_then_execute_the_repair() {
+    use dotty::core::{Definitions, NoResolver, Packages, SemanticStore, SourceId};
+    use dotty::typer::{NamedArgumentRejection, OverloadRejection};
+    let ops = (
+        SourceId::from_index(7),
+        "Ops.scala",
+        "package demo\nclass Ops { def pick(right: Int): Int = right; def pick(flag: Boolean): Int = if (flag) 1 else 0 }",
+    );
+    let caller = (
+        SourceId::from_index(2),
+        "Use.scala",
+        "package demo\nclass Use { def run(o: Ops): Int = o.pick(right = true); def good(o: Ops): Int = o.pick(flag = true) }",
+    );
+    for reverse in [false, true] {
+        let files = if reverse {
+            [caller, ops]
+        } else {
+            [ops, caller]
+        };
+        let report = {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = super::name_units(
+                &files,
+                super::parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let sources = NamedClassSources::new(&units, &store).unwrap();
+            let class = sources.file(caller.0).unwrap().classes()[0].symbol;
+            let (body, report) = sources
+                .check_class_body(
+                    class,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut headers.arena,
+                    NoResolver,
+                )
+                .into_parts();
+            let mut bodies = dotty::CheckedClassBodies::default();
+            bodies.record(body).unwrap();
+            let index =
+                dotty::ResolvedMemberIndex::build(&sources, &bodies, &headers.arena, &store);
+            let offset = |token| caller.2.find(token).unwrap() as u32;
+            assert!(
+                index
+                    .call_arguments_at(caller.0, offset("pick(right"))
+                    .is_none()
+            );
+            assert!(index.symbol_at(caller.0, offset("right = true")).is_none());
+            let good = index
+                .call_arguments_at(caller.0, offset("pick(flag"))
+                .unwrap();
+            assert_eq!(index.references_to(good.call.method), &[good.call.origin]);
+            let mut failures = report.into_semantic_diagnostics(&sources);
+            let dotty::SemanticIssue::Typing(report) = failures.next().unwrap().issue else {
+                panic!()
+            };
+            assert!(failures.next().is_none());
+            report
+        };
+        let primary = report.location().unwrap();
+        let slice = |text: &'static str, range: TextRange| {
+            &text[range.start() as usize..range.end() as usize]
+        };
+        assert_eq!(primary.source(), caller.0);
+        assert_eq!(
+            slice(caller.2, primary.span().range()),
+            "o.pick(right = true)"
+        );
+        let mut explanations = Vec::new();
+        for c in report.overload_candidates() {
+            let target = c.target.unwrap();
+            assert_eq!(target.method.source, ops.0);
+            let arg = c.argument.unwrap();
+            assert_eq!(arg.location.source(), caller.0);
+            let token = slice(caller.2, arg.location.span().range());
+            explanations.push(match c.reason.unwrap() {
+                OverloadRejection::ArgumentNonConformance {expected_description,actual_description,..} => {
+                    let p = target.parameter.unwrap();
+                    assert_eq!(p.method,c.method);
+                    let formal = slice(ops.2,p.target.declaration);
+                    format!("{token}: expected {expected_description} for {formal}, found {actual_description}")
+                }
+                OverloadRejection::NamedArgument{reason: NamedArgumentRejection::Unknown(_),..} => {
+                    assert!(target.parameter.is_none());
+                    let method = slice(ops.2,target.method.declaration);
+                    format!("{token}: unknown label on {method}")
+                }
+                other => panic!("{other:?}"),
+            });
+        }
+        assert_eq!(
+            explanations,
+            [
+                "true: expected Int for right: Int, found Boolean",
+                "right: unknown label on def pick(flag: Boolean): Int = if (flag) 1 else 0"
+            ]
+        );
+        let fixed = caller.2.replacen("right = true", "flag = true", 1);
+        let caller = (caller.0, caller.1, fixed.as_str());
+        let files = if reverse {
+            [caller, ops]
+        } else {
+            [ops, caller]
+        };
+        let artifacts = super::with_plan(&files, |unit, defs, _, _, _| {
+            super::checked_emission(unit, defs)
+        });
+        assert_eq!(
+            super::run_java_client("repaired-overload", "RepairedOverloadClient", &artifacts)
+                .trim(),
+            "1"
+        );
+    }
+}
