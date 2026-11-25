@@ -7,7 +7,7 @@ pub(super) struct NamedArgument {
 }
 
 impl SourceTyper<'_> {
-    pub(super) fn has_named_arguments(&self, trees: &[TreeId<Untyped>]) -> bool {
+    pub(in crate::typer) fn has_named_arguments(&self, trees: &[TreeId<Untyped>]) -> bool {
         trees.iter().any(|&t| {
             matches!(
                 self.arena.try_get(t).map(|t| &t.kind),
@@ -162,6 +162,11 @@ impl SourceTyper<'_> {
         let kind = match node.kind {
             TreeKind::Ident(_) => return Ok(tree),
             TreeKind::Select(mut s) => {
+                // Keep New and its initialization together. Only the arguments
+                // of a reordered construction need evaluation-order temporaries.
+                if matches!(self.typed_arena.get(s.qualifier).kind, TreeKind::New(_)) {
+                    return Ok(tree);
+                }
                 let receiver = self.share_strict_operand(s.qualifier, stats, context, journal)?;
                 if receiver == s.qualifier {
                     return Ok(tree);

@@ -968,14 +968,16 @@ Use [`ResolvedMemberIndex::construction_at`] on the class token of a
 simple explicit `new`. Its [`ResolvedSourceConstruction`] identifies the
 constructed class and the selected primary constructor separately. Use the
 class symbol for references. A neighboring argument or method selection has
-its own target. Rebuild the index against the new revision after editing.
+its own target. Inside a checked primary constructor list,
+[`ResolvedMemberIndex::construction_arguments_at`] pairs each written operand
+with its class-owned parameter and constructor-owned formal. Rebuild the index against the new revision after editing.
 
 ```rust
 use dotty::{CheckedClassBodies, ClassHeaderBindings, NamedClassSources, ResolvedMemberIndex, parse_source};
 use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, NoResolver};
 # use dotty::typer::SignatureCompletion;
 
-let original = "class Base(n: Int) { def read(): Int = n }; class Peer(n: Int) { def read(): Int = n }; class Factory { def build(start: Int): Int = new Base(start).read() }";
+let original = "class Base(n: Int) { def read(): Int = n }; class Peer(n: Int) { def read(): Int = n }; class Factory { def build(start: Int): Int = new Base(n = start).read() }";
 let edited = original.replace("new Base", "new Peer");
 let offset = original.find("new Base").unwrap() as u32 + 4;
 for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
@@ -1001,6 +1003,13 @@ for (text, selected) in [(original, 0), (edited.as_str(), 1), (original, 0)] {
 #   bodies.record(body)?;
     let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
     let site = index.construction_at(id, offset).ok_or("missing construction")?;
+    let args = index.construction_arguments_at(id, offset + 5).unwrap();
+    assert_eq!(args.written[0].ordinal, 0);
+    assert_eq!(args.written[0].parameter.constructor, site.constructor);
+    assert_eq!(args.written[0].label.unwrap().start(), offset + 5);
+    let signature = index.construction_signature_at(id, offset + 5).unwrap();
+    assert_eq!(signature.active_parameter, Some(0));
+    assert_eq!(&*signature.parameters[0].ty.name, "Int");
     let expected = &file.classes()[selected];
     assert_eq!((site.class, site.constructor), (expected.symbol, expected.constructor));
     assert_eq!(index.references_to(site.class), &[site.origin]);

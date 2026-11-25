@@ -18,6 +18,10 @@ pub struct NamedCallArgument {
 /// A parenthesized application, including nested and indirect applications.
 #[derive(Debug)]
 pub struct CallArgumentList {
+    /// Exact application tree in the original parse arena. For an explicit
+    /// constructor this is the application paired with its written class name
+    /// by [`crate::SourceMemberNames::constructions`].
+    pub application: TreeId<Untyped>,
     /// Written callee token for a direct named call. Other applications have no name here.
     pub callee: Option<TextRange>,
     /// UTF-8 byte range from the opening through the closing parenthesis, or to
@@ -180,6 +184,33 @@ mod tests {
         }
         assert!(parsed.call_arguments.at(5).is_none());
         assert!(parsed.call_arguments.at(text.len() as u32).is_none());
+    }
+
+    #[test]
+    fn explicit_allocations_own_their_written_labels_and_operands() {
+        let text = "new Outer(child = new Pair(`right` = right, left = 9))";
+        let parsed = parse(text);
+        assert!(parsed.diagnostics.is_empty());
+        let slice = |r: dotty_core::TextRange| &text[r.start() as usize..r.end() as usize];
+        for ((tree, class), (name, arguments)) in parsed.member_names.constructions().iter().zip([
+            (
+                "Outer",
+                vec![("child", "new Pair(`right` = right, left = 9)")],
+            ),
+            ("Pair", vec![("`right`", "right"), ("left", "9")]),
+        ]) {
+            assert_eq!(slice(*class), name);
+            let list = parsed.call_arguments.at(class.end() + 1).unwrap();
+            assert_eq!(list.application, *tree);
+            assert_eq!(
+                list.named_arguments
+                    .iter()
+                    .map(|arg| (slice(arg.label), slice(arg.value.unwrap())))
+                    .collect::<Vec<_>>(),
+                arguments
+            );
+        }
+        assert_eq!(parsed.member_names.constructions().len(), 2);
     }
 
     #[test]

@@ -269,6 +269,20 @@ impl SourceTyper<'_> {
         let mut candidates = candidate_set.applicable_signatures;
         self.adapt_inherited_outer_constructor(instance_type, &mut candidates, info_journal)?;
         self.adapt_source_member_constructor(instance_type, &mut candidates, info_journal)?;
+        if application_kind == ApplyKind::Regular && self.has_named_arguments(argument_trees) {
+            let supported = matches!(candidates.as_slice(), [candidate]
+                if candidate_set.rejected_incomplete.is_empty()
+                    && self.store.symbols.has_plain_primary_clause(candidate.symbol)
+                    && self.store.symbols.get(candidate.symbol).visibility == dotty_core::Visibility::Public
+                    && self.strict_ordinary_clause(candidate.callable));
+            if !supported {
+                return Err(TyperError::UnsupportedExpression {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    expression_kind: "named arguments outside a plain source primary constructor",
+                });
+            }
+        }
         let candidate = match candidates.as_slice() {
             [] if candidate_set.rejected_incomplete.is_empty() => {
                 return Err(TyperError::ConstructorApplicationUnavailable { class });

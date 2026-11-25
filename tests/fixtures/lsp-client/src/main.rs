@@ -1,9 +1,6 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
-use dotty::{
-    ResolvedCallSignature, SourceDiagnostic, SourceSignatureParameter, SourceSymbolInfo,
-    SourceSymbolSignature,
-};
+use dotty::{SourceDiagnostic, SourceSignatureParameter, SourceSymbolInfo, SourceSymbolSignature};
 use dotty_lsp::analysis::{Analysis, Document, Documents, Problem, analyze_with_classpath};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
@@ -45,17 +42,20 @@ fn signature_information(
 ) -> Value {
     let labels = parameter_labels(parameters);
     let method = method_label(name, Some(&labels), result);
+    labelled_signature(method, labels)
+}
+
+fn labelled_signature(label: String, labels: Vec<String>) -> Value {
     let parameters: Vec<_> = labels
         .into_iter()
         .map(|label| json!({"label":label}))
         .collect();
-    json!({"label":method,"parameters":parameters})
+    json!({"label":label,"parameters":parameters})
 }
 
-fn signature_help(call: ResolvedCallSignature<'_>) -> Value {
-    let selected = signature_information(call.name, call.parameters, &call.result.name);
+fn signature_help(selected: Value, active_parameter: Option<usize>) -> Value {
     let mut help = json!({"signatures":[selected],"activeSignature":0});
-    if let Some(index) = call.active_parameter {
+    if let Some(index) = active_parameter {
         help["activeParameter"] = json!(index);
     }
     help
@@ -189,7 +189,18 @@ impl Workspace {
         let source = analysis.source(uri)?;
         if method == "textDocument/signatureHelp" {
             if let Some(call) = analysis.members.call_signature_at(source, pos) {
-                return Some(signature_help(call));
+                return Some(signature_help(
+                    signature_information(call.name, call.parameters, &call.result.name),
+                    call.active_parameter,
+                ));
+            }
+            if let Some(ctor) = analysis.members.construction_signature_at(source, pos) {
+                let labels = parameter_labels(ctor.parameters);
+                let label = format!("new {}({})", ctor.instance.name, labels.join(", "));
+                return Some(signature_help(
+                    labelled_signature(label, labels),
+                    ctor.active_parameter,
+                ));
             }
             let pending = analysis.unfinished.at(source, pos)?;
             let first = pending.candidates.first()?.active_parameter;
@@ -369,6 +380,7 @@ fn render_semantic(report: &dotty::SemanticDiagnostic) -> SourceDiagnostic {
         dotty::SemanticIssue::Typing(error) => {
             use dotty::typer::TyperError;
             let message = match error.error() {
+                TyperError::DuplicateNamedArgument { .. } => "Parameter supplied twice",
                 TyperError::OverloadApplicationNoApplicable { .. } => {
                     "No overload accepts these arguments"
                 }
