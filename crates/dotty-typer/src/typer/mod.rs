@@ -2770,7 +2770,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_member_typing_rejects_untyped_parameter_defaults() {
+    fn ordinary_member_typing_checks_parameter_defaults_in_the_getter_scope() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def invalidBoolean(x: Int = true): Int = 1; def invalidName(x: Int = missing): Int = 1; def valid(x: Int = 1): Int = 1 }",
         );
@@ -2807,16 +2807,24 @@ mod tests {
         );
 
         for ((tree, name), symbol) in methods.into_iter().zip(symbols) {
-            assert!(
-                matches!(
-                    typer.type_method_definition(tree),
-                    Err(TyperError::LocalBlockDeclarationDeferred {
-                        kind: "method definition containing unsupported default parameter arguments",
-                        ..
-                    })
+            let result = typer.type_method_definition(tree);
+            match name {
+                "valid" => {
+                    result.unwrap();
+                    continue;
+                }
+                "invalidBoolean" => assert!(
+                    matches!(
+                        result,
+                        Err(TyperError::ExpectedExpressionTypeMismatch { .. })
+                    ),
+                    "{result:?}"
                 ),
-                "method {name} must remain explicitly unsupported until defaults are typed"
-            );
+                _ => assert!(
+                    matches!(result, Err(TyperError::TermNameNotFound { .. })),
+                    "{result:?}"
+                ),
+            }
             assert!(typer.source_typed_index().get(source, tree).is_none());
             assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
         }

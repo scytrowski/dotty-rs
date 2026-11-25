@@ -3538,6 +3538,19 @@ impl Namer<'_> {
             let mut ordinal = 0;
             let mut follows_contextual_clause = false;
             let clauses = definition.context_bound_clauses(self.arena, &self.store.names);
+            let ordinary = definition.type_params.is_empty()
+                && clauses.len() == 1
+                && clauses[0].iter().all(|&tree| {
+                    let TreeKind::ValDef(p) = &self.arena.get(tree).kind else {
+                        return false;
+                    };
+                    p.metadata.modifiers.iter().all(|m| *m == Modifier::Param)
+                        && !matches!(
+                            &self.arena.get(p.tpt).kind,
+                            TreeKind::ByNameTypeTree(_)
+                                | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                        )
+                });
             for (clause_index, clause) in clauses.iter().enumerate() {
                 let mut contextual_clause = false;
                 for &parameter_tree in clause {
@@ -3559,7 +3572,7 @@ impl Namer<'_> {
                         .any(|m| matches!(m, Modifier::Given | Modifier::Implicit));
                     contextual_clause |= contextual_parameter;
                     if parameter.rhs.is_none()
-                        || !(contextual_parameter || follows_contextual_clause)
+                        || !(ordinary || contextual_parameter || follows_contextual_clause)
                     {
                         continue;
                     }

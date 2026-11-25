@@ -49,6 +49,9 @@ impl SourceNamedType {
 /// One formal of a completed ordinary method clause, in declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceSignatureParameter {
+    /// Getter registered for this formal on this exact declaration, in the original session.
+    /// `None` denotes a required parameter.
+    pub default_getter: Option<SymbolId>,
     /// Semantic name from the selected method's formal parameter.
     pub name: Box<str>,
     /// Completed type of this formal.
@@ -102,11 +105,13 @@ impl SourceSymbolInfo {
                         let parameters = method
                             .params
                             .iter()
-                            .map(|p| {
+                            .enumerate()
+                            .map(|(i, p)| {
                                 if p.erased || p.varargs {
                                     return None;
                                 }
                                 Some(SourceSignatureParameter {
+                                    default_getter: store.default_getter(id, i),
                                     name: store.names.resolve(p.name.as_name().text()).into(),
                                     ty: SourceNamedType::capture(store, p.ty)?,
                                 })
