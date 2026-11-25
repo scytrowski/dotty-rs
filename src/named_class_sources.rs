@@ -533,6 +533,7 @@ mod tests {
     mod locals;
     mod members;
     mod method_types;
+    mod ordinary_defaults;
     mod own_fields;
     mod parameters;
     mod parent_navigation;

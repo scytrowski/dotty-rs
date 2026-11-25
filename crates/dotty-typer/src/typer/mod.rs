@@ -83,6 +83,11 @@ pub enum OverloadRejection {
         /// Observed argument or parameter count.
         actual: usize,
     },
+    /// This overload has defaults, but the unbound formal is required.
+    MissingRequiredArgument {
+        /// Zero-based position in this candidate's declaration.
+        parameter_index: usize,
+    },
     /// An argument does not conform to this candidate's parameter type.
     ArgumentNonConformance {
         /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
