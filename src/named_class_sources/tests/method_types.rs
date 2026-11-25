@@ -582,3 +582,62 @@ fn unfinished_initializer_and_checked_call_select_the_same_source_overload() {
         }
     }
 }
+
+const PICKS: &str = "def pick(a: Int, b: Boolean, n: Int, tail: Boolean): Int = n; def pick(a: Int, b: Boolean, flag: Boolean, tail: Int): Int = tail";
+
+fn unfinished_in_one_file(text: &str) -> (crate::IncompleteCallIndex, SourceId) {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let sources = NamedClassSources::new([], &store).unwrap();
+    let id = SourceId::from_index(1);
+    let parsed = crate::parse_source(id, text, Default::default())
+        .unwrap()
+        .bind(&mut store.names);
+    assert!(!parsed.diagnostics.is_empty());
+    (
+        crate::IncompleteCallIndex::build(
+            &sources,
+            [("Use.scala", parsed)],
+            store,
+            defs,
+            Packages::new(),
+        ),
+        id,
+    )
+}
+
+#[test]
+fn bare_initializer_call_narrows_only_after_its_third_argument() {
+    let text = format!(
+        "class Use {{ {PICKS}; def run: Int = {{ val third = false; val result = pick(1, true, third, "
+    );
+    let (index, id) = unfinished_in_one_file(&text);
+    let names: Vec<_> = text
+        .match_indices("def pick")
+        .map(|(i, _)| i as u32 + 4)
+        .collect();
+    for (suffix, slot, expected) in [
+        ("pick(", 0, &names[..]),
+        ("1,", 1, &names[..]),
+        ("true,", 2, &names[..]),
+        ("third,", 3, &names[1..]),
+    ] {
+        let cursor = text.rfind(suffix).unwrap() + suffix.len();
+        let help = index.at(id, cursor as u32).unwrap();
+        assert_eq!(help.active_parameter, slot);
+        assert_eq!(
+            help.candidates
+                .iter()
+                .map(|c| c.target.name.start())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert_eq!(
+        index.at(id, text.len() as u32).unwrap().candidates[0].parameters[3]
+            .ty
+            .name
+            .as_ref(),
+        "Int"
+    );
+}

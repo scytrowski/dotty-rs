@@ -2,8 +2,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
-    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SymbolId, TreeId,
-    TreeKind, TypeId, Untyped, Visibility,
+    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SymbolId, SymbolKind,
+    TreeId, TreeKind, TypeId, Untyped, Visibility,
 };
 use crate::parser::{CallArgumentList, SourceCallArguments};
 use crate::typer::{ExpressionContext, SourceTyper};
@@ -65,7 +65,8 @@ impl IncompleteCallIndex {
     /// rejected contexts and unsupported calls contribute no candidates.
     /// Clean provider signatures must already be complete. Public source methods
     /// with one plain positional list and named parameter and result types are
-    /// supported. The receiver and written arguments are typed in their lexical
+    /// supported for unqualified calls and explicit receivers. The written
+    /// arguments and any receiver are typed in their lexical
     /// context, including inside the initializer of an ordinary local `val` or
     /// `var`. Earlier statements in each enclosing block are typed in order.
     /// Unsupported scopes or ill-typed preceding statements suppress candidates.
@@ -232,11 +233,31 @@ fn prefix_candidates(
     let TreeKind::Apply(app) = &file.ast().get(tree).kind else {
         return None;
     };
-    let TreeKind::Select(select) = &file.ast().get(app.function).kind else {
-        return None;
+    let methods = match &file.ast().get(app.function).kind {
+        TreeKind::Ident(_) => {
+            let bucket = typer
+                .lookup_identifier_candidates(app.function, context)
+                .ok()?;
+            // A value in the winning scope can shadow every class overload.
+            if bucket
+                .iter()
+                .any(|&id| typer.store().symbols.get(id).kind != SymbolKind::Method)
+            {
+                return None;
+            }
+            bucket
+        }
+        TreeKind::Select(select) => {
+            let receiver = value_type(typer, select.qualifier, context)?;
+            typer
+                .lookup_members(receiver, select.name)
+                .ok()?
+                .into_iter()
+                .map(|member| member.symbol)
+                .collect()
+        }
+        _ => return None,
     };
-    let receiver = value_type(typer, select.qualifier, context)?;
-    let methods = typer.lookup_members(receiver, select.name).ok()?;
     let prefix: Vec<_> = app
         .args
         .iter()
@@ -244,8 +265,7 @@ fn prefix_candidates(
         .map_while(|&arg| value_type(typer, arg, context))
         .collect();
     let mut found = Vec::new();
-    for member in methods {
-        let method = member.symbol;
+    for method in methods {
         if typer.store().symbols.get(method).visibility != Visibility::Public {
             continue;
         }
