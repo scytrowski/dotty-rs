@@ -19,6 +19,59 @@ pub struct ResolvedSourceConstruction {
     pub target: SourceMemberTarget,
 }
 
+/// Arguments of a checked explicit source allocation with one plain primary clause.
+/// Both declaration and use identities belong to the indexed revision.
+#[derive(Debug)]
+pub struct ResolvedConstructionArguments {
+    /// Allocation site and selected primary constructor.
+    pub construction: ResolvedSourceConstruction,
+    /// Supplied arguments in source order, paired with constructor-owned formals
+    /// and their class-owned source declarations.
+    pub written: Box<[crate::ResolvedWrittenArgument<crate::SourceConstructorParameter>]>,
+}
+
+impl ResolvedConstructionArguments {
+    pub(crate) fn capture(
+        construction: ResolvedSourceConstruction,
+        file: &NamedClassSource,
+        root: TreeId<Untyped>,
+        bindings: &SourceTypedIndex,
+        formals: &[crate::SourceConstructorParameter],
+        store: &SemanticStore,
+    ) -> Option<(u32, Self)> {
+        let constructor = store.symbols.get(construction.constructor);
+        if !constructor
+            .flags
+            .contains(crate::core::SymbolFlags::PLAIN_PRIMARY_CLAUSE)
+            || constructor.visibility != crate::core::Visibility::Public
+        {
+            return None;
+        }
+        // The closing token belongs to this list even when the last operand is another call.
+        let end = file
+            .ast()
+            .get(root)
+            .position?
+            .span()
+            .range()
+            .end()
+            .checked_sub(1)?;
+        let list = file.named().syntax().call_arguments.at(end)?;
+        if list.application != root || !list.regular || list.arguments.len() != formals.len() {
+            return None;
+        }
+        let binding = bindings.named_call(bindings.get(file.source(), root)?);
+        let written = crate::source_call_bindings::written_arguments(list, formals, binding)?;
+        Some((
+            list.range.start(),
+            Self {
+                construction,
+                written,
+            },
+        ))
+    }
+}
+
 pub(crate) fn selected_constructor(
     file: &NamedClassSource,
     root: TreeId<Untyped>,
@@ -30,7 +83,16 @@ pub(crate) fn selected_constructor(
     let TreeKind::Apply(source_call) = &file.ast().try_get(root)?.kind else {
         return None;
     };
-    let application = typed.try_get(mapped(root)?)?;
+    let root = mapped(root)?;
+    let application = typed.try_get(root)?;
+    let application = match &application.kind {
+        TreeKind::Block(block)
+            if bindings.named_call(root)?.function == mapped(source_call.function)? =>
+        {
+            typed.try_get(block.expr)?
+        }
+        _ => application,
+    };
     let TreeKind::Apply(call) = &application.kind else {
         return None;
     };

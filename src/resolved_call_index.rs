@@ -24,7 +24,8 @@ struct IndexedFile {
     local_uses: Vec<(SourceSpan, (usize, crate::ValueAccessKind))>,
     parameters: Vec<ParameterDeclaration>,
     parameter_uses: Vec<(SourceSpan, usize)>,
-    argument_labels: Vec<(SourceSpan, SourceMethodParameter)>,
+    argument_labels: Vec<(SourceSpan, ParameterDeclaration)>,
+    construction_arguments: HashMap<u32, crate::ResolvedConstructionArguments>,
     calls: Vec<ResolvedSourceCall>,
     resolved_arguments: HashMap<u32, crate::ResolvedCallArguments>,
     argument_bindings: HashMap<u32, crate::core::NamedCallBinding>,
@@ -168,6 +169,7 @@ impl ResolvedMemberIndex {
         let mut index = Self::default();
         let mut targets = HashMap::new();
         let mut method_formals: HashMap<SymbolId, Vec<SourceMethodParameter>> = HashMap::new();
+        let mut constructor_formals = HashMap::<_, Vec<_>>::new();
         let mut valid_files = Vec::new();
         for file in sources.files() {
             let navigation = match file.navigation() {
@@ -230,6 +232,11 @@ impl ResolvedMemberIndex {
                         .entry(formal.method)
                         .or_default()
                         .push(*formal);
+                } else if let ParameterDeclaration::Constructor(formal) = p {
+                    constructor_formals
+                        .entry(formal.constructor)
+                        .or_default()
+                        .push(*formal);
                 }
             }
             valid_files.push((
@@ -259,6 +266,8 @@ impl ResolvedMemberIndex {
                     })
                 })
                 .collect();
+            let mut argument_labels = Vec::new();
+            let mut construction_arguments = HashMap::new();
             let constructions: Vec<_> = file
                 .named()
                 .syntax()
@@ -272,14 +281,33 @@ impl ResolvedMemberIndex {
                         file, root, bindings, typed_ast, store,
                     )?;
                     let (_, declaration) = sources.class(class)?;
-                    (declaration.constructor == constructor).then_some(
-                        crate::ResolvedSourceConstruction {
-                            class,
-                            constructor,
-                            origin: SourceSpan::new(file.source(), Span::without_point(name)),
-                            target: *targets.get(&class)?,
-                        },
-                    )
+                    if declaration.constructor != constructor {
+                        return None;
+                    }
+                    let construction = crate::ResolvedSourceConstruction {
+                        class,
+                        constructor,
+                        origin: SourceSpan::new(file.source(), Span::without_point(name)),
+                        target: *targets.get(&class)?,
+                    };
+                    if let Some((start, arguments)) = crate::ResolvedConstructionArguments::capture(
+                        construction,
+                        file,
+                        root,
+                        bindings,
+                        constructor_formals
+                            .get(&constructor)
+                            .map_or(&[], Vec::as_slice),
+                        store,
+                    ) {
+                        argument_labels.extend(arguments.written.iter().filter_map(|arg| {
+                            let span =
+                                SourceSpan::new(file.source(), Span::without_point(arg.label?));
+                            Some((span, ParameterDeclaration::Constructor(arg.parameter)))
+                        }));
+                        construction_arguments.insert(start, arguments);
+                    }
+                    Some(construction)
                 })
                 .collect();
             let constructor_types =
@@ -299,7 +327,6 @@ impl ResolvedMemberIndex {
             }
             let mut calls = Vec::new();
             let mut resolved_arguments = HashMap::new();
-            let mut argument_labels = Vec::new();
             let mut argument_bindings = HashMap::new();
             // A target navigation error is reported once when visiting its file.
             for site in sources
@@ -327,7 +354,7 @@ impl ResolvedMemberIndex {
                 {
                     argument_labels.extend(arguments.written.iter().filter_map(|arg| {
                         let span = SourceSpan::new(file.source(), Span::without_point(arg.label?));
-                        Some((span, arg.parameter))
+                        Some((span, ParameterDeclaration::Method(arg.parameter)))
                     }));
                     resolved_arguments.insert(call.origin.span().range().start(), arguments);
                 }
@@ -398,7 +425,7 @@ impl ResolvedMemberIndex {
             let reads = parameter_uses
                 .iter()
                 .map(|(span, slot)| (parameters[*slot].symbol(), *span));
-            let labels = argument_labels.iter().map(|(span, p)| (p.parameter, *span));
+            let labels = argument_labels.iter().map(|(span, p)| (p.symbol(), *span));
             for (parameter, span) in merge_sites(reads, labels) {
                 index.references.entry(parameter).or_default().push(span);
             }
@@ -428,6 +455,7 @@ impl ResolvedMemberIndex {
                     constructor_types,
                     method_types,
                     constructions,
+                    construction_arguments,
                     parents,
                     class_declarations,
                     locals,
@@ -500,6 +528,20 @@ impl ResolvedMemberIndex {
         sites
             .get(i)
             .filter(|s| s.origin.span().range().contains(offset))
+    }
+
+    /// Looks up the innermost completed argument list at a UTF-8 insertion
+    /// position in this revision. Returns the selected source constructor and
+    /// arguments only for a checked explicit allocation of a plain primary clause.
+    /// A nested method call, rejected construction or unfinished list yields `None`.
+    pub fn construction_arguments_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<&crate::ResolvedConstructionArguments> {
+        let file = self.files.get(&source)?;
+        let list = file.call_arguments.at(offset)?;
+        file.construction_arguments.get(&list.range.start())
     }
 
     /// Resolves a UTF-8 byte within the name of a single, unqualified, explicit
@@ -621,7 +663,7 @@ impl ResolvedMemberIndex {
         }
     }
 
-    /// Looks up a plain primary constructor parameter at its declaration or a committed read. Parent argument reads require [`Self::build_with_headers`].
+    /// Looks up a plain primary constructor parameter at its declaration, a named argument label or a committed read. Parent argument reads require [`Self::build_with_headers`].
     /// Includes unused parameters. Explicit constructor fields, contextual and
     /// multiple lists, by-name, repeated and defaulted parameters are outside this query.
     pub fn constructor_parameter_at(
@@ -669,8 +711,7 @@ impl ResolvedMemberIndex {
         if let Some((origin, slot)) = use_at(&file.parameter_uses, offset) {
             return Some((origin, file.parameters[slot]));
         }
-        let (origin, p) = use_at(&file.argument_labels, offset)?;
-        Some((origin, ParameterDeclaration::Method(p)))
+        use_at(&file.argument_labels, offset)
     }
 
     /// Gets the committed read or write at a written field name. The

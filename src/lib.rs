@@ -168,7 +168,7 @@ mod source_parameters;
 pub use source_parameters::{SourceConstructorParameter, SourceMethodParameter};
 
 mod source_construction;
-pub use source_construction::ResolvedSourceConstruction;
+pub use source_construction::{ResolvedConstructionArguments, ResolvedSourceConstruction};
 mod source_field_access;
 pub use source_field_access::{
     FieldAccessKind, ResolvedFieldAccess, ValueAccessKind, selected_field_access,

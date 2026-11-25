@@ -3303,3 +3303,47 @@ class Use { def cross(o: Ops): Int = { val right = 4; o.diff(right = right) } }"
         );
     }
 }
+
+#[test]
+fn named_construction_labels_target_class_parameters_across_files() {
+    let pair = (
+        SourceId::from_index(8),
+        "Pair.scala",
+        "class Pair(left: Int, right: Int)",
+    );
+    let factory = (
+        SourceId::from_index(3),
+        "Factory.scala",
+        "class Factory { def make(): Pair = { val right = 4; new Pair(right = right, left = 9) } }",
+    );
+    for files in [[factory, pair], [pair, factory]] {
+        super::with_plan(&files, |plan, _, sources, bodies, _| {
+            let index =
+                dotty::ResolvedMemberIndex::build(sources, bodies, plan.typed_ast, plan.store);
+            let label = factory.2.find("right = right").unwrap() as u32;
+            let args = index.construction_arguments_at(factory.0, label).unwrap();
+            let site = index.construction_at(factory.0, label - 5).unwrap();
+            assert_eq!(*site, args.construction);
+            for (arg, (token, ordinal)) in args.written.iter().zip([("right", 1), ("left", 0)]) {
+                let p = index
+                    .constructor_parameter_at(pair.0, pair.2.find(token).unwrap() as u32)
+                    .unwrap();
+                assert_eq!((arg.parameter, arg.ordinal), (p, ordinal));
+                assert_ne!(p.formal, p.parameter);
+                assert_eq!(p.constructor, site.constructor);
+                assert_eq!(
+                    index.constructor_parameter_at(factory.0, arg.label.unwrap().start()),
+                    Some(p)
+                );
+                assert_eq!(index.references_to(p.parameter).len(), 1);
+            }
+            assert_eq!(args.written.len(), 2);
+            let local = index.symbol_at(factory.0, label + 8).unwrap();
+            assert_eq!(local.kind, dotty::core::SymbolKind::Local);
+            assert_eq!(
+                local.target.name.start(),
+                factory.2.find("right = 4").unwrap() as u32
+            );
+        });
+    }
+}

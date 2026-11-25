@@ -8,10 +8,10 @@ use crate::{ResolvedSourceCall, SourceMethodParameter};
 
 /// One explicitly supplied argument of a checked source call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolvedWrittenArgument {
-    /// Canonical parameter of the selected overload and its declaration ranges.
-    pub parameter: SourceMethodParameter,
-    /// Zero-based position in the method's single value parameter clause.
+pub struct ResolvedWrittenArgument<P = SourceMethodParameter> {
+    /// Canonical source parameter and its declaration ranges.
+    pub parameter: P,
+    /// Zero-based position in the callable's single value parameter clause.
     pub ordinal: usize,
     /// Entire argument, including the label and equals sign when present.
     /// UTF-8 byte offsets are relative to the file containing the call.
@@ -75,22 +75,7 @@ impl ResolvedCallArguments {
         {
             return None;
         }
-        let mut labels = list.named_arguments.iter().peekable();
-        let mut written = Vec::with_capacity(list.arguments.len());
-        for (slot, &range) in list.arguments.iter().enumerate() {
-            let ordinal = match binding {
-                Some(b) => *b.written_to_formal.get(slot)?,
-                None if list.positional => slot,
-                None => return None,
-            };
-            let label = labels.next_if(|l| l.written == slot).map(|l| l.label);
-            written.push(ResolvedWrittenArgument {
-                parameter: *formals.get(ordinal)?,
-                ordinal,
-                range,
-                label,
-            });
-        }
+        let written = written_arguments(list, formals, binding)?;
         let defaulted = omitted
             .iter()
             .map(|d| {
@@ -103,8 +88,32 @@ impl ResolvedCallArguments {
             .collect::<Option<_>>()?;
         Some(Self {
             call,
-            written: written.into_boxed_slice(),
+            written,
             defaulted,
         })
     }
+}
+
+pub(crate) fn written_arguments<P: Copy>(
+    list: &CallArgumentList,
+    formals: &[P],
+    binding: Option<&NamedCallBinding>,
+) -> Option<Box<[ResolvedWrittenArgument<P>]>> {
+    let mut labels = list.named_arguments.iter().peekable();
+    let mut written = Vec::with_capacity(list.arguments.len());
+    for (slot, &range) in list.arguments.iter().enumerate() {
+        let ordinal = match binding {
+            Some(b) => *b.written_to_formal.get(slot)?,
+            None if list.positional => slot,
+            None => return None,
+        };
+        let label = labels.next_if(|l| l.written == slot).map(|l| l.label);
+        written.push(ResolvedWrittenArgument {
+            parameter: *formals.get(ordinal)?,
+            ordinal,
+            range,
+            label,
+        });
+    }
+    Some(written.into_boxed_slice())
 }
