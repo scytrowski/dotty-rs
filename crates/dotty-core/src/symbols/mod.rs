@@ -15,5 +15,5 @@ pub use kind::SymbolKind;
 pub use origin::{OriginTable, SymbolOrigin};
 pub use scope::{Scope, ScopeArena};
 pub use symbol::{Symbol, SymbolLinks};
-pub use table::SymbolTable;
+pub use table::{RequiredPrimaryClause, SymbolTable};
 pub use visibility::Visibility;

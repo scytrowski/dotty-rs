@@ -2889,8 +2889,11 @@ impl Namer<'_> {
         };
         let constructor = constructor.clone();
         let mut private_local_parameters = Vec::new();
-        let mut plain_primary_clause =
-            constructor.type_params.is_empty() && constructor.value_param_clauses.len() == 1;
+        use dotty_core::ast::ConstructorParameterKind;
+        use dotty_core::symbols::RequiredPrimaryClause;
+        let mut primary_clause = (constructor.type_params.is_empty()
+            && constructor.value_param_clauses.len() == 1)
+            .then_some(RequiredPrimaryClause::Plain);
         for parameter_tree in &constructor.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -2939,16 +2942,22 @@ impl Namer<'_> {
                         expected: "constructor ValDef with ParamAccessor metadata",
                     });
                 }
-                plain_primary_clause &= parameter.rhs.is_none()
-                    && parameter.metadata.modifiers
-                        == [Modifier::ParamAccessor, Modifier::PrivateLocal]
-                    && self.arena.try_get(parameter.tpt).is_some_and(|ty| {
-                        !matches!(
-                            ty.kind,
-                            TreeKind::ByNameTypeTree(_)
-                                | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
-                        )
-                    });
+                primary_clause = primary_clause.and_then(|shape| {
+                    match parameter.constructor_parameter_kind(self.arena)? {
+                        ConstructorParameterKind::Plain => Some(shape),
+                        ConstructorParameterKind::Val | ConstructorParameterKind::Var => {
+                            let owner = self.store.symbols.get(symbol);
+                            (owner.kind == SymbolKind::Class
+                                && owner
+                                    .flags
+                                    .intersection(
+                                        SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::GIVEN,
+                                    )
+                                    .is_empty())
+                            .then_some(RequiredPrimaryClause::WithFields)
+                        }
+                    }
+                });
                 let private_local = parameter
                     .metadata
                     .modifiers
@@ -3016,10 +3025,10 @@ impl Namer<'_> {
             scope,
             constructor_spec,
         )?;
-        if plain_primary_clause {
+        if let Some(shape) = primary_clause {
             self.store
                 .symbols
-                .record_plain_primary_clause(constructor_symbol);
+                .record_required_primary_clause(constructor_symbol, shape);
         }
         self.index
             .record_declaration_context(constructor_symbol, class_source_context)?;
@@ -7097,6 +7106,66 @@ mod tests {
                 .unwrap()]
         );
         assert!(field_context.parent.is_some());
+    }
+
+    #[test]
+    fn mixed_primary_clauses_keep_field_and_formal_owners_separate() {
+        let mut arena = AstArena::new();
+        let mut store = SemanticStore::new();
+        let source = SourceId::from_index(20);
+        let mut classes = Vec::new();
+        let mut all = Vec::new();
+        for name in ["A", "B"] {
+            let params = [
+                (
+                    "seed",
+                    vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+                ),
+                ("id", vec![Modifier::ParamAccessor]),
+                ("count", vec![Modifier::ParamAccessor, Modifier::Var]),
+            ]
+            .map(|(n, mods)| value_parameter(&mut arena, &mut store, n, mods, None));
+            let (class, ctor) = class_definition_with_header(
+                &mut arena,
+                &mut store,
+                name,
+                vec![],
+                vec![],
+                None,
+                vec![],
+                vec![params.to_vec()],
+                None,
+            );
+            classes.push(class);
+            all.push((class, ctor, params));
+        }
+        let root = package_with_stat(&mut arena, &mut store, "fields", classes);
+        let index = name_package(&arena, root, 20, &mut store, &mut Packages::new()).unwrap();
+        let mut unique = std::collections::HashSet::new();
+        for (class, ctor, params) in all {
+            let class = index.symbol_at(source, class).unwrap();
+            let ctor = index.symbol_at(source, ctor).unwrap();
+            assert_eq!(
+                store.symbols.required_primary_clause(ctor),
+                Some(dotty_core::symbols::RequiredPrimaryClause::WithFields)
+            );
+            assert!(!store.symbols.has_plain_primary_clause(ctor));
+            for (tree, (kind, mutable)) in params.into_iter().zip([
+                (SymbolKind::Parameter, false),
+                (SymbolKind::Field, false),
+                (SymbolKind::Field, true),
+            ]) {
+                let decl = index.symbol_at(source, tree).unwrap();
+                let formal = index.derived_symbol_at(ctor, source, tree).unwrap();
+                assert!(unique.insert(decl) && unique.insert(formal));
+                let s = store.symbols.get(decl);
+                assert_eq!(
+                    (s.kind, s.owner, s.flags.contains(SymbolFlags::MUTABLE)),
+                    (kind, Some(class), mutable)
+                );
+                assert_eq!(store.symbols.owner(formal), Some(ctor));
+            }
+        }
     }
 
     #[test]
