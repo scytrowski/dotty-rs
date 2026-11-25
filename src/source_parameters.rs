@@ -94,6 +94,39 @@ pub(crate) fn declarations(
     result
 }
 
+pub(crate) fn constructor_declarations(
+    file: &NamedClassSource,
+    class: &crate::source_declarations::SourceClass,
+    store: &SemanticStore,
+) -> Option<Box<[SourceConstructorParameter]>> {
+    let SourceDefinition::Canonical { source, tree } =
+        file.index().definition_of(class.constructor)?
+    else {
+        return None;
+    };
+    if source != file.source() {
+        return None;
+    }
+    let mut list = Vec::new();
+    collect_list(
+        file,
+        Declaration {
+            tree,
+            symbol: class.constructor,
+        },
+        Some(class.symbol),
+        store,
+        &mut list,
+    )
+    .ok()?;
+    list.into_iter()
+        .map(|p| match p {
+            ParameterDeclaration::Constructor(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
 fn collect_list(
     file: &NamedClassSource,
     callable: Declaration,

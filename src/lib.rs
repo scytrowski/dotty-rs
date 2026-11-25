@@ -143,6 +143,7 @@ pub use source_declaration_index::{
 mod incomplete_calls;
 pub use incomplete_calls::{
     ActiveCallSignature, CallSignatureCandidate, CallSignatureCandidates, IncompleteCallIndex,
+    ProvisionalConstructorSignature,
 };
 
 mod source_call_bindings;

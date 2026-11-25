@@ -3611,3 +3611,64 @@ fn named_parent_rejects_swapped_typed_int_operands() {
         })
     );
 }
+
+#[test]
+fn unfinished_allocation_uses_the_visible_primary_constructor() {
+    let files = [
+        (
+            SourceId::from_index(1),
+            "Other.scala",
+            "package other\nclass Base(flag: Boolean)",
+        ),
+        (
+            SourceId::from_index(2),
+            "Base.scala",
+            "package demo\nclass Base(seed: Int, val id: Int, var count: Int)",
+        ),
+    ];
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 2),
+        &mut store,
+        &mut packages,
+    );
+    complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let sources = NamedClassSources::new(&units, &store).unwrap();
+    let id = SourceId::from_index(4);
+    let text = "package demo\nclass Use { def make(): Base = new Base(";
+    let parsed = dotty::parse_source(id, text, Default::default())
+        .unwrap()
+        .bind(&mut store.names);
+    let pending =
+        dotty::IncompleteCallIndex::build(&sources, [("Use.scala", parsed)], store, defs, packages);
+    let help = pending
+        .primary_constructor_at(id, text.len() as u32)
+        .unwrap();
+    let base = &units[1].classes()[0];
+    assert_eq!(
+        (help.instance.symbol, help.constructor),
+        (base.symbol, base.constructor)
+    );
+    assert_eq!(help.usage, dotty::SourceConstructorUse::Allocation);
+    assert_eq!(help.active_parameter, 0);
+    use dotty::ConstructorParameterKind::{Plain, Val, Var};
+    assert_eq!(
+        help.declarations.iter().map(|p| p.kind).collect::<Vec<_>>(),
+        [Plain, Val, Var]
+    );
+    for ((p, d), name) in help
+        .parameters
+        .iter()
+        .zip(help.declarations)
+        .zip(["seed", "id", "count"])
+    {
+        assert_eq!((&*p.name, p.ty.ty), (name, defs.int));
+        assert_eq!(
+            (d.constructor, d.target.source),
+            (base.constructor, files[1].0)
+        );
+    }
+}

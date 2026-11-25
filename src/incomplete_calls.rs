@@ -1,4 +1,7 @@
 //! Provisional signatures for unfinished calls in a disposable editor revision.
+mod constructor;
+use constructor::ConstructorCandidate;
+pub use constructor::ProvisionalConstructorSignature;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
@@ -75,6 +78,7 @@ struct FileCandidates {
     syntax: Arc<SourceCallArguments>,
     // For each recovered application, number of consecutive written arguments
     // compatible with each candidate. Earlier cursor positions reuse the prefix.
+    constructors: HashMap<TreeId<Untyped>, ConstructorCandidate>,
     matches: HashMap<TreeId<Untyped>, Vec<CandidatePrefix>>,
 }
 
@@ -178,12 +182,19 @@ impl IncompleteCallIndex {
                 defs,
                 &packages,
             );
+            let mut constructors = HashMap::new();
             let mut matches = HashMap::new();
             for list in syntax.unfinished_lists().filter(|list| list.regular) {
                 let Some(tree) = list.unfinished else {
                     continue;
                 };
-                let Some(callee) = list.callee else { continue };
+                let allocation = match list.constructor {
+                    Some(crate::parser::ConstructorSyntax::Allocation(name)) => Some(name),
+                    _ => None,
+                };
+                let Some(callee) = allocation.or(list.callee) else {
+                    continue;
+                };
                 while methods
                     .peek()
                     .is_some_and(|(range, _)| range.end() <= callee.start())
@@ -194,6 +205,25 @@ impl IncompleteCallIndex {
                     break;
                 };
                 if !range.contains(callee.start()) {
+                    continue;
+                }
+                if allocation.is_some() {
+                    if list.positional
+                        && list.arguments.is_empty()
+                        && let Ok(Some(Some(candidate))) =
+                            typer.inspect_method_expression(owner, tree, |probe, context| {
+                                ConstructorCandidate::capture(
+                                    file,
+                                    list,
+                                    &all,
+                                    probe,
+                                    context,
+                                    crate::SourceConstructorUse::Allocation,
+                                )
+                            })
+                    {
+                        constructors.insert(tree, candidate);
+                    }
                     continue;
                 }
                 if let Ok(Some(Some(found))) =
@@ -208,11 +238,26 @@ impl IncompleteCallIndex {
                 file.source(),
                 FileCandidates {
                     syntax: Arc::clone(syntax),
+                    constructors,
                     matches,
                 },
             );
         }
         index
+    }
+
+    /// Looks up the source primary constructor at a UTF-8 insertion point after
+    /// an unfinished `new C(` inside a method. Requires a public constructor with
+    /// a single required parameter list and simple named types in this revision.
+    pub fn primary_constructor_at(
+        &self,
+        source: SourceId,
+        offset: u32,
+    ) -> Option<ProvisionalConstructorSignature<'_>> {
+        let file = self.files.get(&source)?;
+        let list = file.syntax.unfinished_at(offset)?;
+        let candidate = file.constructors.get(&list.application)?;
+        Some(candidate.at(0))
     }
 
     /// Returns the innermost unfinished call's alternatives at a UTF-8 insertion
