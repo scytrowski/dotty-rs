@@ -879,8 +879,15 @@ impl SourceTyper<'_> {
 
         let canonical_identity_application =
             candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol);
+        let named =
+            application_kind == ApplyKind::Regular && self.has_named_arguments(argument_trees);
         let mut arguments = Vec::with_capacity(argument_trees.len());
-        for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
+        for (argument_index, source_argument) in argument_trees.iter().enumerate() {
+            let label = match &self.arena.get(*source_argument).kind {
+                TreeKind::NamedArg(arg) if named => Some(arg),
+                _ => None,
+            };
+            let argument_tree = label.map_or(source_argument, |a| &a.arg);
             let poly_binder = if candidates.len() == 1
                 && matches!(
                     self.store.types.try_get(candidates[0].callable),
@@ -897,14 +904,15 @@ impl SourceTyper<'_> {
                     _ => callable,
                 };
                 match self.store.types.try_get(callable) {
-                    Some(Type::Method(method)) => {
-                        method.params.get(argument_index).map(|parameter| {
-                            match self.store.types.try_get(parameter.ty) {
-                                Some(Type::ByName { result }) => *result,
-                                _ => parameter.ty,
-                            }
-                        })
-                    }
+                    Some(Type::Method(method)) => label
+                        .map_or_else(
+                            || method.params.get(argument_index),
+                            |arg| method.params.iter().find(|p| *p.name.as_name() == arg.name),
+                        )
+                        .map(|parameter| match self.store.types.try_get(parameter.ty) {
+                            Some(Type::ByName { result }) => *result,
+                            _ => parameter.ty,
+                        }),
                     _ => None,
                 }
             } else {
@@ -990,13 +998,25 @@ impl SourceTyper<'_> {
         let overload_resolver_checkpoint = self.resolver.checkpoint();
         let overload_type_index_checkpoint = self.type_index.checkpoint();
         let overload_journal_checkpoint = info_journal.len();
-        let winner = match self.choose_method_overload_candidate(
-            &mut candidates,
-            &arguments,
-            application_tree_index,
-            application_kind,
-            info_journal,
-        ) {
+        let choice = if named {
+            self.rank_overload_candidates(
+                &candidates,
+                &arguments,
+                application_tree_index,
+                application_kind,
+                false,
+                Some(argument_trees),
+            )
+        } else {
+            self.choose_method_overload_candidate(
+                &mut candidates,
+                &arguments,
+                application_tree_index,
+                application_kind,
+                info_journal,
+            )
+        };
+        let winner = match choice {
             Ok(winner) => winner,
             Err(error @ TyperError::OverloadApplicationNoApplicable { .. }) => {
                 for (symbol, previous) in info_journal[overload_journal_checkpoint..]
@@ -1961,6 +1981,25 @@ impl SourceTyper<'_> {
         application_kind: ApplyKind,
         retain_unsupported_rejections: bool,
     ) -> Result<ApplicationCandidate, TyperError> {
+        self.rank_overload_candidates(
+            candidates,
+            arguments,
+            tree_index,
+            application_kind,
+            retain_unsupported_rejections,
+            None,
+        )
+    }
+
+    fn rank_overload_candidates(
+        &mut self,
+        candidates: &[ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        application_kind: ApplyKind,
+        retain_unsupported_rejections: bool,
+        named: Option<&[TreeId<Untyped>]>,
+    ) -> Result<ApplicationCandidate, TyperError> {
         let mut applicable = Vec::new();
         let mut rejected = Vec::new();
         let mut unsupported_candidates = Vec::new();
@@ -2030,11 +2069,45 @@ impl SourceTyper<'_> {
                 ));
                 continue;
             }
+            let slots = if let Some(trees) = named {
+                match self.bind_named_arguments(
+                    application_kind,
+                    candidate.callable,
+                    trees,
+                    tree_index,
+                ) {
+                    Ok(slots) => slots,
+                    Err(err) => {
+                        let (tree_index, reason) = match err {
+                            TyperError::UnknownNamedArgument {
+                                tree_index, name, ..
+                            } => (tree_index, NamedArgumentRejection::Unknown(name)),
+                            TyperError::DuplicateNamedArgument {
+                                tree_index, name, ..
+                            } => (tree_index, NamedArgumentRejection::Duplicate(name)),
+                            TyperError::PositionalAfterNamedArgument { tree_index, .. } => {
+                                (tree_index, NamedArgumentRejection::MisplacedPositional)
+                            }
+                            other => return Err(other),
+                        };
+                        rejected.push((
+                            candidate.symbol,
+                            OverloadRejection::NamedArgument { tree_index, reason },
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let mut argument_rejection = None;
             let mut unsupported_relation = false;
-            for (argument_index, (argument, parameter)) in
-                arguments.iter().zip(&method.params).enumerate()
-            {
+            for (formal, parameter) in method.params.iter().take(arguments.len()).enumerate() {
+                let argument_index = slots
+                    .as_ref()
+                    .and_then(|s| s[formal].as_ref())
+                    .map_or(formal, |a| a.written);
+                let argument = &arguments[argument_index];
                 let actual = self.adapt_pre_widened_expression_type_to_expected(
                     argument.own_type,
                     argument.widened_type,

@@ -92,6 +92,13 @@ pub enum OverloadRejection {
         /// Required semantic type identity in the caller’s type arena.
         expected: TypeId,
     },
+    /// A written argument cannot bind to this candidate's clause.
+    NamedArgument {
+        /// Offending argument tree in the caller's untyped arena.
+        tree_index: u32,
+        /// Candidate-specific reason for the binding failure.
+        reason: NamedArgumentRejection,
+    },
     /// Supported inference could not determine this candidate's type arguments.
     TypeArgumentInferenceFailure {
         /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
@@ -108,6 +115,17 @@ pub enum OverloadRejection {
     IncompleteSignature,
     /// Evaluating this candidate requires unsupported typing semantics.
     UnsupportedSemantics,
+}
+
+/// Why the written argument cannot occupy a slot in a particular overload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedArgumentRejection {
+    /// No formal has this semantic name.
+    Unknown(Name),
+    /// An earlier argument already filled this formal.
+    Duplicate(Name),
+    /// A positional operand follows a label that left an earlier slot empty.
+    MisplacedPositional,
 }
 
 fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind) -> bool {

@@ -904,3 +904,74 @@ fn ordinary_named_call_diagnostics_survive_rollback_and_retry() {
         .into_parts();
     assert!(good.errors.is_empty(), "{:?}", good.errors);
 }
+
+#[test]
+fn named_overloads_bind_each_candidates_own_labels_and_types() {
+    use crate::typer::{OverloadRejection, TyperError};
+    let methods = "class Ops { def pick(n: Int, b: Boolean): Int = n; def pick(b: Int, k: Boolean): Int = b; def swap(x: Int, y: Boolean): Int = x; def swap(y: Boolean, x: Int): Int = x }";
+    let calls = "class Use { def a(o: Ops): Int = o.pick(b = true, n = 1); def b(o: Ops): Int = o.pick(k = false, b = 2); def bad(o: Ops): Int = o.pick(n = true, b = 1); def tied(o: Ops): Int = o.swap(x = 1, y = false) }";
+    for reverse in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let ops = named(2, methods, &mut store, &mut packages);
+        let caller = named(3, calls, &mut store, &mut packages);
+        let sources = NamedClassSources::new(
+            if reverse {
+                [&caller, &ops]
+            } else {
+                [&ops, &caller]
+            },
+            &store,
+        )
+        .unwrap();
+        let mut arena = prepare_bodies(&sources, &mut store, defs, &packages);
+        let (body, report) = sources
+            .check_class_body(
+                caller.classes()[0].symbol,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                crate::core::NoResolver,
+            )
+            .into_parts();
+        let syms: Vec<_> = ops.classes()[0].methods().map(|m| m.symbol).collect();
+        let [
+            crate::ClassBodyError::Member {
+                error:
+                    TyperError::OverloadApplicationNoApplicable {
+                        candidates: rejected,
+                        ..
+                    },
+                ..
+            },
+            crate::ClassBodyError::Member {
+                error:
+                    TyperError::AmbiguousOverloadApplication {
+                        candidates: tied, ..
+                    },
+                ..
+            },
+        ] = report.errors.as_slice()
+        else {
+            panic!("{report:?}")
+        };
+        assert!(
+            matches!(rejected.as_slice(),[(a, OverloadRejection::ArgumentNonConformance {argument_index:0,..}),(b,OverloadRejection::NamedArgument{..})] if [*a,*b] == syms[..2])
+        );
+        assert_eq!(*tied, syms[2..]);
+        let mut bodies = CheckedClassBodies::default();
+        bodies.record(body).unwrap();
+        let index = ResolvedMemberIndex::build(&sources, &bodies, &arena, &store);
+        for (i, name) in ["pick(b =", "pick(k ="].into_iter().enumerate() {
+            assert_eq!(
+                index
+                    .call_at(caller.source(), calls.find(name).unwrap() as u32)
+                    .unwrap()
+                    .method,
+                syms[i]
+            );
+        }
+    }
+}
