@@ -641,3 +641,30 @@ fn bare_initializer_call_narrows_only_after_its_third_argument() {
         "Int"
     );
 }
+
+#[test]
+fn unfinished_calls_offer_plain_private_overloads_only_inside_the_owner() {
+    let methods = "def pick(n: Int, tail: Int): Int = n; private def pick(b: Boolean, tail: Boolean): Boolean = b";
+    for (caller, prefix, expected) in [
+        ("", "this.pick(", vec!["Int", "Boolean"]),
+        ("", "pick(false, ", vec!["Boolean"]),
+        ("", "other.pick(false, ", vec!["Boolean"]),
+        ("}; class Outside {", "other.pick(", vec!["Int"]),
+        ("}; class Outside {", "other.pick(false, ", vec![]),
+    ] {
+        let text = format!("class Ops {{ {methods}; {caller} def run(other: Ops): Int = {prefix}");
+        let (index, id) = unfinished_in_one_file(&text);
+        let help = index.at(id, text.len() as u32);
+        let names = help.as_ref().map(|h| {
+            h.candidates
+                .iter()
+                .map(|c| c.parameters[1].ty.name.as_ref())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            names.as_deref(),
+            (!expected.is_empty()).then_some(expected.as_slice()),
+            "{text}"
+        );
+    }
+}

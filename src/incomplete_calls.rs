@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
     AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SymbolId, SymbolKind,
-    TreeId, TreeKind, TypeId, Untyped, Visibility,
+    TreeId, TreeKind, TypeId, Untyped,
 };
 use crate::parser::{CallArgumentList, SourceCallArguments};
 use crate::typer::{ExpressionContext, SourceTyper};
@@ -63,7 +63,7 @@ impl IncompleteCallIndex {
     /// Recovered naming and signature preparation use the consumed store and
     /// packages. Only owned candidate data escapes. Unavailable declarations,
     /// rejected contexts and unsupported calls contribute no candidates.
-    /// Clean provider signatures must already be complete. Public source methods
+    /// Clean provider signatures must already be complete. Accessible source methods
     /// with one plain positional list and named parameter and result types are
     /// supported for unqualified calls and explicit receivers. The written
     /// arguments and any receiver are typed in their lexical
@@ -266,7 +266,10 @@ fn prefix_candidates(
         .collect();
     let mut found = Vec::new();
     for method in methods {
-        if typer.store().symbols.get(method).visibility != Visibility::Public {
+        if !typer
+            .is_member_accessible_at(method, app.function, context)
+            .ok()?
+        {
             continue;
         }
         let Some((provider, _)) = all.declaration(method) else {
