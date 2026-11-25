@@ -348,6 +348,65 @@ impl LocalMethodIndex {
     }
 }
 
+// Keep back-pointers while walking so sibling expressions share their outer
+// prefix. Materialize only the path to the requested tree, outermost first.
+fn expression_block_prefixes(
+    arena: &AstArena<Untyped>,
+    root: TreeId<Untyped>,
+    target: TreeId<Untyped>,
+) -> Option<Vec<&[TreeId<Untyped>]>> {
+    let mut paths: Vec<(Option<usize>, &[TreeId<Untyped>])> = Vec::new();
+    let mut work = vec![(root, None)];
+    let mut visited = HashSet::new();
+    while let Some((tree, mut path)) = work.pop() {
+        if tree == target {
+            let mut prefixes = Vec::new();
+            while let Some(index) = path {
+                let (outer, stats) = paths[index];
+                prefixes.push(stats);
+                path = outer;
+            }
+            prefixes.reverse();
+            return Some(prefixes);
+        }
+        if !visited.insert(tree) {
+            continue;
+        }
+        match &arena.try_get(tree)?.kind {
+            TreeKind::Apply(app) => {
+                work.push((app.function, path));
+                work.extend(app.args.iter().map(|&arg| (arg, path)));
+            }
+            TreeKind::Select(select) => work.push((select.qualifier, path)),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(p)) => work.push((p.inner, path)),
+            TreeKind::Block(block) => {
+                // Methods and lazy values can be visible before their declaration.
+                // Do not approximate a scope containing unsupported declarations.
+                if !block.stats.iter().all(|&stat| {
+                    arena.try_get(stat).is_some_and(|n| match &n.kind {
+                        TreeKind::ValDef(v) => {
+                            matches!(
+                                v.metadata.modifiers.as_slice(),
+                                [] | [Modifier::Var] | [Modifier::Final]
+                            ) && v.metadata.visibility.is_none()
+                                && v.metadata.annotations.is_empty()
+                        }
+                        kind => local_block_declaration_kind(kind).is_none(),
+                    })
+                }) {
+                    continue;
+                }
+                for (n, &child) in block.stats.iter().chain([&block.expr]).enumerate() {
+                    work.push((child, Some(paths.len())));
+                    paths.push((path, &block.stats[..n]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl SourceTyper<'_> {
     fn patdef_deferred(&self, tree: TreeId<Untyped>) -> TyperError {
         TyperError::LocalBlockDeclarationDeferred {
@@ -2242,6 +2301,82 @@ impl SourceTyper<'_> {
         )
     }
 
+    fn enter_expression_block(
+        &mut self,
+        context: ExpressionContext,
+    ) -> Result<(ScopeId, ExpressionContext), TyperError> {
+        let block_scope = self
+            .store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(context.owner)));
+        let block_context = self.push_local_scope(context, block_scope)?;
+        if let Some(frame) = block_context
+            .local_scopes
+            .and_then(|stack| self.expression_scopes.get_mut(stack.index()))
+        {
+            frame.is_block_scope = true;
+        }
+        Ok((block_scope, block_context))
+    }
+
+    /// Inspects an expression in a source method without typing the target or the
+    /// remainder of its body. Supply the canonical method and target tree from
+    /// this file. The path may cross applications, selections, parentheses and
+    /// blocks containing ordinary eager local values, variables and expressions.
+    /// A target outside that subset or outside the method yields `Ok(None)`.
+    ///
+    /// Each enclosing block introduces a lexical scope. Preceding statements
+    /// are typed in order using the normal block rules. A failed prefix returns
+    /// its typing error and rolls back its allocations. The callback receives
+    /// a separate driver whose typed trees and contexts are valid only during
+    /// inspection. Successful semantic allocations remain in the session store.
+    pub fn inspect_method_expression<T>(
+        &mut self,
+        owner: SymbolId,
+        target: TreeId<Untyped>,
+        inspect: impl FnOnce(&mut SourceTyper<'_>, ExpressionContext) -> T,
+    ) -> Result<Option<T>, TyperError> {
+        let Some((source, method)) = self.source_tree_for_symbol(owner) else {
+            return Ok(None);
+        };
+        let Some(node) = self.arena.try_get(method) else {
+            return Ok(None);
+        };
+        let TreeKind::DefDef(def) = &node.kind else {
+            return Ok(None);
+        };
+        let Some(root) = def.rhs.filter(|_| source == self.source) else {
+            return Ok(None);
+        };
+        let Some(prefixes) = expression_block_prefixes(self.arena, root, target) else {
+            return Ok(None);
+        };
+        let mut probe = SourceTyper::new(
+            self.arena,
+            self.source,
+            self.index,
+            self.store,
+            self.definitions,
+            self.packages,
+        )
+        .with_resolver(Box::new(&mut *self.resolver));
+        let context = probe.run_expression_transaction(|typer, journal, mappings| {
+            let mut context = typer.expression_context_for(owner)?;
+            if let Some(scope) = typer.enclosing_method_type_scope(context)? {
+                typer.active_local_type_scopes.push(scope);
+            }
+            for prefix in prefixes {
+                context = typer.enter_expression_block(context)?.1;
+                for &stat in prefix {
+                    typer.type_block_stat_expansion(stat, context, journal, mappings)?;
+                }
+            }
+            Ok(context)
+        })?;
+        probe.active_local_type_scopes.clear();
+        Ok(Some(inspect(&mut probe, context)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn type_block_expression_inner(
         &mut self,
@@ -2261,17 +2396,7 @@ impl SourceTyper<'_> {
                 )
             })
         });
-        let block_scope = self
-            .store
-            .scopes
-            .alloc(dotty_core::Scope::new(Some(context.owner)));
-        let block_context = self.push_local_scope(context, block_scope)?;
-        if let Some(frame) = block_context
-            .local_scopes
-            .and_then(|stack| self.expression_scopes.get_mut(stack.index()))
-        {
-            frame.is_block_scope = true;
-        }
+        let (block_scope, block_context) = self.enter_expression_block(context)?;
         self.preindex_local_methods(&block.stats, block_context, block_scope)?;
         self.preindex_local_lazy_values(&block.stats, block_context, block_scope, info_journal)?;
         let mut stats = Vec::with_capacity(block.stats.len());

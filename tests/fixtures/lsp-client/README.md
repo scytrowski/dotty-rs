@@ -48,6 +48,9 @@ unfinished call the fixture keeps the parser diagnostics, then builds an
 signatures in lookup order and the cursor slot. Hover continues to require a
 committed target. The four-parameter stdio test keeps two overloads through
 the first two arguments and narrows them when the third argument is typed.
+A second stdio test keeps the call unchanged, edits the local third argument’s
+initializer from `2` to `false`, then undoes the edit. The fourth formal
+changes from `Boolean` to `Int` and back in both position encodings.
 
 The references request accepts positions on direct calls, supported field accesses, method parameter
 reads, ordinary method-local values and variables, and their declaration names. Field queries cover public selections,
