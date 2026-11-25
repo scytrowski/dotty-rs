@@ -195,3 +195,9 @@ label selects formal 1 and the second selects formal 0. The two `id` tokens
 navigate to the parent field and child parameter respectively. Renaming
 `Base.count` invalidates the old label in the unchanged child document.
 Updating the child restores its signature, references and definition link.
+
+For an unfinished `new Base(` or `extends Base(`, the fixture reads a provisional
+primary signature from `IncompleteCallIndex`. The active parameter follows the
+written label while parser diagnostics remain visible. The stdio test renames a
+provider parameter, repairs the label and closes the list. The final definition
+link comes from the newly checked revision.
