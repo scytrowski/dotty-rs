@@ -27695,6 +27695,53 @@ mod tests {
     }
 
     #[test]
+    fn inspect_method_expression_types_only_the_enclosing_block_prefixes() {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+            "class C { def run: Int = { val n: Int = 1; var copy = n; { val n = true; n }; copy; missing } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+        let TreeKind::Block(outer) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let TreeKind::Block(inner) = &parsed.ast.get(outer.stats[2]).kind else {
+            panic!()
+        };
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        typer.complete_symbol(method).unwrap();
+        for (target, expected) in [(inner.expr, defs.boolean), (outer.stats[3], defs.int)] {
+            let result = typer
+                .inspect_method_expression(method, target, |probe, ctx| {
+                    let typed = probe.type_expression(target, ctx).unwrap();
+                    probe
+                        .widen_expression_type(probe.typed_ast().get(typed).ty)
+                        .unwrap()
+                })
+                .unwrap();
+            assert_eq!(result, Some(expected));
+        }
+        assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn failed_probe_prefix_rolls_back_and_never_inspects_the_target() {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+            "class C { def run: Int = { val first = 1; val broken = missing; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        typer.complete_symbol(method).unwrap();
+        let before = typer.store().checkpoint();
+        assert!(matches!(
+            typer.inspect_method_expression(method, block.expr, |_, _| panic!()),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+    }
+
+    #[test]
     fn failed_later_block_statement_rolls_back_local_symbols_and_scope_entries() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local: Int = 1; missing } }");

@@ -12,7 +12,7 @@ use dotty_namer::{name_compilation_unit_with_diagnostics, NamingOutcome, SourceP
 use dotty_typer::SourceTyper;
 
 let source = SourceId::from_index(0);
-let text = "class Answer { def value: Int = 42 }";
+let text = "class Answer { def value: Int = { val n = 42; n } }";
 let mut store = SemanticStore::new();
 let definitions = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
@@ -39,6 +39,14 @@ let (method, _) = parsed.ast.iter()
 let mut typer = SourceTyper::new(
     &parsed.ast, source, &index, &mut store, definitions, &packages,
 );
+let owner = index.symbol_at(source, method).ok_or("expected method symbol")?;
+let TreeKind::DefDef(def) = &parsed.ast.get(method).kind else { unreachable!() };
+let TreeKind::Block(body) = &parsed.ast.get(def.rhs.unwrap()).kind else { unreachable!() };
+let value_type = typer.inspect_method_expression(owner, body.expr, |probe, ctx| {
+    let result = probe.type_expression(body.expr, ctx)?;
+    probe.widen_expression_type(probe.typed_ast().get(result).ty)
+})?.ok_or("unsupported expression path")??;
+assert_eq!(value_type, definitions.int);
 let typed = typer.type_method_definition(method)?;
 assert!(matches!(typer.typed_ast().get(typed).kind, TreeKind::DefDef(_)));
 # Ok::<(), Box<dyn std::error::Error>>(())
