@@ -302,3 +302,146 @@ fn forged_floating_bits_bindings_types_and_returns_fail_read_only() {
         }
     }
 }
+
+#[test]
+fn floating_matches_and_proved_abrupt_tails_compose() {
+    for ty in ["Float", "Double"] {
+        for body in [
+            "x match { case 0 | 1 if flag => a; case _ => b }",
+            "x match { case n if n > 0 => a; case _ => b }",
+            "x match { case 0 | 1 => return a; case _ => b }",
+            "if flag then { return a; b } else b",
+            "if flag then { val saved = b; return a; saved } else b",
+        ] {
+            emit(&format!(
+                "def f(x: Int, flag: Boolean, a: {ty}, b: {ty}): {ty} = {body}"
+            ));
+        }
+    }
+}
+
+fn frames(
+    file: &dotty_classfile::class_file::ClassFile<'_>,
+    name: &str,
+) -> Vec<(u32, Vec<u8>, Vec<u8>)> {
+    use dotty_classfile::{attribute::Attribute, reader::Reader};
+    fn types(r: &mut Reader<'_>) -> Vec<u8> {
+        let count = r.read_u16().unwrap();
+        (0..count)
+            .map(|_| {
+                let tag = r.read_u8().unwrap();
+                assert!(tag <= 8);
+                if tag == 7 || tag == 8 {
+                    r.read_u16().unwrap();
+                }
+                tag
+            })
+            .collect()
+    }
+    let method = file
+        .methods
+        .iter()
+        .find(|m| file.constant_pool.utf8(m.name_index) == Ok(name))
+        .unwrap();
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!()
+    };
+    let data = code
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            Attribute::Other(raw)
+                if file.constant_pool.utf8(raw.name_index) == Ok("StackMapTable") =>
+            {
+                Some(raw.bytes)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut r = Reader::new(data);
+    let count = r.read_u16().unwrap();
+    let mut previous: i32 = -1;
+    (0..count)
+        .map(|_| {
+            assert_eq!(r.read_u8().unwrap(), 255);
+            let pc = previous + i32::from(r.read_u16().unwrap()) + 1;
+            previous = pc;
+            (pc as u32, types(&mut r), types(&mut r))
+        })
+        .collect()
+}
+
+#[test]
+fn floating_match_frames_and_opcodes_keep_exact_kinds_and_slot_widths() {
+    use dotty_classfile::{attribute::Attribute, class_file::ClassFile, reader::Reader};
+    let pair = emit(
+        "def f(x: Int, a: Float, b: Float): Float = x match { case 0 | 1 => a; case _ => b }; def d(x: Int, a: Double, b: Double): Double = x match { case 0 | 1 => a; case _ => b }; def returned(x: Int, a: Double, b: Double): Double = x match { case 0 | 1 => return a; case _ => return b }; def mixed(i: Int, a: Float, n: Long, b: Double, flag: Boolean): Double = if flag then b else -0.0",
+    );
+    let file = ClassFile::decode(&mut Reader::new(pair.classfile_bytes())).unwrap();
+    for (name, descriptor, slots, bytes, expected_frames) in [
+        (
+            "f",
+            "(IFF)F",
+            5,
+            vec![
+                0x1b, 0x36, 4, 0x15, 4, 3, 0x9f, 0, 9, 0x15, 4, 4, 0xa0, 0, 7, 0x24, 0xa7, 0, 4,
+                0x25, 0xae,
+            ],
+            vec![
+                (15, vec![7, 1, 2, 2, 1], vec![]),
+                (19, vec![7, 1, 2, 2, 1], vec![]),
+                (20, vec![7, 1, 2, 2, 1], vec![2]),
+            ],
+        ),
+        (
+            "d",
+            "(IDD)D",
+            7,
+            vec![
+                0x1b, 0x36, 6, 0x15, 6, 3, 0x9f, 0, 9, 0x15, 6, 4, 0xa0, 0, 7, 0x28, 0xa7, 0, 5,
+                0x18, 4, 0xaf,
+            ],
+            vec![
+                (15, vec![7, 1, 3, 3, 1], vec![]),
+                (19, vec![7, 1, 3, 3, 1], vec![]),
+                (21, vec![7, 1, 3, 3, 1], vec![3]),
+            ],
+        ),
+        (
+            "returned",
+            "(IDD)D",
+            7,
+            vec![
+                0x1b, 0x36, 6, 0x15, 6, 3, 0x9f, 0, 9, 0x15, 6, 4, 0xa0, 0, 5, 0x28, 0xaf, 0x18, 4,
+                0xaf,
+            ],
+            vec![
+                (15, vec![7, 1, 3, 3, 1], vec![]),
+                (17, vec![7, 1, 3, 3, 1], vec![]),
+            ],
+        ),
+    ] {
+        let method = file
+            .methods
+            .iter()
+            .find(|m| file.constant_pool.utf8(m.name_index) == Ok(name))
+            .unwrap();
+        assert_eq!(
+            file.constant_pool.utf8(method.descriptor_index),
+            Ok(descriptor)
+        );
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!()
+        };
+        assert_eq!((code.max_stack, code.max_locals), (2, slots));
+        assert_eq!(code.code, bytes);
+        assert_eq!(frames(&file, name), expected_frames);
+    }
+    let mixed = frames(&file, "mixed");
+    assert!(
+        mixed
+            .iter()
+            .all(|(_, locals, _)| locals == &[7, 1, 2, 4, 3, 1])
+    );
+    assert!(mixed.iter().any(|(_, _, stack)| stack == &[3]));
+}
