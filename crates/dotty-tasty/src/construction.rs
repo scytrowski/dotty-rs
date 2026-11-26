@@ -27,6 +27,11 @@ pub enum AstField {
     Tree(AstLabel),
     /// A raw Nat, such as a name reference after a method parameter type.
     Nat(u32),
+    /// A symbolic declaration address encoded as a Nat without emitting its
+    /// target. Currently supported only as the first RETURN payload field;
+    /// the target must be a DEFDEF in this builder. Ancestor and forward method
+    /// targets are resolved during bounded layout.
+    Reference(AstLabel),
 }
 
 /// The Nat operand of a category-four node.
@@ -327,9 +332,21 @@ impl AstBuilder {
             }
             _ => {}
         }
-        for field in node.fields() {
-            if let AstField::Tree(child) = field {
-                self.slot(child)?;
+        for (index, field) in node.fields().enumerate() {
+            match field {
+                AstField::Tree(child) => {
+                    self.slot(child)?;
+                }
+                AstField::Reference(target) => {
+                    if node.tag() != RETURN_TAG || index != 0 {
+                        return Err(AstBuildError::InvalidReference {
+                            tag: node.tag(),
+                            target,
+                        });
+                    }
+                    self.slot(target)?;
+                }
+                AstField::Nat(_) => {}
             }
         }
         if let AstNode::Reference { target, .. }
@@ -471,6 +488,18 @@ impl AstBuilder {
             };
         }
         for &label in order {
+            for field in self.node(label)?.fields() {
+                if let AstField::Reference(target) = field {
+                    if self.node(target)?.tag() != DEFDEF_TAG {
+                        return Err(AstBuildError::InvalidReference {
+                            tag: RETURN_TAG,
+                            target,
+                        });
+                    }
+                }
+            }
+        }
+        for &label in order {
             let (tag, target) = match self.node(label)? {
                 AstNode::Reference {
                     tag: SHAREDTERM_TAG | SHAREDTYPE_TAG,
@@ -532,6 +561,9 @@ impl AstBuilder {
                         match field {
                             AstField::Tree(child) => sizes[child.slot],
                             AstField::Nat(n) => nat_width(n as usize),
+                            AstField::Reference(target) => {
+                                nat_width(addresses[target.slot] as usize)
+                            }
                         },
                     )?;
                 }
@@ -556,6 +588,7 @@ impl AstBuilder {
                             sizes[child.slot]
                         }
                         AstField::Nat(n) => nat_width(n as usize),
+                        AstField::Reference(target) => nat_width(addresses[target.slot] as usize),
                     };
                     at = self.add(at, width)?;
                 }
@@ -570,6 +603,7 @@ impl AstBuilder {
             while let Some(field) = stack.pop() {
                 match field {
                     AstField::Nat(n) => writer.write_nat(n)?,
+                    AstField::Reference(target) => writer.write_nat(addresses[target.slot])?,
                     AstField::Tree(l) => {
                         let node = self.node(l)?;
                         Self::write_prefix(
