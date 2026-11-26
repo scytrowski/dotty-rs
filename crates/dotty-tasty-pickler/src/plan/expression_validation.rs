@@ -1664,6 +1664,13 @@ impl Validator<'_, '_> {
         result_type: TypeId,
     ) -> Result<(), PickleError> {
         if let (Some(source), Some(typed)) = (rhs, body)
+            && result_type == self.plan.definitions.long
+        {
+            return self
+                .validate_return_flow(source, typed, method, result_type, 0, &mut HashSet::new())
+                .map(|_| ());
+        }
+        if let (Some(source), Some(typed)) = (rhs, body)
             && [
                 self.plan.definitions.int,
                 self.plan.definitions.boolean,

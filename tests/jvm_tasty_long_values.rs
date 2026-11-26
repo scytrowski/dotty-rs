@@ -79,3 +79,23 @@ fn long_parameters_and_results_have_exact_j_descriptors_and_slots() {
         assert_eq!(code.code, expected);
     }
 }
+
+#[test]
+fn long_locals_if_while_and_local_returns_compose_in_the_real_pipeline() {
+    for method in [
+        "def f(x: Long): Long = { val saved: Long = x; saved }",
+        "def f(x: Long): Long = { val saved = x; saved }",
+        "def f(): Long = { val saved = 9000000000L; saved }",
+        "def f(a: Long, b: Long): Long = { var saved: Long = a; saved = b; saved }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = if flag then a else b",
+        "def f(flag: Boolean): Long = if flag then 1L else 9000000000L",
+        "def f(n: Int, a: Long, b: Long): Long = { var saved: Long = a; var i: Int = n; while i > 0 do { saved = b; i = i - 1 }; saved }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = { if flag then return a; b }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = if flag then return a else return b",
+        "def f(n: Int, a: Long, b: Long): Long = { var saved: Long = a; var i: Int = n; while i > 0 do { if i == 3 then return a; saved = b; i = i - 1 }; saved }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = { val saved: Long = if flag then a else b; saved }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = { var saved: Long = a; saved = if flag then b else a; saved }",
+    ] {
+        emit(method);
+    }
+}

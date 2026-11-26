@@ -27,6 +27,28 @@ impl Validator<'_, '_> {
             self.charge(1)?;
             return self.validate_long_value(parens.inner, typed_id, method, depth + 1, visited);
         }
+        if matches!(
+            typed.kind,
+            TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Match(_)
+        ) {
+            // Value positions can contain ordinary control flow, but not a
+            // nested return that would bypass the initializer/assignment/value.
+            if self.contains_local_return(source_id, typed_id) {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return self
+                .validate_return_flow(
+                    source_id,
+                    typed_id,
+                    method,
+                    p.definitions.long,
+                    depth,
+                    visited,
+                )
+                .map(|_| ());
+        }
         self.paired_source_typed_span(source.position, typed.position, typed_id)?;
         self.charge(1)?;
         if !visited.insert(typed_id) {

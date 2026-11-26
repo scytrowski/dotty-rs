@@ -165,6 +165,7 @@ impl Validator<'_, '_> {
 
         let local_type = self.complete(binding.symbol)?;
         if (local_type != self.plan.definitions.int
+            && local_type != self.plan.definitions.long
             && !reference_local_type.is_some_and(|expected| {
                 expected == local_type && self.is_planned_sibling_class_type(local_type, None)
             }))
@@ -204,7 +205,8 @@ impl Validator<'_, '_> {
             return Err(PickleError::UnsupportedTypeReference { ty: local_type });
         }
         let source_type_matches = matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
-            || (local_type == self.plan.definitions.int
+            || ((local_type == self.plan.definitions.int
+                || local_type == self.plan.definitions.long)
                 && matches!(source_tpt.kind, TreeKind::TypeTree(_)));
         if !source_type_matches
             || !matches!(typed_tpt.kind, TreeKind::TypeTree(_))
@@ -413,7 +415,7 @@ impl Validator<'_, '_> {
                 Some(source_rhs),
                 Some(typed_rhs),
                 method,
-                self.plan.definitions.int,
+                local_type,
                 rhs_depth,
                 (Some(visited), false),
             )?;
