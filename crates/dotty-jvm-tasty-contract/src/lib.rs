@@ -102,6 +102,12 @@ pub enum JvmTastyContractError {
         /// Typed root actually recorded for the source binding; absent when no binding exists.
         actual: Option<TreeId<Typed>>,
     },
+    /// The JVM local plan and TASTy bindings disagree on the exact canonical
+    /// Int local symbols, typed declarations, or mutability in this method.
+    LocalBindingMismatch {
+        /// Canonical method whose local evidence differs between producers.
+        method: SymbolId,
+    },
     /// JVM descriptor does not match the supported source-level type projection.
     DescriptorMismatch {
         /// Canonical member identity whose producer evidence is being compared.
@@ -6864,6 +6870,35 @@ fn validate_methods(
                 member: symbol,
                 side: "JVM method metadata",
             })?;
+        let is_int_local = |local| matches!(store.symbols.info(local), SymbolInfo::Complete(ty) if *ty == tasty.definitions.int);
+        let expected_locals = tasty
+            .typed_bindings
+            .local_value_bindings(tasty.source.id, symbol);
+        let expected_locals = expected_locals
+            .iter()
+            .filter(|local| is_int_local(local.symbol))
+            .collect::<Vec<_>>();
+        let actual_locals = jvm_plan
+            .locals
+            .iter()
+            .filter(|local| is_int_local(local.symbol))
+            .collect::<Vec<_>>();
+        if expected_locals.len() != actual_locals.len()
+            || expected_locals.iter().any(|expected| {
+                !actual_locals.iter().any(|actual| {
+                    actual.symbol == expected.symbol
+                        && actual.declaration == expected.typed_declaration
+                        && actual.mutable
+                            == store
+                                .symbols
+                                .get(expected.symbol)
+                                .flags
+                                .contains(SymbolFlags::MUTABLE)
+                })
+            })
+        {
+            return Err(JvmTastyContractError::LocalBindingMismatch { method: symbol });
+        }
         let actual_parameters = binary
             .parameters()
             .iter()

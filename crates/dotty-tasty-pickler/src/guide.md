@@ -35,3 +35,14 @@ parts of bodies and must not be published as completed artifacts. Structural
 validation and successful Rust decoding alone do not prove Scala ABI or
 consumer compatibility; the pinned Scala oracle validates supported producer
 shapes independently. This crate performs no filesystem publication.
+
+## Bounded primitive expressions
+
+Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
+Int-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
+final unguarded wildcard and support primitive results; binders, guards and
+extractors remain unsupported. Int `&` and equality/inequality between Int
+operands use Scala 3.9 signed primitive selections. Source Any equality symbols
+remain canonical; only their validated Int application is specialized to the
+Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
+bindings, including declarations whose Int type was inferred by the typer.

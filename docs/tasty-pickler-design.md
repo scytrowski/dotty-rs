@@ -970,3 +970,11 @@ A legacy `implicit` clause supports the same two default forms. The parameter
 carries `IMPLICIT` followed by `HASDEFAULT`. A Scala 3.9 client tests
 `def legacy(implicit n: Int = 7): Int = n` with missing, locally supplied,
 explicit, and ambiguous evidence.
+
+## Primitive expression parity with JVM emission
+
+The current bounded producer also admits the primitive ascriptions, Int `&`,
+Int equality/inequality and literal Int-selector matches described in
+[jvm-tasty-expressions.md](jvm-tasty-expressions.md). These extend the historical
+literal-only and control-flow slices above. The pinned Scala reader, source
+consumer and `-from-tasty` runtime gate operate on original Rust output.

@@ -10637,6 +10637,11 @@ fn resolves_each_registered_int_primitive_by_symbol_identity() {
         .unwrap();
     let entries = [
         (
+            symbols.bitwise_and,
+            JvmIntIntrinsic::IntBitwiseAnd,
+            fixture.definitions.int,
+        ),
+        (
             symbols.plus,
             JvmIntIntrinsic::IntAdd,
             fixture.definitions.int,
@@ -10695,6 +10700,40 @@ fn resolves_each_registered_int_primitive_by_symbol_identity() {
             .int_primitive_operator_symbols(&fixture.store),
         Some(symbols)
     );
+}
+
+#[test]
+fn canonical_any_equality_specializes_only_two_int_operands() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let symbols = fixture
+        .definitions
+        .any_equality_operator_symbols(&fixture.store)
+        .unwrap();
+    for (method, expected) in [
+        (symbols.equal, JvmIntIntrinsic::IntEqual),
+        (symbols.not_equal, JvmIntIntrinsic::IntNotEqual),
+    ] {
+        let call = fixture.call(method, fixture.definitions.boolean);
+        assert_eq!(
+            resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+            Ok(Some(expected))
+        );
+        let TreeKind::Apply(apply) = &fixture.ast.get(call).kind else {
+            unreachable!()
+        };
+        let argument = apply.args[0];
+        fixture.ast.get_mut(argument).kind = TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        });
+        fixture.ast.get_mut(argument).ty = fixture.definitions.boolean;
+        assert_eq!(
+            resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+            Err(JvmIntIntrinsicError::WrongOperandType {
+                tree: call,
+                operand: argument
+            })
+        );
+    }
 }
 
 #[test]

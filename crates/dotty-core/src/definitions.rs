@@ -46,8 +46,9 @@ pub struct IntPrimitiveOperatorSymbols {
 }
 
 impl IntPrimitiveOperatorSymbols {
-    /// Returns the nine method identities supported by the bounded JVM
-    /// intrinsic subset, in audit order.
+    /// Returns the original nine arithmetic and relational method identities,
+    /// in audit order. Bitwise conjunction is available through `bitwise_and`;
+    /// [`Self::source_all`] includes every registered source operator.
     pub const fn all(self) -> [SymbolId; 9] {
         [
             self.plus,
@@ -63,7 +64,7 @@ impl IntPrimitiveOperatorSymbols {
     }
 
     /// Returns every source-typing operator identity registered on `Int`, in
-    /// audit order. Some of these operations are not yet JVM backend intrinsics.
+    /// audit order, including bitwise conjunction in addition to [`Self::all`].
     pub const fn source_all(self) -> [SymbolId; 10] {
         [
             self.plus,

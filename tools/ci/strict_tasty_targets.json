@@ -5,10 +5,10 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
   },
   "baseline": {
-    "inventory_count": 29,
+    "inventory_count": 30,
     "accounted_test_seconds": 1450.23,
     "cargo_build_seconds": 76,
     "strict_step_seconds": 1526.23,
@@ -130,12 +130,16 @@
     {
       "name": "jvm_tasty_mutable_reference_rebinding_scala_consumer",
       "measured_seconds": 9.89
+    },
+    {
+      "name": "jvm_tasty_expressions",
+      "measured_seconds": 5.21
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 27.28,
+    "estimated_runner_minutes": 27.37,
     "estimated_critical_path_minutes": 10.6,
     "shards": [
       {
@@ -165,7 +169,7 @@
       },
       {
         "id": "shard-3",
-        "estimated_test_seconds": 363.4,
+        "estimated_test_seconds": 368.61,
         "targets": [
           "jvm_tasty_dual_reference_forwarding_scala_consumer",
           "jvm_tasty_reference_local_scala_consumer",
@@ -173,7 +177,8 @@
           "jvm_tasty_factory_scala_consumer",
           "jvm_tasty_factory_result_arguments",
           "jvm_tasty_scala_consumer",
-          "jvm_tasty_mutable_local_reference_reassignment_proof"
+          "jvm_tasty_mutable_local_reference_reassignment_proof",
+          "jvm_tasty_expressions"
         ]
       },
       {

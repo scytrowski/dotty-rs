@@ -15,6 +15,53 @@ struct OperatorContract {
 }
 
 impl<'a> EncodingContext<'a> {
+    pub(crate) fn int_equality_operator(&self, target: SymbolId) -> Option<&'static str> {
+        let symbols = self.definitions.any_equality_operator_symbols(self.store)?;
+        if target == symbols.equal {
+            Some("==")
+        } else if target == symbols.not_equal {
+            Some("!=")
+        } else {
+            None
+        }
+    }
+
+    /// Specialize the validated Any equality member for two Int operands,
+    /// matching Scala 3.9's Int-owned (Int): Boolean wire selection. The source
+    /// symbol remains canonical Any.==/!=; no semantic declaration is fabricated.
+    pub(crate) fn int_equality_select(
+        &mut self,
+        target: SymbolId,
+        receiver: AstLabel,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let spelling = context
+                .int_equality_operator(target)
+                .ok_or(reference(target, ReferenceError::NotRegistered))?;
+            let name = context.utf8(spelling)?;
+            let result = context.primitive_type_name(context.definitions.boolean)?;
+            let parameter = context.primitive_type_name(context.definitions.int)?;
+            let parameter = i32::try_from(parameter).map_err(|_| PickleError::LimitExceeded {
+                kind: LimitKind::Names,
+                limit: i32::MAX as usize,
+            })?;
+            let signed = context.intern(NameKey::SignedMany(name, result, vec![parameter]))?;
+            let owner = context.lower(context.definitions.int, 0)?;
+            context
+                .wire
+                .push(AstNode::Length {
+                    tag: SELECTIN_TAG,
+                    fields: vec![
+                        AstField::Nat(signed),
+                        AstField::Tree(receiver),
+                        AstField::Tree(owner),
+                    ],
+                })
+                .map_err(construction)
+        })
+    }
+
     pub(crate) fn is_registered_int_arithmetic_target(
         &self,
         target: SymbolId,
@@ -26,7 +73,7 @@ impl<'a> EncodingContext<'a> {
                 builtin: Builtin::Int,
                 ty: self.definitions.int,
             })?;
-        Ok(symbols.all()[..5].contains(&target))
+        Ok(symbols.all()[..5].contains(&target) || symbols.bitwise_and == target)
     }
 
     pub(crate) fn is_registered_int_comparison_target(
@@ -252,6 +299,15 @@ impl<'a> EncodingContext<'a> {
                 builtin: Builtin::Int,
                 ty: self.definitions.int,
             })?;
+        if target == int_symbols.bitwise_and {
+            return Ok(OperatorContract {
+                owner: Builtin::Int,
+                source_name: "&",
+                parameters: vec![self.definitions.int],
+                result: self.definitions.int,
+                argument_count: Some(1),
+            });
+        }
         if let Some(index) = int_symbols
             .all()
             .iter()
@@ -449,6 +505,17 @@ mod tests {
         let index = SourceSemanticIndex::new();
         let symbols = definitions.int_primitive_operator_symbols(&store).unwrap();
         let context = make_context(&store, &definitions, &index, source);
+
+        assert!(
+            context
+                .is_registered_int_arithmetic_target(symbols.bitwise_and)
+                .unwrap()
+        );
+        assert!(
+            !context
+                .is_registered_int_comparison_target(symbols.bitwise_and)
+                .unwrap()
+        );
 
         for (position, target) in symbols.all().into_iter().enumerate() {
             assert_eq!(

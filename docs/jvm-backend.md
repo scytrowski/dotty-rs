@@ -9,6 +9,12 @@ expressions to the class-file crate's symbolic code builder, and composes a
 complete class file when the frontend supplies sufficient initialization
 evidence. It does not assemble a source frontend.
 
+The bounded expression overlap with semantic TASTy now includes primitive
+ascriptions, Int bitwise conjunction, equality/inequality between Int operands,
+and literal Int matches with a final wildcard. See
+[`jvm-tasty-expressions.md`](jvm-tasty-expressions.md) for the exact producer,
+source-binding, execution and rejection contract.
+
 The root test adapter exercises the real lexer, parser, namer and typer with
 one semantic store and one `JvmCompilationUnit`; `CounterObjects.scala` emits
 the cooperating `Counter` and `CounterClient` classes from one source session.
@@ -551,8 +557,9 @@ multiple loop iterations, comparison conditions, nested Boolean branches, and
 before the loop; a local initialized only in the body is not assumed to exist
 on the zero-iteration exit. Planned calls with exact reference receivers are
 supported when the CFG analyzer proves their initialized class states.
-Universal equality operators `Any.==` and
-`Any.!=` remain unsupported. JVM overflow, signed division/remainder, and division-by-zero
+Canonical `Any.==` and `Any.!=` specialize to primitive comparisons when both
+operands are Int. The resolver checks the original Any owner and signature;
+general universal equality remains unsupported. JVM overflow, signed division/remainder, and division-by-zero
 behavior are preserved by emitting the corresponding JVM instruction without
 constant folding or prechecks.
 
@@ -562,7 +569,7 @@ checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
 General Scala library lowering, Long arithmetic/comparison outside the bounded
 call and control-flow subset, bounded Float/Double fields, calls, and control flow, Java classpath loading,
-TASTy emission, the full Scala ABI, universal equality, and arbitrary
+TASTy emission, the full Scala ABI, general universal equality, and arbitrary
 reference-bearing calls remain outside this subset.
 
 ## Canonical Boolean intrinsic resolution

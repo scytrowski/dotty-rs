@@ -30,3 +30,15 @@ major version 65 (Java 21). Metadata projection, bytecode construction, class
 emission, and external JVM verification have distinct guarantees. Run a JDK
 verifier for emitted programs; the in-memory example above needs no JDK.
 TASTy emission and combined Scala ABI validation are separate output paths.
+
+## Bounded primitive expression parity
+
+Planned methods also lower Int/Boolean/Unit ascriptions without runtime
+conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
+Int operands. Int-selector matches accept ordered Int literals and exactly one
+final unguarded wildcard, with Int/Boolean/Unit results. A temporary local
+preserves one selector evaluation; branch initialization facts are intersected
+across normal exits. Match lowering currently requires a planned local layout.
+Binders, guards, extractors and missing wildcard cases return typed errors.
+The semantic TASTy producer retains these source constructs separately; a
+successful JVM emission alone does not certify a paired artifact.

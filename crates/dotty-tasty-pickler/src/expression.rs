@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod block;
+mod match_expr;
 pub(crate) use block::{
     MutableCounterAssignmentFragmentTrees, MutableCounterFragmentTrees,
     lower_mutable_counter_assignment_fragment, lower_mutable_counter_declaration_fragment,
@@ -64,7 +65,14 @@ impl ExpressionBudget {
 fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
     if matches!(
         ast.try_get(tree).map(|tree| &tree.kind),
-        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
+        Some(
+            TreeKind::Apply(_)
+                | TreeKind::Block(_)
+                | TreeKind::If(_)
+                | TreeKind::Select(_)
+                | TreeKind::Match(_)
+                | TreeKind::Typed(_)
+        )
     ) {
         depth + 1
     } else {
@@ -136,6 +144,48 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Match(matched) = &tree.kind {
+        return match_expr::lower_match(
+            store,
+            ast,
+            matched,
+            method,
+            parameters,
+            ExpressionState { depth, budget },
+            context,
+        );
+    }
+    if let TreeKind::Typed(ascription) = tree.kind {
+        let tpt = ast
+            .try_get(ascription.tpt)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: ascription.tpt,
+            })?;
+        budget.visit(ascription.tpt, depth + 1)?;
+        if tpt.ty != tree.ty || !matches!(tpt.kind, TreeKind::TypeTree(_)) {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
+        let expression = lower_expression_inner(
+            store,
+            ast,
+            ascription.expr,
+            method,
+            parameters,
+            ExpressionState {
+                depth: depth + 1,
+                budget,
+            },
+            context,
+        )?;
+        let type_tree = context.primitive_type_syntax(tree.ty)?;
+        return context.wire_node(AstNode::Length {
+            tag: dotty_tasty::tasty::TYPED_TAG,
+            fields: vec![AstField::Tree(expression), AstField::Tree(type_tree)],
+        });
+    }
     if let TreeKind::While(while_expr) = &tree.kind {
         if tree.ty != context.definitions().unit {
             return Err(PickleError::BodyType {
@@ -698,7 +748,10 @@ fn lower_expression_inner(
                 fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],
             });
         }
-        if application.args.is_empty() {
+        let same_class_target = matches!(store.types.try_get(function.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. })
+            if store.symbols.contains(*target) && store.symbols.contains(method)
+                && store.symbols.get(*target).owner == store.symbols.get(method).owner);
+        if application.args.is_empty() && !same_class_target {
             let TreeKind::Select(selection) = &function.kind else {
                 return Err(PickleError::Unsupported {
                     feature: UnsupportedFeature::BodyExpression,
@@ -802,6 +855,7 @@ fn lower_expression_inner(
             }) = store.types.try_get(function.ty)
             && (context.is_registered_int_arithmetic_target(*target)?
                 || context.is_registered_int_comparison_target(*target)?
+                || context.int_equality_operator(*target).is_some()
                 || context.is_registered_boolean_short_circuit_target(*target)?)
         {
             if application.args.len() != 1 || application.kind != ApplyKind::Regular {
@@ -882,14 +936,18 @@ fn lower_expression_inner(
                 .collect::<Vec<_>>();
             let result_type = signature.result;
             let receiver_type = receiver.ty;
-            let selected = context.primitive_operator_select(
-                *target,
-                receiver_label,
-                receiver_type,
-                &parameter_types,
-                result_type,
-                Some(1),
-            )?;
+            let selected = if context.int_equality_operator(*target).is_some() {
+                context.int_equality_select(*target, receiver_label)?
+            } else {
+                context.primitive_operator_select(
+                    *target,
+                    receiver_label,
+                    receiver_type,
+                    &parameter_types,
+                    result_type,
+                    Some(1),
+                )?
+            };
             return context.wire_node(AstNode::Length {
                 tag: APPLY_TAG,
                 fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],

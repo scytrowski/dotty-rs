@@ -1,8 +1,10 @@
 use super::*;
 
+mod ascription;
 mod assignment;
 mod block;
 mod local;
+mod match_expr;
 mod while_loop;
 
 fn validate_cross_class_target_signature(
@@ -23,6 +25,18 @@ fn validate_cross_class_target_signature(
 }
 
 impl Validator<'_, '_> {
+    fn is_same_class_call_function(&self, function: TreeId<Typed>) -> bool {
+        self.plan
+            .typed_ast
+            .try_get(function)
+            .and_then(|node| self.plan.store.types.try_get(node.ty))
+            .is_some_and(|ty| {
+                matches!(ty, Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if self.plan.store.symbols.contains(*symbol)
+                    && self.plan.store.symbols.get(*symbol).owner == Some(self.plan.class))
+            })
+    }
+
     fn validate_int_expression(
         &mut self,
         source_id: TreeId<Untyped>,
@@ -61,6 +75,20 @@ impl Validator<'_, '_> {
                     });
                 }
                 Ok(())
+            }
+            (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply))
+                if source_apply.args.is_empty()
+                    && typed_apply.args.is_empty()
+                    && self.is_same_class_call_function(typed_apply.function) =>
+            {
+                self.validate_method_expression_inner(
+                    Some(source_id),
+                    Some(typed_id),
+                    method,
+                    self.plan.definitions.int,
+                    depth + 1,
+                    (Some(visited), false),
+                )
             }
             (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply))
                 if source_apply.args.is_empty() && typed_apply.args.is_empty() =>
@@ -192,6 +220,22 @@ impl Validator<'_, '_> {
                     p.definitions.boolean
                 },
             )
+        } else if let Some(name) = p
+            .definitions
+            .any_equality_operator_symbols(p.store)
+            .and_then(|symbols| {
+                if *target == symbols.equal {
+                    Some("==")
+                } else if *target == symbols.not_equal {
+                    Some("!=")
+                } else {
+                    None
+                }
+            })
+        {
+            (name, p.definitions.int, p.definitions.boolean)
+        } else if *target == int_symbols.bitwise_and {
+            ("&", p.definitions.int, p.definitions.int)
         } else if *target == boolean_symbols.and_then {
             ("&&", p.definitions.boolean, p.definitions.boolean)
         } else if *target == boolean_symbols.or_else {
@@ -790,7 +834,6 @@ impl Validator<'_, '_> {
         };
         if definition.name.as_name() != &source_name
             || target_method.parameter_clauses.len() != 1
-            || target_method.parameter_clauses[0].is_empty()
             || definition.value_param_clauses.len() != 1
         {
             return Err(PickleError::NameMismatch {
@@ -1166,6 +1209,26 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if matches!(source.kind, TreeKind::Match(_)) && matches!(typed.kind, TreeKind::Match(_)) {
+            return self.validate_primitive_match(
+                source_id,
+                typed_id,
+                method,
+                self.plan.definitions.boolean,
+                depth + 1,
+                visited,
+            );
+        }
+        if matches!(source.kind, TreeKind::Typed(_)) && matches!(typed.kind, TreeKind::Typed(_)) {
+            return self.validate_primitive_ascription(
+                source_id,
+                typed_id,
+                method,
+                self.plan.definitions.boolean,
+                depth + 1,
+                visited,
+            );
+        }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
             self.source_typed_binding(source_id, typed_id)?;
             self.span(source.position)?;
@@ -1631,6 +1694,12 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
+        if matches!(source_rhs.kind, TreeKind::Match(_)) && matches!(node.kind, TreeKind::Match(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_primitive_match(rhs, body, method, result_type, depth + 1, seen);
+        }
         if self.is_constructor_application_shape(rhs, body)? {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
@@ -1641,6 +1710,19 @@ impl Validator<'_, '_> {
                 result_type,
                 depth,
                 (seen, require_constructor_result_identity),
+            );
+        }
+        if matches!(source_rhs.kind, TreeKind::Typed(_)) && matches!(node.kind, TreeKind::Typed(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_primitive_ascription(
+                rhs,
+                body,
+                method,
+                result_type,
+                depth + 1,
+                seen,
             );
         }
         if matches!(
@@ -1681,7 +1763,7 @@ impl Validator<'_, '_> {
         }
         if result_type == p.definitions.int
             && matches!(&source_rhs.kind, TreeKind::Apply(application) if application.args.is_empty())
-            && matches!(&node.kind, TreeKind::Apply(application) if application.args.is_empty())
+            && matches!(&node.kind, TreeKind::Apply(application) if application.args.is_empty() && !self.is_same_class_call_function(application.function))
         {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
