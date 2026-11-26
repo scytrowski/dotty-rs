@@ -106,52 +106,19 @@ impl Validator<'_, '_> {
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            let pattern = p
-                .typed_ast
-                .try_get(case.pattern)
-                .ok_or(PickleError::InvalidTypedTree { tree: case.pattern })?;
-            let source_pattern = self.source_tree(source_case.pattern)?;
+            let visible = self.visible_locals.clone();
+            let wildcard = self.validate_int_case_pattern(
+                source_case.pattern,
+                case.pattern,
+                method,
+                depth + 2,
+                visited,
+            )?;
             let last = ordinal + 1 == source_match.cases.len();
-            let wildcard = matches!(&pattern.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_");
             if (wildcard && case.guard.is_none()) != last {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
-            }
-            if wildcard {
-                self.source_typed_binding(source_case.pattern, case.pattern)?;
-                self.paired_source_typed_span(
-                    source_pattern.position,
-                    pattern.position,
-                    case.pattern,
-                )?;
-                if !matches!((&source_pattern.kind, &pattern.kind), (TreeKind::Ident(source), TreeKind::Ident(typed))
-                    if source.name == typed.name && !source.backquoted && !typed.backquoted
-                        && source.name.is_term() && self.name_text(source.name.text())? == "_")
-                    || (pattern.ty != p.definitions.int
-                        && !matches!(self.ty(pattern.ty)?, Type::Constant(Constant::Int(_))))
-                {
-                    return Err(
-                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
-                    );
-                }
-                if !visited.insert(case.pattern) {
-                    return Err(PickleError::RepeatedExpression { tree: case.pattern });
-                }
-            } else {
-                if !matches!(&pattern.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)))
-                {
-                    return Err(
-                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
-                    );
-                }
-                self.validate_int_expression(
-                    source_case.pattern,
-                    case.pattern,
-                    method,
-                    depth + 2,
-                    visited,
-                )?;
             }
             if let (Some(source_guard), Some(guard)) = (source_case.guard, case.guard) {
                 self.validate_if_condition(source_guard, guard, method, depth + 2, visited)?;
@@ -164,8 +131,153 @@ impl Validator<'_, '_> {
                 depth + 2,
                 visited,
             )?;
+            self.visible_locals = visible;
         }
         Ok(())
+    }
+
+    fn validate_int_case_pattern(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<bool, PickleError> {
+        if depth > self.limits.expression_depth_limit() {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.limits.expression_depth_limit(),
+            });
+        }
+        let p = self.plan;
+        let source = self.source_tree(source_id)?;
+        let typed = p
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if let TreeKind::Bind(bind) = typed.kind {
+            self.charge(1)?;
+            self.source_typed_binding(source_id, typed_id)?;
+            self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+            if !visited.insert(typed_id) {
+                return Err(PickleError::RepeatedExpression { tree: typed_id });
+            }
+            let binding = *self.pattern_bindings.get(&source_id).ok_or_else(|| {
+                self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+            })?;
+            let symbol = self.symbol(binding.symbol)?;
+            let name = self.name_text(bind.name.text())?;
+            let value_type = self.complete(binding.symbol)?;
+            if binding.typed_declaration != typed_id
+                || bind.given
+                || name == "_"
+                || symbol.name != bind.name
+                || symbol.kind != SymbolKind::Local
+                || symbol.owner != Some(method.symbol)
+                || symbol.origin != SymbolOrigin::Source(p.source.id)
+                || symbol.position != source.position
+                || !symbol.flags.is_empty()
+                || !symbol.annotations.is_empty()
+                || symbol.visibility != Visibility::Public
+                || (value_type != p.definitions.int
+                    && !matches!(self.ty(value_type)?, Type::Constant(Constant::Int(_))))
+                || !matches!(self.ty(typed.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(target) } if *target == binding.symbol && *prefix == p.definitions.no_prefix)
+                || !p.store.scopes.contains(binding.scope)
+                || p.store.scopes.get(binding.scope).owner != Some(method.symbol)
+                || p.store.scopes.get(binding.scope).lookup_all(&symbol.name) != [binding.symbol]
+            {
+                return Err(PickleError::Reference {
+                    symbol: binding.symbol,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            if !self.registered_local_symbols.insert(binding.symbol)
+                || !self.seen_local_symbols.insert(binding.symbol)
+            {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: binding.symbol,
+                });
+            }
+            let wildcard = match &source.kind {
+                TreeKind::Ident(ident)
+                    if !ident.backquoted
+                        && ident.name == bind.name
+                        && name
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c == '_' || c.is_lowercase()) =>
+                {
+                    self.charge(1)?;
+                    if !visited.insert(bind.body) {
+                        return Err(PickleError::RepeatedExpression { tree: bind.body });
+                    }
+                    let child = p
+                        .typed_ast
+                        .try_get(bind.body)
+                        .ok_or(PickleError::InvalidTypedTree { tree: bind.body })?;
+                    if !matches!(&child.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_")
+                        || child.ty != value_type
+                    {
+                        return Err(PickleError::BodyType {
+                            tree: bind.body,
+                            ty: child.ty,
+                        });
+                    }
+                    true
+                }
+                TreeKind::Bind(source_bind)
+                    if !source_bind.given && source_bind.name == bind.name =>
+                {
+                    if matches!(
+                        p.typed_ast.try_get(bind.body).map(|n| &n.kind),
+                        Some(TreeKind::Bind(_))
+                    ) {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+                    }
+                    self.validate_int_case_pattern(
+                        source_bind.body,
+                        bind.body,
+                        method,
+                        depth + 1,
+                        visited,
+                    )?
+                }
+                _ => {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+            };
+            self.visible_locals.insert(binding.symbol);
+            return Ok(wildcard);
+        }
+        if matches!(&typed.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_")
+        {
+            self.charge(1)?;
+            self.source_typed_binding(source_id, typed_id)?;
+            self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+            if !matches!((&source.kind, &typed.kind), (TreeKind::Ident(a), TreeKind::Ident(b)) if a.name == b.name && !a.backquoted)
+                || (typed.ty != p.definitions.int
+                    && !matches!(self.ty(typed.ty)?, Type::Constant(Constant::Int(_))))
+            {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            }
+            if !visited.insert(typed_id) {
+                return Err(PickleError::RepeatedExpression { tree: typed_id });
+            }
+            return Ok(true);
+        }
+        if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)))
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        self.validate_int_expression(source_id, typed_id, method, depth, visited)?;
+        Ok(false)
     }
 
     fn validate_match_body(

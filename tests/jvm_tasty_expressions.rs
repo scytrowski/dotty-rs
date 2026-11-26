@@ -187,7 +187,6 @@ fn primitive_matches_emit_ordered_cases_for_all_three_result_types() {
 fn unsupported_matches_reject_the_pair_before_artifacts_escape() {
     for body in [
         "x match { case 0 => 10 }",
-        "x match { case value => value }",
         "x match { case 0 | 1 => 1; case _ => 2 }",
     ] {
         let source =

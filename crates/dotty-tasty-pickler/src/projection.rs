@@ -1124,6 +1124,27 @@ impl<'a> EncodingContext<'a> {
             c.wire.bind(label, node).map_err(construction)
         })
     }
+    pub(crate) fn bind_pattern_declaration(
+        &mut self,
+        symbol: SymbolId,
+        node: AstNode,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if c.symbol(symbol)?.kind != SymbolKind::Local
+                || node.tag() != dotty_tasty::tasty::BIND_TAG
+                || !c.local_value_symbols.contains(&symbol)
+            {
+                return Err(reference(symbol, ReferenceError::DeclarationTag));
+            }
+            let label = *c
+                .declarations
+                .get(&symbol)
+                .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
+            c.wire.bind(label, node).map_err(construction)?;
+            Ok(label)
+        })
+    }
+
     /// Returns this context's reserved label for an exact canonical declaration.
     pub fn declaration_label(&self, symbol: SymbolId) -> Option<AstLabel> {
         self.declarations.get(&symbol).copied()

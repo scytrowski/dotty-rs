@@ -46,3 +46,12 @@ operands use Scala 3.9 signed primitive selections. Source Any equality symbols
 remain canonical; only their validated Int application is specialized to the
 Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
 bindings, including declarations whose Int type was inferred by the typer.
+
+Guarded Int matches preserve optional guards as the final CASEDEF child, after
+pattern and body. Pattern bindings arrive through
+`SourceTypedBindings::pattern_value_bindings`, using the exact source/typed,
+symbol and case-scope tuple from the frontend. The producer emits BIND labels
+and direct symbol references, validates visibility independently per case, and
+rejects missing, duplicate, stale or cross-case binding evidence without store
+mutation. The subset includes variable roots and explicit bindings over Int
+literals or wildcards, with a final unguarded irrefutable case.
