@@ -5,14 +5,14 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
   },
   "baseline": {
-    "inventory_count": 34,
-    "accounted_test_seconds": 1747.63,
+    "inventory_count": 35,
+    "accounted_test_seconds": 1753.81,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1823.63,
-    "full_job_seconds": 1998.22
+    "strict_step_seconds": 1829.81,
+    "full_job_seconds": 2004.4
   },
   "targets": [
     {
@@ -150,12 +150,16 @@
     {
       "name": "jvm_tasty_alternative_matches",
       "measured_seconds": 6.15
+    },
+    {
+      "name": "jvm_tasty_floating_values",
+      "measured_seconds": 6.18
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 27.63,
+    "estimated_runner_minutes": 27.73,
     "estimated_critical_path_minutes": 10.6,
     "shards": [
       {
@@ -203,7 +207,7 @@
       },
       {
         "id": "shard-4",
-        "estimated_test_seconds": 367.35,
+        "estimated_test_seconds": 373.53,
         "targets": [
           "jvm_tasty_multi_argument_constructor_scala_consumer",
           "jvm_tasty_dual_reference_rust_consumer",
@@ -213,7 +217,8 @@
           "jvm_tasty_dual_reference_signature",
           "jvm_tasty_dual_reference_artifacts",
           "jvm_tasty_conditional_local_reference_proof",
-          "jvm_tasty_conditional_reference_scala_consumer"
+          "jvm_tasty_conditional_reference_scala_consumer",
+          "jvm_tasty_floating_values"
         ]
       }
     ]

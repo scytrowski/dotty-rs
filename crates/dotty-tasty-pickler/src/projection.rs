@@ -2427,7 +2427,7 @@ impl<'a> EncodingContext<'a> {
                 .map_err(construction)
         })
     }
-    /// Projects the explicit source syntax wrapper for a supported primitive.
+    /// Projects explicit source syntax for canonical Int, Boolean, Unit, Long, Float or Double.
     pub fn primitive_type_syntax(&mut self, ty: TypeId) -> Result<AstLabel, PickleError> {
         if ty == self.definitions.int {
             self.int_type_syntax()

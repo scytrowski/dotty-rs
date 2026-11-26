@@ -200,7 +200,16 @@ fn method_type_syntax(
     ty: dotty_core::TypeId,
 ) -> Result<AstLabel, PickleError> {
     let definitions = &plan.plan().definitions;
-    if ty == definitions.int || ty == definitions.boolean || ty == definitions.unit {
+    if [
+        definitions.int,
+        definitions.boolean,
+        definitions.unit,
+        definitions.long,
+        definitions.float,
+        definitions.double,
+    ]
+    .contains(&ty)
+    {
         context.primitive_type_syntax(ty)
     } else {
         context.same_source_reference_type_syntax(ty)

@@ -6202,7 +6202,7 @@ mod tests {
             (JvmType::Double, Constant::double(1.0), vec![0x0f, 0xaf]),
         ] {
             let mut f = Fixture::new(std::slice::from_ref(&kind));
-            f.set_result(JvmReturnType::Value(kind.clone()));
+            f.set_result(JvmReturnType::Value(kind));
             let primitive = if kind == JvmType::Float {
                 f.definitions.float
             } else {

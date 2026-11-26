@@ -39,6 +39,7 @@ fn floating_literal_wire_payloads_preserve_exact_bits() {
         ("Double", "-0.0"),
         ("Double", "4.9e-324"),
         ("Double", "1.7976931348623157e308"),
+        ("Double", "-0.0D"),
     ] {
         let pair = emit(&format!("def f(): {ty} = {literal}"));
         let file = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
@@ -66,7 +67,8 @@ fn floating_literal_wire_payloads_preserve_exact_bits() {
             ConstantValue::DoubleBits(0),
             ConstantValue::DoubleBits(0x8000000000000000),
             ConstantValue::DoubleBits(1),
-            ConstantValue::DoubleBits(0x7fefffffffffffff)
+            ConstantValue::DoubleBits(0x7fefffffffffffff),
+            ConstantValue::DoubleBits(0x8000000000000000)
         ]
     );
 }
@@ -444,4 +446,307 @@ fn floating_match_frames_and_opcodes_keep_exact_kinds_and_slot_widths() {
             .all(|(_, locals, _)| locals == &[7, 1, 2, 4, 3, 1])
     );
     assert!(mixed.iter().any(|(_, _, stack)| stack == &[3]));
+}
+
+#[test]
+fn pinned_scala_consumes_and_recompiles_original_rust_floating_tasty() {
+    if std::env::var("DOTTY_REQUIRE_SCALA_TASTY_CONSUMER").as_deref() != Ok("1") {
+        return;
+    }
+    let pair = emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_floating_values/FloatingValues.scala"),
+        "FloatingValues.scala",
+        SourceId::from_index(2475),
+    )
+    .unwrap();
+    let directory =
+        std::env::temp_dir().join(format!("dotty-floating-value-scala-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("example")).unwrap();
+    std::fs::write(
+        directory.join(pair.classfile_path()),
+        pair.classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(directory.join(pair.tasty_path()), pair.tasty_bytes()).unwrap();
+    let output = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/jvm_tasty_floating_values/run.py"
+        ))
+        .arg(&directory)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn jdk_available() -> bool {
+    let version = std::process::Command::new("java")
+        .arg("-version")
+        .output()
+        .ok();
+    let major = version.as_ref().and_then(|output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.split('"')
+            .nth(1)?
+            .split('.')
+            .next()?
+            .parse::<u32>()
+            .ok()
+    });
+    let available = major.is_some_and(|major| major >= 21);
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        assert!(
+            available,
+            "mandatory floating-value runtime gate requires JDK 21+"
+        );
+    }
+    available
+}
+
+fn run_java(pair: &dotty::jvm_tasty_artifacts::PairedJvmTastyArtifacts, name: &str, source: &str) {
+    let directory = std::env::temp_dir().join(format!(
+        "dotty-floating-values-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(directory.join("example")).unwrap();
+    std::fs::write(
+        directory.join(pair.classfile_path()),
+        pair.classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(directory.join(pair.tasty_path()), pair.tasty_bytes()).unwrap();
+    let client = directory.join(format!("{name}.java"));
+    std::fs::write(&client, source).unwrap();
+    let compile = std::process::Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(&directory)
+        .arg("-d")
+        .arg(&directory)
+        .arg(&client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(&directory)
+        .arg(name)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "floating value oracle ok"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn original_rust_floating_values_execute_on_jdk21() {
+    if !jdk_available() {
+        return;
+    }
+    let pair = emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_floating_values/FloatingValues.scala"),
+        "FloatingValues.scala",
+        SourceId::from_index(2475),
+    )
+    .unwrap();
+    run_java(
+        &pair,
+        "JavaConsumer",
+        include_str!("fixtures/jvm_tasty_floating_values/JavaConsumer.java"),
+    );
+}
+
+#[test]
+fn floating_artifacts_are_deterministic_across_fresh_sessions() {
+    let source = include_str!("fixtures/jvm_tasty_floating_values/FloatingValues.scala");
+    let first =
+        emit_paired_jvm_tasty_class(source, "FloatingValues.scala", SourceId::from_index(2475))
+            .unwrap();
+    let second =
+        emit_paired_jvm_tasty_class(source, "FloatingValues.scala", SourceId::from_index(2476))
+            .unwrap();
+    assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+    assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+}
+
+#[test]
+fn unsupported_floating_shapes_never_publish_a_pair() {
+    for method in [
+        "private val x: Float = 1.0f; def f(): Float = x",
+        "private var x: Double = 1.0; def f(): Double = x",
+        "def other(): Float = 1.0f; def f(): Float = other()",
+        "def other(x: Double): Int = 1; def f(x: Double): Int = other(x)",
+        "def f(x: Float): Float = x + 1.0f",
+        "def f(x: Double): Boolean = x < 1.0",
+        "def f(x: Float): Double = x",
+        "def f(x: Double): Int = x match { case 0.0 => 1; case _ => 2 }",
+        "def f(x: Float): Int = { x; 1 }",
+        "def f(x: Double): Int = { x; 1 }",
+        "def f(x: Float): Float = (x: Float)",
+        "def f(x: Double): Double = { val saved: Double = x; saved = x; saved }",
+        "def f(x: Float): Float = { val saved: Float = return x; saved }",
+        "def f(x: Double)(y: Double): Double = x",
+        "def f[A](x: Float): Float = x",
+        "def f(x: Double = 1.0): Double = x",
+        "def f(x: Float)(using n: Int): Float = x",
+    ] {
+        let source = format!("package example; class FloatingValues {{ {method} }}");
+        let error = emit_paired_jvm_tasty_class(
+            &source,
+            "FloatingValues.scala",
+            SourceId::from_index(2475),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                dotty::jvm_tasty_artifacts::PairedArtifactError::Plan(_)
+            ),
+            "{method}: {error:?}"
+        );
+    }
+    let source = "package example; class FloatingValues(x: Double) { def f(): Int = 1 }";
+    assert!(
+        emit_paired_jvm_tasty_class(source, "FloatingValues.scala", SourceId::from_index(2475))
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_numeric_method_plans_respect_validation_and_encoding_depth() {
+    use dotty::core::ast::TreeKind;
+    use dotty_tasty_pickler::{
+        ClassMemberPicklePlan, DefaultConstructorPlan, LimitKind, MethodPicklePlan, PickleError,
+        PicklePlan, ValidationLimits,
+    };
+    for ty in ["Float", "Double", "Long"] {
+        let source = format!(
+            "package example; class FloatingValues {{ def f(flag: Boolean, x: {ty}): {ty} = if flag then {{ {{ {{ x }} }} }} else x }}"
+        );
+        dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
+            &source,
+            "FloatingValues.scala",
+            SourceId::from_index(2475),
+            |paired| {
+                let raw = paired.tasty_plan.plan();
+                let [
+                    ClassMemberPicklePlan::Method {
+                        symbol,
+                        source_tree,
+                    },
+                ] = raw.members
+                else {
+                    panic!()
+                };
+                let TreeKind::DefDef(def) = &raw.source_ast.get(*source_tree).kind else {
+                    panic!()
+                };
+                let methods = [MethodPicklePlan {
+                    symbol: *symbol,
+                    source_tree: *source_tree,
+                    parameter_clauses: def
+                        .value_param_clauses
+                        .iter()
+                        .map(|clause| {
+                            clause
+                                .iter()
+                                .map(|&t| raw.source_index.symbol_at(raw.source.id, t).unwrap())
+                                .collect()
+                        })
+                        .collect(),
+                    body: Some(
+                        raw.typed_bindings
+                            .typed_at(raw.source.id, def.rhs.unwrap())
+                            .unwrap(),
+                    ),
+                }];
+                let input = PicklePlan {
+                    store: raw.store,
+                    definitions: raw.definitions,
+                    typed_ast: raw.typed_ast,
+                    source_ast: raw.source_ast,
+                    source_index: raw.source_index,
+                    typed_bindings: raw.typed_bindings,
+                    source: raw.source.clone(),
+                    source_root: raw
+                        .source_ast
+                        .iter()
+                        .find(|(_, n)| matches!(n.kind, TreeKind::PackageDef(_)))
+                        .unwrap()
+                        .0,
+                    class: raw.class,
+                    class_tree: raw.class_tree,
+                    constructor: DefaultConstructorPlan {
+                        symbol: raw.constructor.symbol,
+                        source_tree: raw.constructor.source_tree,
+                        parameter_clauses: raw.constructor.parameter_clauses.clone(),
+                    },
+                    methods: &methods,
+                    local_values: &[],
+                };
+                let checkpoint = raw.store.checkpoint();
+                let validated = input.validate().unwrap();
+                validated.pickle().unwrap();
+                let encoded = validated
+                    .pickle_with_limits(dotty_tasty_pickler::PickleLimits {
+                        projection: dotty_tasty_pickler::ProjectionLimits {
+                            max_expression_depth: 0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        encoded,
+                        PickleError::LimitExceeded {
+                            kind: LimitKind::ExpressionDepth,
+                            limit: 0
+                        }
+                    ),
+                    "{encoded:?}"
+                );
+                let error = input
+                    .validate_with_limits(ValidationLimits {
+                        max_expression_depth: 3,
+                        ..ValidationLimits::default()
+                    })
+                    .err()
+                    .unwrap();
+                assert!(
+                    matches!(
+                        error,
+                        PickleError::LimitExceeded {
+                            kind: LimitKind::ExpressionDepth,
+                            limit: 3
+                        }
+                    ),
+                    "{error:?}"
+                );
+                assert_eq!(raw.store.checkpoint(), checkpoint);
+            },
+        )
+        .unwrap();
+    }
 }

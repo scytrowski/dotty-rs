@@ -17,6 +17,12 @@ oracle or that Scala-emitted descriptors/opcodes were observed here. The
 fixture below is retained as the exact oracle input for a follow-up run when
 those artifacts are available.
 
+The later [paired floating-value contract](jvm-tasty-floating-values.md) adds
+semantic TASTy method values and fills Float/Double-valued Int matches and proved
+returning tails. Its executable pinned oracle supersedes the historical absence
+of compiler artifacts recorded by the original audit below. Field/call support
+in the JVM remains broader than the paired producer subset.
+
 ## Source compatibility fixture
 
 ```scala
