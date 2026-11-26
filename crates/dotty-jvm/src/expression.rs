@@ -3432,6 +3432,7 @@ fn validate_constructor_argument(
                             | JvmIntIntrinsic::IntMultiply
                             | JvmIntIntrinsic::IntDivide
                             | JvmIntIntrinsic::IntRemainder
+                            | JvmIntIntrinsic::IntBitwiseAnd
                     )
                 )
             } else {
@@ -4020,6 +4021,7 @@ fn emit_int_intrinsic(
         JvmIntIntrinsic::IntMultiply => code.imul(),
         JvmIntIntrinsic::IntDivide => code.idiv(),
         JvmIntIntrinsic::IntRemainder => code.irem(),
+        JvmIntIntrinsic::IntBitwiseAnd => code.iand(),
         JvmIntIntrinsic::IntLessThan
         | JvmIntIntrinsic::IntLessOrEqual
         | JvmIntIntrinsic::IntGreaterThan

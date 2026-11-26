@@ -6,7 +6,6 @@ use dotty_jvm_tasty_contract::JvmTastyContractError;
 #[test]
 fn pending_expression_forms_reject_before_returning_a_partial_pair() {
     for method in [
-        "def value(x: Int): Int = x & 255",
         "def value(x: Int, y: Int): Boolean = x == y",
         "def value(x: Int): Int = x match { case 0 => 10; case _ => 20 }",
     ] {
@@ -87,4 +86,47 @@ fn official_scala_oracle_preserves_ascriptions_matches_and_operator_names() {
             "missing official Scala shape {shape}"
         );
     }
+}
+
+#[test]
+fn integer_bitwise_and_emits_iand_and_the_signed_scala_operator() {
+    let pair = emit("def mask(x: Int): Int = x & 255");
+    let class = dotty_classfile::class_file::ClassFile::decode(
+        &mut dotty_classfile::reader::Reader::new(pair.classfile_bytes()),
+    )
+    .unwrap();
+    let method = class
+        .methods
+        .iter()
+        .find(|m| class.constant_pool.utf8(m.name_index) == Ok("mask"))
+        .unwrap();
+    let [dotty_classfile::attribute::Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("method code")
+    };
+    assert_eq!(code.code, &[0x1b, 0x11, 0x00, 0xff, 0x7e, 0xac]);
+    let file =
+        dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let selections: Vec<_> = index
+        .iter()
+        .filter(|n| n.tag == dotty_tasty::tasty::SELECTIN_TAG)
+        .map(|n| {
+            file.names()
+                .render_signed_name(n.decode_select_in().unwrap().name)
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        selections.contains(&dotty_tasty::tasty::RenderedSignedName::Signed {
+            original: "&".into(),
+            signature: dotty_tasty::tasty::RenderedNameSignature {
+                result: "scala.Int".into(),
+                parameters: vec![dotty_tasty::tasty::RenderedParamSig::TermParameter(
+                    "scala.Int".into()
+                )],
+            },
+        }),
+        "{selections:?}"
+    );
 }

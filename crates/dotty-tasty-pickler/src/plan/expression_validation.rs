@@ -193,6 +193,8 @@ impl Validator<'_, '_> {
                     p.definitions.boolean
                 },
             )
+        } else if *target == int_symbols.bitwise_and {
+            ("&", p.definitions.int, p.definitions.int)
         } else if *target == boolean_symbols.and_then {
             ("&&", p.definitions.boolean, p.definitions.boolean)
         } else if *target == boolean_symbols.or_else {

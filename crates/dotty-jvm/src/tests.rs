@@ -10637,6 +10637,11 @@ fn resolves_each_registered_int_primitive_by_symbol_identity() {
         .unwrap();
     let entries = [
         (
+            symbols.bitwise_and,
+            JvmIntIntrinsic::IntBitwiseAnd,
+            fixture.definitions.int,
+        ),
+        (
             symbols.plus,
             JvmIntIntrinsic::IntAdd,
             fixture.definitions.int,

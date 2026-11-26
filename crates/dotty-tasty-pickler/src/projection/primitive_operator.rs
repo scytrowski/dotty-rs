@@ -26,7 +26,7 @@ impl<'a> EncodingContext<'a> {
                 builtin: Builtin::Int,
                 ty: self.definitions.int,
             })?;
-        Ok(symbols.all()[..5].contains(&target))
+        Ok(symbols.all()[..5].contains(&target) || symbols.bitwise_and == target)
     }
 
     pub(crate) fn is_registered_int_comparison_target(
@@ -252,6 +252,15 @@ impl<'a> EncodingContext<'a> {
                 builtin: Builtin::Int,
                 ty: self.definitions.int,
             })?;
+        if target == int_symbols.bitwise_and {
+            return Ok(OperatorContract {
+                owner: Builtin::Int,
+                source_name: "&",
+                parameters: vec![self.definitions.int],
+                result: self.definitions.int,
+                argument_count: Some(1),
+            });
+        }
         if let Some(index) = int_symbols
             .all()
             .iter()
@@ -449,6 +458,17 @@ mod tests {
         let index = SourceSemanticIndex::new();
         let symbols = definitions.int_primitive_operator_symbols(&store).unwrap();
         let context = make_context(&store, &definitions, &index, source);
+
+        assert!(
+            context
+                .is_registered_int_arithmetic_target(symbols.bitwise_and)
+                .unwrap()
+        );
+        assert!(
+            !context
+                .is_registered_int_comparison_target(symbols.bitwise_and)
+                .unwrap()
+        );
 
         for (position, target) in symbols.all().into_iter().enumerate() {
             assert_eq!(

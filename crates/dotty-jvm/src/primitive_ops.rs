@@ -20,6 +20,8 @@ pub enum JvmIntIntrinsic {
     IntDivide,
     /// 32-bit integer remainder using JVM irem semantics.
     IntRemainder,
+    /// Bitwise conjunction of two 32-bit integer values.
+    IntBitwiseAnd,
     /// Signed integer less-than comparison producing Boolean.
     IntLessThan,
     /// Signed integer less-than-or-equal comparison producing Boolean.
@@ -360,6 +362,9 @@ fn registered_operation(
     method: SymbolId,
 ) -> Option<JvmIntIntrinsic> {
     let symbols = registry?;
+    if method == symbols.bitwise_and {
+        return Some(JvmIntIntrinsic::IntBitwiseAnd);
+    }
     symbols
         .all()
         .iter()
