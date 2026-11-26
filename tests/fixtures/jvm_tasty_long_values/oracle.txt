@@ -1,0 +1,114 @@
+/** Decompiled from <oracle>/example/LongValues.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("LongValues.scala") class LongValues() {
+    private[this] var trace: scala.Int = 0
+    def next(): scala.Int = {
+      LongValues.this.trace = LongValues.this.trace.*(10).+(1)
+      5
+    }
+    def guardCode(): scala.Int = {
+      LongValues.this.trace = LongValues.this.trace.*(10).+(2)
+      0
+    }
+    def observed(): scala.Int = LongValues.this.trace
+    def literal(): scala.Long = 9000000000L
+    def minimum(): scala.Long = -9223372036854775808L
+    def maximum(): scala.Long = 9223372036854775807L
+    def hexadecimal(): scala.Long = -1L
+    def binary(): scala.Long = 42L
+    def direct(x: scala.Long): scala.Long = x
+    def mixed(a: scala.Int, `x₂`: scala.Long, flag: scala.Boolean, y: scala.Long): scala.Long = if (flag) `x₂` else y
+    def intResult(`x₃`: scala.Long): scala.Int = 7
+    def saved(`x₄`: scala.Long): scala.Long = {
+      val value: scala.Long = `x₄`
+
+      (value: scala.Long)
+    }
+    def inferred(`x₅`: scala.Long): scala.Long = {
+      val `value₂`: scala.Long = `x₅`
+
+      (`value₂`: scala.Long)
+    }
+    def assigned(`a₂`: scala.Long, b: scala.Long): scala.Long = {
+      var `value₃`: scala.Long = `a₂`
+      `value₃` = b
+
+      (`value₃`: scala.Long)
+    }
+    def rotate(n: scala.Int, `a₃`: scala.Long, `b₂`: scala.Long): scala.Long = {
+      var `value₄`: scala.Long = `a₃`
+      var i: scala.Int = n
+      while (i.>(0)) {
+        `value₄` = `b₂`
+        i = i.-(1)
+      }
+
+      (`value₄`: scala.Long)
+    }
+    def choose(`x₆`: scala.Int, `a₄`: scala.Long, `b₃`: scala.Long): scala.Long = `x₆` match {
+      case 0 =>
+        `a₄`
+      case _ =>
+        `b₃`
+    }
+    def guarded(`x₇`: scala.Int, `a₅`: scala.Long, `b₄`: scala.Long): scala.Long = `x₇` match {
+      case n if `n₂`.<(0) =>
+        `a₅`
+      case _ =>
+        `b₄`
+    }
+    def constants(`x₈`: scala.Int): scala.Long = `x₈` match {
+      case 0 =>
+        1L
+      case _ =>
+        9000000000L
+    }
+    def once(`a₆`: scala.Long, `b₅`: scala.Long): scala.Long = LongValues.this.next() match {
+      case 0 =>
+        `a₆`
+      case n if LongValues.this.guardCode().>(0) =>
+        `a₆`
+      case _ =>
+        `b₅`
+    }
+    def early(`flag₂`: scala.Boolean, `a₇`: scala.Long, `b₆`: scala.Long): scala.Long = {
+      if (`flag₂`) return `a₇` else ()
+      `b₆`
+    }
+    def both(`flag₃`: scala.Boolean, `a₈`: scala.Long, `b₇`: scala.Long): scala.Long = if (`flag₃`) return `a₈` else return `b₇`
+    def returned(`x₉`: scala.Int, `a₉`: scala.Long, `b₈`: scala.Long): scala.Long = `x₉` match {
+      case 0 =>
+        return `a₉`
+      case _ =>
+        `b₈`
+    }
+    def allReturn(`x₁₀`: scala.Int, `a₁₀`: scala.Long, `b₉`: scala.Long): scala.Long = `x₁₀` match {
+      case 0 =>
+        return `a₁₀`
+      case _ =>
+        return `b₉`
+    }
+    def deadIf(`flag₄`: scala.Boolean, `a₁₁`: scala.Long, `b₁₀`: scala.Long): scala.Long = if (`flag₄`) {
+      return `a₁₁`
+      `b₁₀`
+    } else `b₁₀`
+    def deadMatch(`x₁₁`: scala.Int, `a₁₂`: scala.Long, `b₁₁`: scala.Long): scala.Long = `x₁₁` match {
+      case 0 =>
+        return `a₁₂`
+        `b₁₁`
+      case _ =>
+        `b₁₁`
+    }
+    def inLoop(`n₃`: scala.Int, `a₁₃`: scala.Long, `b₁₂`: scala.Long): scala.Long = {
+      var `value₅`: scala.Long = `a₁₃`
+      var `i₂`: scala.Int = `n₃`
+      while (`i₂`.>(0)) {
+        if (`i₂`.==(3)) return `a₁₃` else ()
+        `value₅` = `b₁₂`
+        `i₂` = `i₂`.-(1)
+      }
+
+      (`value₅`: scala.Long)
+    }
+  }
+}
