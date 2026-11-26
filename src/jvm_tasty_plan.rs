@@ -450,6 +450,32 @@ struct BatchClassDraft {
     source_member_order: Vec<SymbolId>,
 }
 
+struct ClassSourceTypedBindings<'a> {
+    index: &'a SourceTypedIndex,
+    source: SourceId,
+    locals: Vec<(SymbolId, LocalValueBinding)>,
+}
+
+impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TreeId<dotty_core::Typed>> {
+        self.index.get(source, tree)
+    }
+
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        if source != self.source {
+            return Vec::new();
+        }
+        self.locals
+            .iter()
+            .filter_map(|(owner, binding)| (*owner == method).then_some(*binding))
+            .collect()
+    }
+}
+
 /// Parse, name and type `source_text` once, construct both producer plans from
 /// the resulting canonical identities, validate them independently, and prove
 /// their class/member ABI agrees. The callback keeps the borrowed session alive
@@ -579,6 +605,7 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
     let mut tasty_members = Vec::with_capacity(template.body.len());
     let mut jvm_fields = Vec::new();
     let mut jvm_methods = Vec::new();
+    let mut local_values = Vec::new();
     let mut source_member_order = Vec::with_capacity(template.body.len());
     for &tree in &template.body {
         match &parsed.ast.get(tree).kind {
@@ -682,10 +709,35 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
                     symbol: method,
                     source_tree: tree,
                 });
+                let mut locals = Vec::new();
+                for (source_tree, _) in parsed.ast.iter() {
+                    let Some(binding) = typer.typed_local_binding_at(source_id, source_tree) else {
+                        continue;
+                    };
+                    let symbol = typer.store().symbols.get(binding.symbol());
+                    if symbol.owner != Some(method) {
+                        continue;
+                    }
+                    locals.push(JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        symbol.flags.contains(SymbolFlags::MUTABLE),
+                    ));
+                    local_values.push((
+                        method,
+                        LocalValueBinding {
+                            source_tree,
+                            symbol: binding.symbol(),
+                            typed_declaration: binding.declaration(),
+                            scope: binding.scope(),
+                        },
+                    ));
+                }
+                locals.sort_unstable_by_key(|local| local.declaration.index());
                 jvm_methods.push(JvmMethodPlan {
                     method,
                     parameters,
-                    locals: Vec::new(),
+                    locals,
                     body: Some(body),
                 });
                 source_member_order.push(method);
@@ -713,8 +765,11 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
         initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
     };
 
-    let typed_bindings =
-        |source, tree: TreeId<Untyped>| typer.source_typed_index().get(source, tree);
+    let typed_bindings = ClassSourceTypedBindings {
+        index: typer.source_typed_index(),
+        source: source_id,
+        locals: local_values,
+    };
     let tasty_input = ClassStatePicklePlan {
         store: typer.store(),
         definitions: &definitions,

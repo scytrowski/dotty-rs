@@ -215,9 +215,12 @@ fn pinned_scala_reads_and_recompiles_rust_expression_tasty() {
     if std::env::var("DOTTY_REQUIRE_SCALA_TASTY_CONSUMER").as_deref() != Ok("1") {
         return;
     }
-    let pair = emit(
-        "def value(x: Int): Int = (x: Int) & 255; def same(x: Int, y: Int): Boolean = x == y; def classify(x: Int): Int = x match { case 0 => 10; case _ => 20 }; def flag(x: Int): Boolean = x match { case 0 => false; case _ => true }; def nothing(x: Int): Unit = x match { case 0 => (); case _ => () }",
-    );
+    let pair = emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_expressions/Expressions.scala"),
+        "Expressions.scala",
+        SourceId::from_index(2470),
+    )
+    .unwrap();
     let directory =
         std::env::temp_dir().join(format!("dotty-expressions-scala-{}", std::process::id()));
     std::fs::create_dir_all(directory.join("example")).unwrap();
@@ -242,4 +245,34 @@ fn pinned_scala_reads_and_recompiles_rust_expression_tasty() {
         String::from_utf8_lossy(&output.stderr)
     );
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn composed_expression_fixture_emits_a_deterministic_linked_pair() {
+    let source = include_str!("fixtures/jvm_tasty_expressions/Expressions.scala");
+    let first =
+        emit_paired_jvm_tasty_class(source, "Expressions.scala", SourceId::from_index(2470))
+            .unwrap();
+    let second =
+        emit_paired_jvm_tasty_class(source, "Expressions.scala", SourceId::from_index(2471))
+            .unwrap();
+    assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+    assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+    assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+}
+
+#[test]
+fn paired_contract_rejects_missing_canonical_primitive_local_evidence() {
+    let source = include_str!("fixtures/jvm_tasty_expressions/Expressions.scala");
+    dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(source, "Expressions.scala", SourceId::from_index(2470), |plan| {
+        let before = plan.jvm_unit.store.checkpoint();
+        let mut classes = plan.jvm_unit.classes.clone();
+        let method = classes[0].methods.iter_mut().find(|method| !method.locals.is_empty()).unwrap();
+        let symbol = method.method;
+        method.locals.clear();
+        let forged = dotty::jvm::JvmCompilationUnit { store: plan.jvm_unit.store, typed_ast: plan.jvm_unit.typed_ast, classes };
+        let error = dotty_jvm_tasty_contract::validate_jvm_tasty_class(&forged, plan.tasty_plan).err().expect("missing local evidence must fail");
+        assert!(matches!(error, JvmTastyContractError::LocalBindingMismatch { method } if method == symbol), "{error:?}");
+        assert_eq!(before, plan.jvm_unit.store.checkpoint());
+    }).unwrap();
 }

@@ -46,7 +46,7 @@ pub(super) fn lower_match(
                 });
             }
             let name = context.intern_wire_text("_")?;
-            let ty = context.lower_type(context.definitions().int)?;
+            let ty = context.lower_type(pattern.ty)?;
             context.wire_node(AstNode::NatAst {
                 tag: dotty_tasty::tasty::IDENT_TAG,
                 value: dotty_tasty::tasty::AstOperand::Nat(name),

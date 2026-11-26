@@ -203,7 +203,10 @@ impl Validator<'_, '_> {
         {
             return Err(PickleError::UnsupportedTypeReference { ty: local_type });
         }
-        if !matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
+        let source_type_matches = matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
+            || (local_type == self.plan.definitions.int
+                && matches!(source_tpt.kind, TreeKind::TypeTree(_)));
+        if !source_type_matches
             || !matches!(typed_tpt.kind, TreeKind::TypeTree(_))
             || typed_tpt.ty != local_type
         {

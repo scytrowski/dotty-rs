@@ -25,6 +25,18 @@ fn validate_cross_class_target_signature(
 }
 
 impl Validator<'_, '_> {
+    fn is_same_class_call_function(&self, function: TreeId<Typed>) -> bool {
+        self.plan
+            .typed_ast
+            .try_get(function)
+            .and_then(|node| self.plan.store.types.try_get(node.ty))
+            .is_some_and(|ty| {
+                matches!(ty, Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if self.plan.store.symbols.contains(*symbol)
+                    && self.plan.store.symbols.get(*symbol).owner == Some(self.plan.class))
+            })
+    }
+
     fn validate_int_expression(
         &mut self,
         source_id: TreeId<Untyped>,
@@ -63,6 +75,20 @@ impl Validator<'_, '_> {
                     });
                 }
                 Ok(())
+            }
+            (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply))
+                if source_apply.args.is_empty()
+                    && typed_apply.args.is_empty()
+                    && self.is_same_class_call_function(typed_apply.function) =>
+            {
+                self.validate_method_expression_inner(
+                    Some(source_id),
+                    Some(typed_id),
+                    method,
+                    self.plan.definitions.int,
+                    depth + 1,
+                    (Some(visited), false),
+                )
             }
             (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply))
                 if source_apply.args.is_empty() && typed_apply.args.is_empty() =>
@@ -808,7 +834,6 @@ impl Validator<'_, '_> {
         };
         if definition.name.as_name() != &source_name
             || target_method.parameter_clauses.len() != 1
-            || target_method.parameter_clauses[0].is_empty()
             || definition.value_param_clauses.len() != 1
         {
             return Err(PickleError::NameMismatch {
@@ -1738,7 +1763,7 @@ impl Validator<'_, '_> {
         }
         if result_type == p.definitions.int
             && matches!(&source_rhs.kind, TreeKind::Apply(application) if application.args.is_empty())
-            && matches!(&node.kind, TreeKind::Apply(application) if application.args.is_empty())
+            && matches!(&node.kind, TreeKind::Apply(application) if application.args.is_empty() && !self.is_same_class_call_function(application.function))
         {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);

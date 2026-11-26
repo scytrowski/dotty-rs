@@ -748,7 +748,10 @@ fn lower_expression_inner(
                 fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],
             });
         }
-        if application.args.is_empty() {
+        let same_class_target = matches!(store.types.try_get(function.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. })
+            if store.symbols.contains(*target) && store.symbols.contains(method)
+                && store.symbols.get(*target).owner == store.symbols.get(method).owner);
+        if application.args.is_empty() && !same_class_target {
             let TreeKind::Select(selection) = &function.kind else {
                 return Err(PickleError::Unsupported {
                     feature: UnsupportedFeature::BodyExpression,
