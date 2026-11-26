@@ -36,7 +36,8 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
 Int operands. Int-selector matches accept ordered Int literals and exactly one
-final unguarded irrefutable case, with Int/Boolean/Unit results. A temporary local
+final unguarded irrefutable case, with Int/Boolean/Unit results. A Nothing-typed
+match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
 Guards and immutable Int binders are supported; extractors, type tests and missing unconditional fallback cases return typed errors.
@@ -47,3 +48,14 @@ successful JVM emission alone does not certify a paired artifact.
 symbol, case scope and typed CaseDef. Validation checks the declaration edge
 and scope membership. JVM lowering initializes the slot only on pattern success
 and removes case-local initialization facts before the next case and match join.
+
+## Local primitive method returns
+
+Ordinary planned methods with Int, Boolean or Unit results can return directly
+or from blocks, If branches, While bodies and supported Int matches. A local
+return emits the method's exact primitive return instruction. All-returning
+branches contribute no join value or trailing epilogue. A block may retain
+the primitive type of an unreachable tail; lowering still validates that tail
+and proves the actual return flow before omitting its code. A Nothing type
+by itself does not establish a supported exit. Non-local returns and returns
+inside operands, conditions or guards remain unsupported.

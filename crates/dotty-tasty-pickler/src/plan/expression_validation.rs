@@ -5,6 +5,7 @@ mod assignment;
 mod block;
 mod local;
 mod match_expr;
+mod return_flow;
 mod while_loop;
 
 fn validate_cross_class_target_signature(
@@ -1661,6 +1662,19 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
     ) -> Result<(), PickleError> {
+        if let (Some(source), Some(typed)) = (rhs, body)
+            && [
+                self.plan.definitions.int,
+                self.plan.definitions.boolean,
+                self.plan.definitions.unit,
+            ]
+            .contains(&result_type)
+            && self.contains_local_return(source, typed)
+        {
+            return self
+                .validate_return_flow(source, typed, method, result_type, 0, &mut HashSet::new())
+                .map(|_| ());
+        }
         self.validate_method_expression_inner(rhs, body, method, result_type, 0, (None, false))
     }
 

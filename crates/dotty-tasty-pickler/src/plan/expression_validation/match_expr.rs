@@ -10,6 +10,49 @@ impl Validator<'_, '_> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
+        self.validate_match_flow(
+            source_id,
+            typed_id,
+            method,
+            result_type,
+            depth,
+            visited,
+            false,
+        )
+        .map(|_| ())
+    }
+
+    pub(super) fn validate_return_match(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        result_type: TypeId,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<bool, PickleError> {
+        self.validate_match_flow(
+            source_id,
+            typed_id,
+            method,
+            result_type,
+            depth,
+            visited,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_match_flow(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        result_type: TypeId,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+        returning: bool,
+    ) -> Result<bool, PickleError> {
         if depth > self.limits.expression_depth_limit() {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::ExpressionDepth,
@@ -49,7 +92,9 @@ impl Validator<'_, '_> {
         self.paired_source_typed_span(source.position, typed.position, typed_id)?;
         let supported =
             [p.definitions.int, p.definitions.boolean, p.definitions.unit].contains(&result_type);
-        let type_matches = typed.ty == result_type
+        let bottom = typed.ty == p.definitions.nothing_type;
+        let type_matches = (returning && bottom)
+            || typed.ty == result_type
             || matches!((self.ty(typed.ty)?, result_type),
             (Type::Constant(Constant::Int(_)), ty) if ty == p.definitions.int)
             || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::Boolean(_)), ty) if ty == p.definitions.boolean)
@@ -70,6 +115,8 @@ impl Validator<'_, '_> {
             depth + 1,
             visited,
         )?;
+        let mut all_exit = returning;
+        let mut semantic_join = None;
         for (ordinal, (&source_case, &typed_case)) in source_match
             .cases
             .iter()
@@ -123,17 +170,51 @@ impl Validator<'_, '_> {
             if let (Some(source_guard), Some(guard)) = (source_case.guard, case.guard) {
                 self.validate_if_condition(source_guard, guard, method, depth + 2, visited)?;
             }
-            self.validate_match_body(
-                source_case.body,
-                case.body,
-                method,
-                result_type,
-                depth + 2,
-                visited,
-            )?;
+            if returning {
+                if body.ty != p.definitions.nothing_type {
+                    let ty = self
+                        .primitive_flow_type(body.ty)?
+                        .ok_or(PickleError::BodyType {
+                            tree: case.body,
+                            ty: body.ty,
+                        })?;
+                    if semantic_join.is_some_and(|prior| prior != ty) {
+                        return Err(PickleError::BodyType {
+                            tree: typed_id,
+                            ty: typed.ty,
+                        });
+                    }
+                    semantic_join = Some(ty);
+                }
+                all_exit &= self.validate_return_flow(
+                    source_case.body,
+                    case.body,
+                    method,
+                    result_type,
+                    depth + 2,
+                    visited,
+                )?;
+            } else {
+                self.validate_match_body(
+                    source_case.body,
+                    case.body,
+                    method,
+                    result_type,
+                    depth + 2,
+                    visited,
+                )?;
+            }
             self.visible_locals = visible;
         }
-        Ok(())
+        if (bottom && !all_exit)
+            || (returning && typed.ty != semantic_join.unwrap_or(p.definitions.nothing_type))
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed.ty,
+            });
+        }
+        Ok(all_exit)
     }
 
     fn validate_int_case_pattern(

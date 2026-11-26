@@ -403,3 +403,94 @@ fn same_slot_labels_are_scoped_to_the_builder_and_its_finished_fragment() {
     assert_eq!(built.address(foreign), None);
     assert_eq!(built.bytes(), other.finish(&[foreign]).unwrap().bytes());
 }
+
+#[test]
+fn return_target_addresses_resolve_ancestor_and_forward_methods_across_nat_widths() {
+    for forward in [false, true] {
+        let mut builder = AstBuilder::new(AstBuildLimits::default());
+        let method = builder.reserve().unwrap();
+        let value = builder.push(leaf(INTCONST_TAG, TermValue::Int(7))).unwrap();
+        let returned = builder
+            .push(AstNode::Length {
+                tag: RETURN_TAG,
+                fields: vec![AstField::Reference(method), AstField::Tree(value)],
+            })
+            .unwrap();
+        let tpt = builder.push(leaf(INTCONST_TAG, TermValue::Int(0))).unwrap();
+        builder
+            .bind(
+                method,
+                AstNode::Length {
+                    tag: DEFDEF_TAG,
+                    fields: if forward {
+                        vec![AstField::Nat(0), AstField::Tree(tpt)]
+                    } else {
+                        vec![
+                            AstField::Nat(0),
+                            AstField::Tree(tpt),
+                            AstField::Tree(returned),
+                        ]
+                    },
+                },
+            )
+            .unwrap();
+        let mut roots = Vec::new();
+        if forward {
+            roots.push(returned);
+        }
+        for _ in 0..128 {
+            roots.push(builder.push(leaf(UNITCONST_TAG, TermValue::Unit)).unwrap());
+        }
+        roots.push(method);
+        let built = builder.finish(&roots).unwrap();
+        let target = built.address(method).unwrap();
+        assert!(target >= 128);
+        let offset = built.address(returned).unwrap() as usize;
+        let RawTree::LengthNode(node) =
+            RawTree::decode(&mut Reader::new(&built.bytes()[offset..])).unwrap()
+        else {
+            panic!()
+        };
+        let decoded = node.decode_return().unwrap();
+        assert_eq!(
+            decoded.target,
+            AstRef {
+                kind: AstRefKind::ReturnTarget,
+                address: target
+            }
+        );
+        assert!(decoded.expression.is_some());
+        assert_eq!(built, builder.finish(&roots).unwrap());
+    }
+}
+
+#[test]
+fn symbolic_return_fields_reject_foreign_labels_wrong_placement_and_non_methods() {
+    let mut builder = AstBuilder::new(AstBuildLimits::default());
+    let literal = builder.push(leaf(UNITCONST_TAG, TermValue::Unit)).unwrap();
+    assert!(matches!(
+        builder.push(AstNode::Length {
+            tag: BLOCK_TAG,
+            fields: vec![AstField::Reference(literal)]
+        }),
+        Err(AstBuildError::InvalidReference { tag: BLOCK_TAG, .. })
+    ));
+    let mut foreign = AstBuilder::new(AstBuildLimits::default());
+    let foreign_label = foreign.reserve().unwrap();
+    assert!(matches!(
+        builder.push(AstNode::Length {
+            tag: RETURN_TAG,
+            fields: vec![AstField::Reference(foreign_label)]
+        }),
+        Err(AstBuildError::InvalidLabel(_))
+    ));
+    let returned = builder
+        .push(AstNode::Length {
+            tag: RETURN_TAG,
+            fields: vec![AstField::Reference(literal)],
+        })
+        .unwrap();
+    assert!(
+        matches!(builder.finish(&[literal, returned]), Err(AstBuildError::InvalidReference { tag: RETURN_TAG, target }) if target == literal)
+    );
+}

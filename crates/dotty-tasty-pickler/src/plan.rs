@@ -871,7 +871,9 @@ impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
 }
 
 impl<'a> PicklePlan<'a> {
-    /// Check the frozen class/default-constructor/multiple-Int-literal method slice.
+    /// Check the canonical class, default constructor, method signatures and
+    /// bounded primitive bodies, including supported local Int returns.
+    /// Stateful classes and case bindings use the separate class-state plan.
     /// Neither success nor failure changes stores, arenas, indices, or files.
     pub fn validate(&self) -> Result<ValidatedPicklePlan<'_, 'a>, PickleError> {
         self.validate_with_limits(ValidationLimits::default())

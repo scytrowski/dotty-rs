@@ -55,3 +55,13 @@ and direct symbol references, validates visibility independently per case, and
 rejects missing, duplicate, stale or cross-case binding evidence without store
 mutation. The subset includes variable roots and explicit bindings over Int
 literals or wildcards, with a final unguarded irrefutable case.
+
+Local returns are supported in explicitly typed ordinary Int/Boolean/Unit
+methods. RETURN references the exact current method declaration. A bounded
+read-only flow validator separates normal completion from a proven local exit;
+it does not interpret arbitrary Nothing-typed expressions as supported returns.
+Blocks, If, While and Int matches retain their source/typed bindings, including
+the typer's checked Unit adaptation for an If without else. Bare return uses the
+actual synthetic Unit value already supplied by the typer. Non-local targets,
+returns in lambdas/local definitions and reference/category-two results remain
+outside this producer subset.

@@ -2,6 +2,9 @@
 
 Guarded Int matches and immutable case-local bindings are described in
 [`jvm-tasty-guarded-matches.md`](jvm-tasty-guarded-matches.md).
+Local primitive returns, including all-returning matches and preserved
+unreachable tails, are covered by
+[`jvm-tasty-local-returns.md`](jvm-tasty-local-returns.md).
 
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
 bounded JVM lowering. It depends on `dotty-core` for canonical symbols, types,

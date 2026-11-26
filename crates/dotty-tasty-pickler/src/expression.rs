@@ -144,6 +144,40 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Return(returned) = tree.kind {
+        if tree.ty != context.definitions().nothing_type || returned.from.is_some() {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
+        let target = context
+            .declaration_label(method)
+            .ok_or(PickleError::Reference {
+                symbol: method,
+                reason: crate::ReferenceError::NotRegistered,
+            })?;
+        let expr = returned.expr.ok_or(PickleError::BodyType {
+            tree: root,
+            ty: tree.ty,
+        })?;
+        let value = lower_expression_inner(
+            store,
+            ast,
+            expr,
+            method,
+            parameters,
+            ExpressionState {
+                depth: depth + 1,
+                budget,
+            },
+            context,
+        )?;
+        return context.wire_node(AstNode::Length {
+            tag: dotty_tasty::tasty::RETURN_TAG,
+            fields: vec![AstField::Reference(target), AstField::Tree(value)],
+        });
+    }
     if let TreeKind::Match(matched) = &tree.kind {
         return match_expr::lower_match(
             store,
@@ -231,6 +265,7 @@ fn lower_expression_inner(
                 tree: while_expr.body,
             })?;
         if body.ty != context.definitions().unit
+            && body.ty != context.definitions().nothing_type
             && !matches!(
                 store.types.try_get(body.ty),
                 Some(Type::Constant(Constant::Unit))
@@ -1248,6 +1283,9 @@ fn lower_expression_inner(
             )
         }
         (Constant::Unit, Some(Type::Constant(Constant::Unit))) => (UNITCONST_TAG, TermValue::Unit),
+        (Constant::Unit, _) if tree.ty == context.definitions().unit => {
+            (UNITCONST_TAG, TermValue::Unit)
+        }
         _ => {
             return Err(PickleError::BodyType {
                 tree: root,
