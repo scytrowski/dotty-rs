@@ -38,6 +38,7 @@ enum ExpressionShape {
     Return,
     Apply,
     Assign,
+    Ascription,
     Unsupported(&'static str),
 }
 
@@ -975,6 +976,7 @@ fn emit_expression_with_identity_context(
             TreeKind::Return(_) => ExpressionShape::Return,
             TreeKind::Apply(_) => ExpressionShape::Apply,
             TreeKind::Assign(_) => ExpressionShape::Assign,
+            TreeKind::Typed(_) => ExpressionShape::Ascription,
             kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
         }
     };
@@ -1028,12 +1030,55 @@ fn emit_expression_with_identity_context(
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
         ExpressionShape::Assign => emit_assignment(context, tree_id, code, depth),
+        ExpressionShape::Ascription => emit_ascription(context, tree_id, code, depth),
         ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node,
         }),
     }?;
     Ok(flow)
+}
+
+fn emit_ascription(
+    context: &mut JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let node = context.tree(tree)?;
+    let TreeKind::Typed(ascription) = node.kind else {
+        unreachable!("ascription shape was checked");
+    };
+    let ty = node.ty;
+    let defs = context.definitions;
+    let expected = if ty == defs.int {
+        Flow::Value(JvmType::Int)
+    } else if ty == defs.boolean {
+        Flow::Value(JvmType::Boolean)
+    } else if ty == defs.unit {
+        Flow::Unit
+    } else {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "non-primitive ascription",
+        });
+    };
+    context.visit(ascription.tpt, depth + 1)?;
+    let tpt = context.tree(ascription.tpt)?;
+    if tpt.ty != ty || !matches!(tpt.kind, TreeKind::TypeTree(_)) {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "inconsistent ascription type tree",
+        });
+    }
+    let found = emit_expression(context, ascription.expr, code, depth + 1)?;
+    if found != expected && found != Flow::Diverges {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "ascription operand type mismatch",
+        });
+    }
+    Ok(found)
 }
 
 fn emit_null_literal(
@@ -5351,6 +5396,40 @@ mod tests {
             })
         );
         assert_eq!(code_bytes(&fixture, &code), before);
+    }
+
+    #[test]
+    fn malformed_primitive_ascriptions_fail_before_returning_code() {
+        let mut fixture = Fixture::new(&[]);
+        let expr = fixture.literal(Constant::Int(7), fixture.definitions.int);
+        let wrong_tpt = fixture.ast.alloc(Tree {
+            kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+            position: None,
+            ty: fixture.definitions.boolean,
+        });
+        let root = fixture.ast.alloc(Tree {
+            kind: TreeKind::Typed(dotty_core::ast::TypedExpr {
+                expr,
+                tpt: wrong_tpt,
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let error = lower_expression(
+            &fixture.store,
+            &fixture.ast,
+            &fixture.definitions,
+            &fixture.method,
+            root,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: root,
+                node: "inconsistent ascription type tree",
+            }
+        );
     }
 
     #[test]

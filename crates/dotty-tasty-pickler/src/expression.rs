@@ -136,6 +136,37 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Typed(ascription) = tree.kind {
+        let tpt = ast
+            .try_get(ascription.tpt)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: ascription.tpt,
+            })?;
+        budget.visit(ascription.tpt, depth + 1)?;
+        if tpt.ty != tree.ty || !matches!(tpt.kind, TreeKind::TypeTree(_)) {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
+        let expression = lower_expression_inner(
+            store,
+            ast,
+            ascription.expr,
+            method,
+            parameters,
+            ExpressionState {
+                depth: depth + 1,
+                budget,
+            },
+            context,
+        )?;
+        let type_tree = context.primitive_type_syntax(tree.ty)?;
+        return context.wire_node(AstNode::Length {
+            tag: dotty_tasty::tasty::TYPED_TAG,
+            fields: vec![AstField::Tree(expression), AstField::Tree(type_tree)],
+        });
+    }
     if let TreeKind::While(while_expr) = &tree.kind {
         if tree.ty != context.definitions().unit {
             return Err(PickleError::BodyType {

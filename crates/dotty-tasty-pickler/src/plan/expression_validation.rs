@@ -1,5 +1,6 @@
 use super::*;
 
+mod ascription;
 mod assignment;
 mod block;
 mod local;
@@ -1166,6 +1167,16 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if matches!(source.kind, TreeKind::Typed(_)) && matches!(typed.kind, TreeKind::Typed(_)) {
+            return self.validate_primitive_ascription(
+                source_id,
+                typed_id,
+                method,
+                self.plan.definitions.boolean,
+                depth + 1,
+                visited,
+            );
+        }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
             self.source_typed_binding(source_id, typed_id)?;
             self.span(source.position)?;
@@ -1641,6 +1652,19 @@ impl Validator<'_, '_> {
                 result_type,
                 depth,
                 (seen, require_constructor_result_identity),
+            );
+        }
+        if matches!(source_rhs.kind, TreeKind::Typed(_)) && matches!(node.kind, TreeKind::Typed(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_primitive_ascription(
+                rhs,
+                body,
+                method,
+                result_type,
+                depth + 1,
+                seen,
             );
         }
         if matches!(
