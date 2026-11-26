@@ -1,0 +1,1 @@
+object ScalaConsumer { def main(args: Array[String]): Unit = { val v = new example.GuardedMatches; assert(v.run() == 6); assert(v.observed() == 12); assert(v.bound(-1) == -1); assert(v.nested(4) == 4); println("guarded match oracle ok") } }

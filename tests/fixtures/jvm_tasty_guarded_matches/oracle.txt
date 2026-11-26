@@ -1,0 +1,478 @@
+**** pickled info of class GuardedMatches
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0
+     UUID: 00c4beac-4680-07dd-0001-6acc31b4762e
+
+Names (333 bytes, starting from 35):
+     0: ASTs
+     1: example
+     2: GuardedMatches
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: trace
+    13: Int
+    14: next
+    15: +
+    16: scala[Qualified . Int]
+    17: +[Signed Signature(List(scala.Int),scala.Int) @+]
+    18: *
+    19: *[Signed Signature(List(scala.Int),scala.Int) @*]
+    20: guardCode
+    21: observed
+    22: run
+    23: next[Signed Signature(List(),scala.Int) @next]
+    24: >
+    25: Boolean
+    26: scala[Qualified . Boolean]
+    27: >[Signed Signature(List(scala.Int),scala.Boolean) @>]
+    28: guardCode[Signed Signature(List(),scala.Int) @guardCode]
+    29: n
+    30: _
+    31: bound
+    32: x
+    33: ==
+    34: ==[Signed Signature(List(scala.Int),scala.Boolean) @==]
+    35: nested
+    36: m
+    37: SourceFile
+    38: annotation
+    39: scala[Qualified . annotation]
+    40: internal
+    41: scala[Qualified . annotation][Qualified . internal]
+    42: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    43: String
+    44: java[Qualified . lang][Qualified . String]
+    45: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    46: GuardedMatches.scala
+    47: Positions
+    48: Comments
+    49: Attributes
+
+Trees (491 bytes, starting from 371):
+     0: PACKAGE(488)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(483) 2 [GuardedMatches]
+     9:     TEMPLATE(459)
+    12:       APPLY(10)
+    14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    17:           NEW
+    18:             TYPEREF 7 [Object]
+    20:               TERMREFpkg 6 [java[Qualified . lang]]
+    22:           SHAREDtype 18
+    24:       DEFDEF(6) 3 [<init>]
+    27:         EMPTYCLAUSE
+    28:         TYPEREF 10 [Unit]
+    30:           TERMREFpkg 11 [scala]
+    32:       VALDEF(12) 12 [trace]
+    35:         IDENTtpt 13 [Int]
+    37:           TYPEREF 13 [Int]
+    39:             TERMREFpkg 11 [scala]
+    41:         INTconst 0
+    43:         PRIVATE
+    44:         LOCAL
+    45:         MUTABLE
+    46:       DEFDEF(48) 14 [next]
+    49:         EMPTYCLAUSE
+    50:         IDENTtpt 13 [Int]
+    52:           SHAREDtype 37
+    54:         BLOCK(40)
+    56:           INTconst 5
+    58:           ASSIGN(36)
+    60:             SELECT 12 [trace]
+    62:               QUALTHIS
+    63:                 IDENTtpt 2 [GuardedMatches]
+    65:                   TYPEREFsymbol 5
+    67:                     TERMREFpkg 1 [example]
+    69:             APPLY(25)
+    71:               SELECTin(21) 17 [+[Signed Signature(List(scala.Int),scala.Int) @+]]
+    74:                 APPLY(16)
+    76:                   SELECTin(12) 19 [*[Signed Signature(List(scala.Int),scala.Int) @*]]
+    79:                     SELECT 12 [trace]
+    81:                       QUALTHIS
+    82:                         IDENTtpt 2 [GuardedMatches]
+    84:                           SHAREDtype 65
+    86:                     TYPEREF 13 [Int]
+    88:                       SHAREDtype 30
+    90:                   INTconst 10
+    92:                 SHAREDtype 86
+    94:               INTconst 1
+    96:       DEFDEF(44) 20 [guardCode]
+    99:         EMPTYCLAUSE
+   100:         IDENTtpt 13 [Int]
+   102:           SHAREDtype 37
+   104:         BLOCK(36)
+   106:           INTconst 0
+   108:           ASSIGN(32)
+   110:             SELECT 12 [trace]
+   112:               QUALTHIS
+   113:                 IDENTtpt 2 [GuardedMatches]
+   115:                   SHAREDtype 65
+   117:             APPLY(23)
+   119:               SELECTin(19) 17 [+[Signed Signature(List(scala.Int),scala.Int) @+]]
+   122:                 APPLY(14)
+   124:                   SELECTin(10) 19 [*[Signed Signature(List(scala.Int),scala.Int) @*]]
+   127:                     SELECT 12 [trace]
+   129:                       QUALTHIS
+   130:                         IDENTtpt 2 [GuardedMatches]
+   132:                           SHAREDtype 65
+   134:                     SHAREDtype 86
+   136:                   INTconst 10
+   138:                 SHAREDtype 86
+   140:               INTconst 2
+   142:       DEFDEF(13) 21 [observed]
+   145:         EMPTYCLAUSE
+   146:         IDENTtpt 13 [Int]
+   148:           SHAREDtype 37
+   150:         SELECT 12 [trace]
+   152:           QUALTHIS
+   153:             IDENTtpt 2 [GuardedMatches]
+   155:               SHAREDtype 65
+   157:       DEFDEF(139) 22 [run]
+   161:         EMPTYCLAUSE
+   162:         IDENTtpt 13 [Int]
+   164:           SHAREDtype 37
+   166:         MATCH(130)
+   169:           APPLY(10)
+   171:             SELECTin(8) 23 [next[Signed Signature(List(),scala.Int) @next]]
+   174:               QUALTHIS
+   175:                 IDENTtpt 2 [GuardedMatches]
+   177:                   SHAREDtype 65
+   179:               SHAREDtype 65
+   181:           CASEDEF(28)
+   183:             INTconst 0
+   185:             BLOCK(3)
+   187:               INTconst 99
+   190:             APPLY(19)
+   192:               SELECTin(15) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   195:                 APPLY(10)
+   197:                   SELECTin(8) 28 [guardCode[Signed Signature(List(),scala.Int) @guardCode]]
+   200:                     QUALTHIS
+   201:                       IDENTtpt 2 [GuardedMatches]
+   203:                         SHAREDtype 65
+   205:                     SHAREDtype 65
+   207:                 SHAREDtype 86
+   209:               INTconst 0
+   211:           CASEDEF(39)
+   213:             BIND(7) 29 [n]
+   216:               SHAREDtype 37
+   218:               IDENT 30 [_]
+   220:                 SHAREDtype 37
+   222:             BLOCK(7)
+   224:               TYPED(5)
+   226:                 TERMREFdirect 213
+   229:                 SHAREDtype 37
+   231:             APPLY(19)
+   233:               SELECTin(15) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   236:                 APPLY(10)
+   238:                   SELECTin(8) 28 [guardCode[Signed Signature(List(),scala.Int) @guardCode]]
+   241:                     QUALTHIS
+   242:                       IDENTtpt 2 [GuardedMatches]
+   244:                         SHAREDtype 65
+   246:                     SHAREDtype 65
+   248:                 SHAREDtype 86
+   250:               INTconst 0
+   252:           CASEDEF(35)
+   254:             BIND(7) 29 [n]
+   257:               SHAREDtype 37
+   259:               IDENT 30 [_]
+   261:                 SHAREDtype 37
+   263:             BLOCK(12)
+   265:               APPLY(10)
+   267:                 SELECTin(6) 17 [+[Signed Signature(List(scala.Int),scala.Int) @+]]
+   270:                   TERMREFdirect 254
+   273:                   SHAREDtype 86
+   275:                 INTconst 1
+   277:             APPLY(10)
+   279:               SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   282:                 SHAREDtype 270
+   285:                 SHAREDtype 86
+   287:               INTconst 0
+   289:           CASEDEF(8)
+   291:             IDENT 30 [_]
+   293:               SHAREDtype 37
+   295:             BLOCK(2)
+   297:               INTconst 0
+   299:       DEFDEF(67) 31 [bound]
+   302:         PARAM(5) 32 [x]
+   305:           IDENTtpt 13 [Int]
+   307:             SHAREDtype 37
+   309:         IDENTtpt 13 [Int]
+   311:           SHAREDtype 37
+   313:         MATCH(53)
+   315:           TERMREFdirect 302
+   318:           CASEDEF(28)
+   320:             BIND(5) 29 [n]
+   323:               SHAREDtype 37
+   325:               INTconst 0
+   327:             BLOCK(7)
+   329:               TYPED(5)
+   331:                 TERMREFdirect 320
+   334:                 SHAREDtype 37
+   336:             APPLY(10)
+   338:               SELECTin(6) 34 [==[Signed Signature(List(scala.Int),scala.Boolean) @==]]
+   341:                 SHAREDtype 331
+   344:                 SHAREDtype 86
+   346:               INTconst 0
+   348:           CASEDEF(18)
+   350:             BIND(7) 29 [n]
+   353:               SHAREDtype 37
+   355:               IDENT 30 [_]
+   357:                 SHAREDtype 37
+   359:             BLOCK(7)
+   361:               TYPED(5)
+   363:                 TERMREFdirect 350
+   366:                 SHAREDtype 37
+   368:       DEFDEF(101) 35 [nested]
+   371:         PARAM(5) 32 [x]
+   374:           IDENTtpt 13 [Int]
+   376:             SHAREDtype 37
+   378:         IDENTtpt 13 [Int]
+   380:           SHAREDtype 37
+   382:         MATCH(87)
+   384:           TERMREFdirect 371
+   387:           CASEDEF(71)
+   389:             BIND(7) 29 [n]
+   392:               SHAREDtype 37
+   394:               IDENT 30 [_]
+   396:                 SHAREDtype 37
+   398:             BLOCK(48)
+   400:               MATCH(46)
+   402:                 TERMREFdirect 389
+   405:                 CASEDEF(30)
+   407:                   BIND(7) 36 [m]
+   410:                     SHAREDtype 37
+   412:                     IDENT 30 [_]
+   414:                       SHAREDtype 37
+   416:                   BLOCK(7)
+   418:                     TYPED(5)
+   420:                       TERMREFdirect 407
+   423:                       SHAREDtype 37
+   425:                   APPLY(10)
+   427:                     SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   430:                       SHAREDtype 420
+   433:                       SHAREDtype 86
+   435:                     INTconst 3
+   437:                 CASEDEF(9)
+   439:                   IDENT 30 [_]
+   441:                     SHAREDtype 37
+   443:                   BLOCK(3)
+   445:                     SHAREDtype 402
+   448:             APPLY(10)
+   450:               SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   453:                 SHAREDtype 402
+   456:                 SHAREDtype 86
+   458:               INTconst 0
+   460:           CASEDEF(9)
+   462:             IDENT 30 [_]
+   464:               SHAREDtype 37
+   466:             BLOCK(3)
+   468:               SHAREDtype 384
+   471:     ANNOTATION(18)
+   473:       TYPEREF 37 [SourceFile]
+   475:         TERMREFpkg 41 [scala[Qualified . annotation][Qualified . internal]]
+   477:       APPLY(12)
+   479:         SELECTin(8) 45 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   482:           NEW
+   483:             SHAREDtype 473
+   486:           SHAREDtype 473
+   489:         STRINGconst 46 [GuardedMatches.scala]
+   491:
+
+Positions (528 bytes, starting from 865):
+  lines: 25
+  line sizes:
+     15, 22, 28, 49, 54, 29, 33, 35, 34, 28, 15, 3, 36, 29, 15, 3, 37, 32, 26, 17
+     5, 15, 3, 1, 0
+  positions:
+     0: 0 .. 587
+     5: 16 .. 587
+     9: 41 .. 585
+    18: 22 .. 22
+    24: 41 .. 41
+    28: 41 .. 41
+    32: 41 .. 67
+    35: 60 .. 63
+    41: 66 .. 67
+    46: 70 .. 117
+    50: 82 .. 85
+    54: 88 .. 117
+    56: 114 .. 115
+    60: 90 .. 95
+    63: 90 .. 90
+    71: 98 .. 110
+    76: 98 .. 105
+    79: 98 .. 103
+    82: 98 .. 98
+    90: 106 .. 108
+    94: 111 .. 112
+    96: 120 .. 172
+   100: 137 .. 140
+   104: 143 .. 172
+   106: 169 .. 170
+   110: 145 .. 150
+   113: 145 .. 145
+   119: 153 .. 165
+   124: 153 .. 160
+   127: 153 .. 158
+   130: 153 .. 153
+   136: 161 .. 163
+   140: 166 .. 167
+   142: 175 .. 202
+   146: 191 .. 194
+   150: 197 .. 202
+   153: 197 .. 197
+   157: 205 .. 356
+   162: 216 .. 219
+   166: 222 .. 356
+   169: 222 .. 228
+   171: 222 .. 226
+   175: 222 .. 222
+   181: 241 .. 272
+   183: 246 .. 247
+   185: 267 .. 272
+   187: 270 .. 272
+   192: 251 .. 264
+   195: 251 .. 262
+   197: 251 .. 260
+   201: 251 .. 251
+   209: 265 .. 266
+   211: 277 .. 307
+   213: 282 .. 283
+   218: 282 .. 282
+   222: 303 .. 307
+   226: 306 .. 307
+   229: 307 .. 307
+   233: 287 .. 300
+   236: 287 .. 298
+   238: 287 .. 296
+   242: 287 .. 287
+   250: 301 .. 302
+   252: 312 .. 336
+   254: 317 .. 318
+   259: 317 .. 317
+   263: 328 .. 336
+   267: 331 .. 334
+   270: 331 .. 332
+   275: 335 .. 336
+   279: 322 .. 325
+   282: 322 .. 323
+   287: 326 .. 327
+   289: 341 .. 352
+   291: 346 .. 347
+   295: 348 .. 352
+   297: 351 .. 352
+   299: 359 .. 443
+   302: 369 .. 375
+   305: 372 .. 375
+   309: 378 .. 381
+   313: 384 .. 443
+   315: 384 .. 385
+   318: 398 .. 423
+   320: 403 .. 408
+   325: 407 .. 408
+   327: 419 .. 423
+   331: 422 .. 423
+   334: 423 .. 423
+   338: 412 .. 416
+   341: 412 .. 413
+   346: 417 .. 418
+   348: 428 .. 439
+   350: 433 .. 434
+   355: 433 .. 433
+   359: 435 .. 439
+   363: 438 .. 439
+   366: 439 .. 439
+   368: 446 .. 585
+   371: 457 .. 463
+   374: 460 .. 463
+   378: 466 .. 469
+   382: 472 .. 585
+   384: 472 .. 473
+   387: 486 .. 565
+   389: 491 .. 492
+   394: 491 .. 491
+   398: 502 .. 565
+   400: 505 .. 565
+   402: 505 .. 506
+   405: 521 .. 541
+   407: 526 .. 527
+   412: 526 .. 526
+   416: 537 .. 541
+   420: 540 .. 541
+   423: 541 .. 541
+   427: 531 .. 534
+   430: 531 .. 532
+   435: 535 .. 536
+   437: 548 .. 559
+   439: 553 .. 554
+   443: 555 .. 559
+   445: 558 .. 559
+   450: 496 .. 499
+   453: 496 .. 497
+   458: 500 .. 501
+   460: 570 .. 581
+   462: 575 .. 576
+   466: 577 .. 581
+   468: 580 .. 581
+   477: 16 .. 587
+   483: 16 .. 16
+   489: 16 .. 16
+
+  source paths:
+     0: 46 [GuardedMatches.scala]
+
+Attributes (2 bytes, starting from 1397):
+  SOURCEFILEattr 46 [GuardedMatches.scala]
+
+**** end of pickled info of class GuardedMatches
+
+/** Decompiled from <oracle>/example/GuardedMatches.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("GuardedMatches.scala") class GuardedMatches() {
+    private[this] var trace: scala.Int = 0
+    def next(): scala.Int = {
+      GuardedMatches.this.trace = GuardedMatches.this.trace.*(10).+(1)
+      5
+    }
+    def guardCode(): scala.Int = {
+      GuardedMatches.this.trace = GuardedMatches.this.trace.*(10).+(2)
+      0
+    }
+    def observed(): scala.Int = GuardedMatches.this.trace
+    def run(): scala.Int = GuardedMatches.this.next() match {
+      case 0 if GuardedMatches.this.guardCode().>(0) =>
+        99
+      case n if GuardedMatches.this.guardCode().>(0) =>
+        (n: scala.Int)
+      case n if `n₂`.>(0) =>
+        `n₂`.+(1)
+      case _ =>
+        0
+    }
+    def bound(x: scala.Int): scala.Int = x match {
+      case n @ 0 if `n₃`.==(0) =>
+        (`n₃`: scala.Int)
+      case n =>
+        (`n₄`: scala.Int)
+    }
+    def nested(`x₂`: scala.Int): scala.Int = `x₂` match {
+      case n if `n₅`.>(0) =>
+        `n₅` match {
+          case m if m.>(3) =>
+            (m: scala.Int)
+          case _ =>
+            `n₅`
+        }
+      case _ =>
+        `x₂`
+    }
+  }
+}
