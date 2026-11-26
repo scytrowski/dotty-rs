@@ -4022,7 +4022,9 @@ fn emit_int_intrinsic(
         JvmIntIntrinsic::IntDivide => code.idiv(),
         JvmIntIntrinsic::IntRemainder => code.irem(),
         JvmIntIntrinsic::IntBitwiseAnd => code.iand(),
-        JvmIntIntrinsic::IntLessThan
+        JvmIntIntrinsic::IntEqual
+        | JvmIntIntrinsic::IntNotEqual
+        | JvmIntIntrinsic::IntLessThan
         | JvmIntIntrinsic::IntLessOrEqual
         | JvmIntIntrinsic::IntGreaterThan
         | JvmIntIntrinsic::IntGreaterOrEqual => {
@@ -4039,6 +4041,8 @@ fn emit_int_intrinsic(
                     error,
                 })?;
             match intrinsic {
+                JvmIntIntrinsic::IntEqual => code.if_icmpeq(truthy.clone()),
+                JvmIntIntrinsic::IntNotEqual => code.if_icmpne(truthy.clone()),
                 JvmIntIntrinsic::IntLessThan => code.if_icmplt(truthy.clone()),
                 JvmIntIntrinsic::IntLessOrEqual => code.if_icmple(truthy.clone()),
                 JvmIntIntrinsic::IntGreaterThan => code.if_icmpgt(truthy.clone()),

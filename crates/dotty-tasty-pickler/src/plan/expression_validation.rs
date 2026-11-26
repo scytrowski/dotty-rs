@@ -193,6 +193,20 @@ impl Validator<'_, '_> {
                     p.definitions.boolean
                 },
             )
+        } else if let Some(name) = p
+            .definitions
+            .any_equality_operator_symbols(p.store)
+            .and_then(|symbols| {
+                if *target == symbols.equal {
+                    Some("==")
+                } else if *target == symbols.not_equal {
+                    Some("!=")
+                } else {
+                    None
+                }
+            })
+        {
+            (name, p.definitions.int, p.definitions.boolean)
         } else if *target == int_symbols.bitwise_and {
             ("&", p.definitions.int, p.definitions.int)
         } else if *target == boolean_symbols.and_then {

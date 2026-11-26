@@ -9340,16 +9340,18 @@ fn canonical_int_arithmetic_and_comparisons_lower_to_ordered_jvm_instructions() 
 }
 
 #[test]
-fn int_equality_types_but_remains_outside_the_relational_intrinsic_subset() {
-    assert_source_failure(
-        "int-equality-not-lowered",
-        "class UnsupportedEquality { def equal(a: Int, b: Int): Boolean = a == b }\n",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::IntIntrinsicResolution { .. })
-            )
-        },
+fn int_equality_types_and_lowers_to_a_primitive_comparison() {
+    let output = TestOutputDirectory::new("int-equality-lowered");
+    let artifact = compile_source(
+        "class IntegerEquality { def equal(a: Int, b: Int): Boolean = a == b }\n",
+        "IntegerEquality.scala",
+        output.path(),
+    )
+    .unwrap();
+    let class = ClassFile::decode(&mut Reader::new(artifact.class.bytes())).unwrap();
+    assert_eq!(
+        &emitted_method_code(&class, "equal")[..3],
+        &[0x1b, 0x1c, 0x9f]
     );
 }
 

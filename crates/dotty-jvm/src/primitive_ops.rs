@@ -22,6 +22,10 @@ pub enum JvmIntIntrinsic {
     IntRemainder,
     /// Bitwise conjunction of two 32-bit integer values.
     IntBitwiseAnd,
+    /// Equality of two Int operands using the canonical Any equality symbol.
+    IntEqual,
+    /// Inequality of two Int operands using the canonical Any equality symbol.
+    IntNotEqual,
     /// Signed integer less-than comparison producing Boolean.
     IntLessThan,
     /// Signed integer less-than-or-equal comparison producing Boolean.
@@ -202,7 +206,19 @@ pub fn resolve_int_intrinsic(
     };
 
     let registry = definitions.int_primitive_operator_symbols(store);
-    let Some(intrinsic) = registered_operation(registry, method) else {
+    let equality = definitions.any_equality_operator_symbols(store);
+    let intrinsic = registered_operation(registry, method).or_else(|| {
+        equality.and_then(|symbols| {
+            if method == symbols.equal {
+                Some(JvmIntIntrinsic::IntEqual)
+            } else if method == symbols.not_equal {
+                Some(JvmIntIntrinsic::IntNotEqual)
+            } else {
+                None
+            }
+        })
+    });
+    let Some(intrinsic) = intrinsic else {
         if !store.symbols.contains(method) {
             return Err(JvmIntIntrinsicError::UnknownMethod { tree: call, method });
         }
@@ -233,11 +249,20 @@ pub fn resolve_int_intrinsic(
     if method_symbol.kind != SymbolKind::Method {
         return Err(JvmIntIntrinsicError::WrongMethodKind { tree: call, method });
     }
-    if method_symbol.owner != Some(int_class) {
+    let is_equality = matches!(
+        intrinsic,
+        JvmIntIntrinsic::IntEqual | JvmIntIntrinsic::IntNotEqual
+    );
+    let expected_owner = if is_equality {
+        definitions.any_class
+    } else {
+        int_class
+    };
+    if method_symbol.owner != Some(expected_owner) {
         return Err(JvmIntIntrinsicError::WrongOwner {
             tree: call,
             method,
-            expected: int_class,
+            expected: expected_owner,
             actual: method_symbol.owner,
         });
     }
@@ -249,7 +274,9 @@ pub fn resolve_int_intrinsic(
         return Err(JvmIntIntrinsicError::WrongSignature { tree: call, method });
     };
     let expected_result = match intrinsic {
-        JvmIntIntrinsic::IntLessThan
+        JvmIntIntrinsic::IntEqual
+        | JvmIntIntrinsic::IntNotEqual
+        | JvmIntIntrinsic::IntLessThan
         | JvmIntIntrinsic::IntLessOrEqual
         | JvmIntIntrinsic::IntGreaterThan
         | JvmIntIntrinsic::IntGreaterOrEqual => definitions.boolean,
@@ -257,7 +284,12 @@ pub fn resolve_int_intrinsic(
     };
     if signature.kind != MethodKind::Plain
         || signature.params.len() != 1
-        || signature.params[0].ty != definitions.int
+        || signature.params[0].ty
+            != if is_equality {
+                definitions.any_type
+            } else {
+                definitions.int
+            }
         || signature.params[0].erased
         || signature.params[0].varargs
         || signature.result != expected_result

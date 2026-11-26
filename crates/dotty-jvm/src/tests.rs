@@ -10703,6 +10703,40 @@ fn resolves_each_registered_int_primitive_by_symbol_identity() {
 }
 
 #[test]
+fn canonical_any_equality_specializes_only_two_int_operands() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let symbols = fixture
+        .definitions
+        .any_equality_operator_symbols(&fixture.store)
+        .unwrap();
+    for (method, expected) in [
+        (symbols.equal, JvmIntIntrinsic::IntEqual),
+        (symbols.not_equal, JvmIntIntrinsic::IntNotEqual),
+    ] {
+        let call = fixture.call(method, fixture.definitions.boolean);
+        assert_eq!(
+            resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+            Ok(Some(expected))
+        );
+        let TreeKind::Apply(apply) = &fixture.ast.get(call).kind else {
+            unreachable!()
+        };
+        let argument = apply.args[0];
+        fixture.ast.get_mut(argument).kind = TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        });
+        fixture.ast.get_mut(argument).ty = fixture.definitions.boolean;
+        assert_eq!(
+            resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+            Err(JvmIntIntrinsicError::WrongOperandType {
+                tree: call,
+                operand: argument
+            })
+        );
+    }
+}
+
+#[test]
 fn same_named_noncanonical_int_method_is_not_an_intrinsic() {
     let mut fixture = PrimitiveIntrinsicFixture::new();
     let name = fixture.store.names.intern("+");

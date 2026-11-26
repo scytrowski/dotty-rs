@@ -5,10 +5,7 @@ use dotty_jvm_tasty_contract::JvmTastyContractError;
 
 #[test]
 fn pending_expression_forms_reject_before_returning_a_partial_pair() {
-    for method in [
-        "def value(x: Int, y: Int): Boolean = x == y",
-        "def value(x: Int): Int = x match { case 0 => 10; case _ => 20 }",
-    ] {
+    for method in ["def value(x: Int): Int = x match { case 0 => 10; case _ => 20 }"] {
         let source = format!("package example\nclass Expressions {{ {method} }}");
         let error =
             emit_paired_jvm_tasty_class(&source, "Expressions.scala", SourceId::from_index(2470))
@@ -129,4 +126,53 @@ fn integer_bitwise_and_emits_iand_and_the_signed_scala_operator() {
         }),
         "{selections:?}"
     );
+}
+
+#[test]
+fn integer_equality_emits_int_branches_and_specialized_tasty_signatures() {
+    let pair = emit(
+        "def equal(x: Int, y: Int): Boolean = x == y; def different(x: Int, y: Int): Boolean = x != y",
+    );
+    let class = dotty_classfile::class_file::ClassFile::decode(
+        &mut dotty_classfile::reader::Reader::new(pair.classfile_bytes()),
+    )
+    .unwrap();
+    for (name, branch) in [("equal", 0x9f), ("different", 0xa0)] {
+        let method = class
+            .methods
+            .iter()
+            .find(|m| class.constant_pool.utf8(m.name_index) == Ok(name))
+            .unwrap();
+        let [dotty_classfile::attribute::Attribute::Code(code)] = method.attributes.as_slice()
+        else {
+            panic!("method code")
+        };
+        assert_eq!(&code.code[..3], &[0x1b, 0x1c, branch]);
+    }
+    let file =
+        dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+    for spelling in ["==", "!="] {
+        assert!(
+            file.ast_address_index()
+                .unwrap()
+                .iter()
+                .filter(|n| n.tag == dotty_tasty::tasty::SELECTIN_TAG)
+                .any(|n| {
+                    file.names()
+                        .render_signed_name(n.decode_select_in().unwrap().name)
+                        .unwrap()
+                        == Some(dotty_tasty::tasty::RenderedSignedName::Signed {
+                            original: spelling.into(),
+                            signature: dotty_tasty::tasty::RenderedNameSignature {
+                                result: "scala.Boolean".into(),
+                                parameters: vec![
+                                    dotty_tasty::tasty::RenderedParamSig::TermParameter(
+                                        "scala.Int".into(),
+                                    ),
+                                ],
+                            },
+                        })
+                })
+        );
+    }
 }

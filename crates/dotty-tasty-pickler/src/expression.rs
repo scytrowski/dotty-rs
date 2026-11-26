@@ -833,6 +833,7 @@ fn lower_expression_inner(
             }) = store.types.try_get(function.ty)
             && (context.is_registered_int_arithmetic_target(*target)?
                 || context.is_registered_int_comparison_target(*target)?
+                || context.int_equality_operator(*target).is_some()
                 || context.is_registered_boolean_short_circuit_target(*target)?)
         {
             if application.args.len() != 1 || application.kind != ApplyKind::Regular {
@@ -913,14 +914,18 @@ fn lower_expression_inner(
                 .collect::<Vec<_>>();
             let result_type = signature.result;
             let receiver_type = receiver.ty;
-            let selected = context.primitive_operator_select(
-                *target,
-                receiver_label,
-                receiver_type,
-                &parameter_types,
-                result_type,
-                Some(1),
-            )?;
+            let selected = if context.int_equality_operator(*target).is_some() {
+                context.int_equality_select(*target, receiver_label)?
+            } else {
+                context.primitive_operator_select(
+                    *target,
+                    receiver_label,
+                    receiver_type,
+                    &parameter_types,
+                    result_type,
+                    Some(1),
+                )?
+            };
             return context.wire_node(AstNode::Length {
                 tag: APPLY_TAG,
                 fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],
