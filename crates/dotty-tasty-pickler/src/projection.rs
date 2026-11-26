@@ -721,6 +721,8 @@ impl<'a> EncodingContext<'a> {
         let (ty, expected) = match builtin {
             Builtin::Int => (self.definitions.int, "Int"),
             Builtin::Long => (self.definitions.long, "Long"),
+            Builtin::Float => (self.definitions.float, "Float"),
+            Builtin::Double => (self.definitions.double, "Double"),
             Builtin::Boolean => (self.definitions.boolean, "Boolean"),
             Builtin::Unit => (self.definitions.unit, "Unit"),
             Builtin::Object => (self.definitions.object_type, "Object"),
@@ -2145,8 +2147,11 @@ impl<'a> EncodingContext<'a> {
             })
             .map_err(construction)
     }
-    fn is_long_symbol(&self, symbol: SymbolId) -> bool {
-        matches!(self.store.types.try_get(self.definitions.long), Some(Type::TypeRef {target: TypeRefTarget::Symbol(expected), ..}) if *expected == symbol)
+    // Discover these identities without charging unused builtin validation to
+    // legacy Int/Boolean-only plans. builtin_ref authenticates the selected one.
+    fn numeric_builtin(&self, symbol: SymbolId) -> Option<Builtin> {
+        [(self.definitions.long, Builtin::Long), (self.definitions.float, Builtin::Float), (self.definitions.double, Builtin::Double)]
+            .into_iter().find_map(|(ty, builtin)| matches!(self.store.types.try_get(ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(expected), .. }) if *expected == symbol).then_some(builtin))
     }
     fn external_inner(&mut self, symbol: SymbolId) -> Result<AstLabel, PickleError> {
         for builtin in [
@@ -2159,8 +2164,8 @@ impl<'a> EncodingContext<'a> {
                 return self.builtin_ref(builtin);
             }
         }
-        if self.is_long_symbol(symbol) {
-            return self.builtin_ref(Builtin::Long);
+        if let Some(builtin) = self.numeric_builtin(symbol) {
+            return self.builtin_ref(builtin);
         }
         self.symbol(symbol)?;
         let &(package, name) = self
@@ -2277,7 +2282,7 @@ impl<'a> EncodingContext<'a> {
                     } else if *symbol == self.builtin(Builtin::Int)?
                         || *symbol == self.builtin(Builtin::Boolean)?
                         || *symbol == self.builtin(Builtin::Object)?
-                        || self.is_long_symbol(*symbol)
+                        || self.numeric_builtin(*symbol).is_some()
                     {
                         if *prefix != self.definitions.no_prefix {
                             return Err(reference(*symbol, ReferenceError::Owner));
@@ -2428,11 +2433,24 @@ impl<'a> EncodingContext<'a> {
             self.int_type_syntax()
         } else if ty == self.definitions.boolean {
             self.boolean_type_syntax()
-        } else if ty == self.definitions.long {
+        } else if [
+            self.definitions.long,
+            self.definitions.float,
+            self.definitions.double,
+        ]
+        .contains(&ty)
+        {
             self.run(|c| {
-                let symbol = c.builtin(Builtin::Long)?;
+                let builtin = if ty == c.definitions.long {
+                    Builtin::Long
+                } else if ty == c.definitions.float {
+                    Builtin::Float
+                } else {
+                    Builtin::Double
+                };
+                let symbol = c.builtin(builtin)?;
                 let name = c.utf8(c.text(c.symbol(symbol)?.name.text())?)?;
-                let child = c.lower(c.definitions.long, 0)?;
+                let child = c.lower(ty, 0)?;
                 c.wire
                     .push(AstNode::NatAst {
                         tag: IDENTTPT_TAG,

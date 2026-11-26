@@ -1,12 +1,13 @@
-//! Exact source/typed validation for the bounded signed 64-bit value slice.
+//! Exact source/typed validation for bounded Long/Float/Double method values.
 use super::*;
 
 impl Validator<'_, '_> {
-    pub(super) fn validate_long_value(
+    pub(super) fn validate_numeric_value(
         &mut self,
         source_id: TreeId<Untyped>,
         typed_id: TreeId<Typed>,
         method: &MethodPicklePlan,
+        result_type: TypeId,
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
@@ -25,7 +26,14 @@ impl Validator<'_, '_> {
         self.source_typed_binding(source_id, typed_id)?;
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
             self.charge(1)?;
-            return self.validate_long_value(parens.inner, typed_id, method, depth + 1, visited);
+            return self.validate_numeric_value(
+                parens.inner,
+                typed_id,
+                method,
+                result_type,
+                depth + 1,
+                visited,
+            );
         }
         if matches!(
             typed.kind,
@@ -39,14 +47,7 @@ impl Validator<'_, '_> {
                 );
             }
             return self
-                .validate_return_flow(
-                    source_id,
-                    typed_id,
-                    method,
-                    p.definitions.long,
-                    depth,
-                    visited,
-                )
+                .validate_return_flow(source_id, typed_id, method, result_type, depth, visited)
                 .map(|_| ());
         }
         self.paired_source_typed_span(source.position, typed.position, typed_id)?;
@@ -56,22 +57,65 @@ impl Validator<'_, '_> {
         }
         match (&source.kind, &typed.kind) {
             (TreeKind::Literal(source), TreeKind::Literal(value)) => {
-                let (Constant::Long(expected), Constant::Long(actual)) =
-                    (&source.value, &value.value)
-                else {
+                let valid = match (&value.value, self.ty(typed.ty)?) {
+                    (Constant::Long(actual), Type::Constant(Constant::Long(ty))) => {
+                        result_type == p.definitions.long && actual == ty
+                    }
+                    (Constant::FloatBits(actual), Type::Constant(Constant::FloatBits(ty))) => {
+                        result_type == p.definitions.float && actual == ty
+                    }
+                    (Constant::DoubleBits(actual), Type::Constant(Constant::DoubleBits(ty))) => {
+                        result_type == p.definitions.double && actual == ty
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                }
+                // Constant equality compares raw bits, including signed zero and NaNs.
+                if source.value != value.value {
+                    return Err(PickleError::SourceShape {
+                        tree: source_id,
+                        expected: SourceRole::Body,
+                    });
+                }
+            }
+            (TreeKind::PhaseSpecific(UntypedNode::Number(number)), TreeKind::Literal(value)) => {
+                // Unsuffixed decimal/exponent syntax remains raw in the source AST.
+                // Authenticate its spelling with the same finite f64 conversion as
+                // the typer, after applying the existing bounded-name check.
+                if result_type != p.definitions.double
+                    || !matches!(number.kind, NumberKind::Decimal | NumberKind::Floating)
+                {
+                    return Err(PickleError::SourceShape {
+                        tree: source_id,
+                        expected: SourceRole::Body,
+                    });
+                }
+                let Constant::DoubleBits(actual) = value.value else {
                     return Err(PickleError::BodyType {
                         tree: typed_id,
                         ty: typed.ty,
                     });
                 };
-                if !matches!(self.ty(typed.ty)?, Type::Constant(Constant::Long(value)) if value == actual)
+                if !matches!(self.ty(typed.ty)?, Type::Constant(Constant::DoubleBits(bits)) if *bits == actual)
                 {
                     return Err(PickleError::BodyType {
                         tree: typed_id,
                         ty: typed.ty,
                     });
                 }
-                if expected != actual {
+                let bits = self
+                    .name_text(number.text)?
+                    .replace('_', "")
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .map(f64::to_bits);
+                if bits != Some(actual) {
                     return Err(PickleError::SourceShape {
                         tree: source_id,
                         expected: SourceRole::Body,
@@ -106,7 +150,7 @@ impl Validator<'_, '_> {
                     || symbol.owner != Some(method.symbol)
                     || *prefix != p.definitions.no_prefix
                     || !matches!(self.ty(*prefix)?, Type::NoPrefix)
-                    || self.complete(*target)? != p.definitions.long
+                    || self.complete(*target)? != result_type
                 {
                     return Err(PickleError::Reference {
                         symbol: *target,

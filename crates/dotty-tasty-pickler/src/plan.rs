@@ -1575,10 +1575,17 @@ impl<'a> Validator<'_, 'a> {
                     Some(self.plan.definitions.int)
                 } else if parameter_type.name == self.symbol(boolean)?.name {
                     Some(self.plan.definitions.boolean)
-                } else if self.complete(symbol)? == self.plan.definitions.long {
-                    let long = self.builtin(Builtin::Long, self.plan.definitions.long, "Long")?;
-                    (parameter_type.name == self.symbol(long)?.name)
-                        .then_some(self.plan.definitions.long)
+                } else if let Some((ty, builtin, name)) = [
+                    (self.plan.definitions.long, Builtin::Long, "Long"),
+                    (self.plan.definitions.float, Builtin::Float, "Float"),
+                    (self.plan.definitions.double, Builtin::Double, "Double"),
+                ]
+                .into_iter()
+                .find(|(ty, _, _)| {
+                    self.plan.store.symbols.get(symbol).info == SymbolInfo::Complete(*ty)
+                }) {
+                    let builtin = self.builtin(builtin, ty, name)?;
+                    (parameter_type.name == self.symbol(builtin)?.name).then_some(ty)
                 } else {
                     None
                 };
@@ -2748,6 +2755,8 @@ impl<'a> Validator<'_, 'a> {
                     || (formal.ty != p.definitions.int
                         && formal.ty != p.definitions.boolean
                         && formal.ty != p.definitions.long
+                        && formal.ty != p.definitions.float
+                        && formal.ty != p.definitions.double
                         && !self.is_planned_sibling_class_type(formal.ty, None))
                     || self.complete(parameter)? != formal.ty
                     || formal.erased
@@ -2768,8 +2777,13 @@ impl<'a> Validator<'_, 'a> {
         {
             return self.context_result_closure(definition, method, result_type);
         }
-        let has_long = result_type == p.definitions.long || method.parameter_clauses.iter().flatten().any(|&s| matches!(self.plan.store.symbols.get(s).info, SymbolInfo::Complete(ty) if ty == p.definitions.long));
-        if has_long
+        let numeric = [
+            p.definitions.long,
+            p.definitions.float,
+            p.definitions.double,
+        ];
+        let has_numeric = numeric.contains(&result_type) || method.parameter_clauses.iter().flatten().any(|&s| matches!(self.plan.store.symbols.get(s).info, SymbolInfo::Complete(ty) if numeric.contains(&ty)));
+        if has_numeric
             && (curried
                 || method
                     .parameter_clauses
@@ -2787,6 +2801,8 @@ impl<'a> Validator<'_, 'a> {
             result_ty == p.definitions.int
                 || result_ty == p.definitions.boolean
                 || result_ty == p.definitions.long
+                || result_ty == p.definitions.float
+                || result_ty == p.definitions.double
                 || result_ty == p.definitions.unit
                 || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
         };
@@ -2803,6 +2819,12 @@ impl<'a> Validator<'_, 'a> {
         } else if result_type == p.definitions.long {
             let long = self.builtin(Builtin::Long, p.definitions.long, "Long")?;
             self.symbol(long)?.name
+        } else if result_type == p.definitions.float {
+            let float = self.builtin(Builtin::Float, p.definitions.float, "Float")?;
+            self.symbol(float)?.name
+        } else if result_type == p.definitions.double {
+            let double = self.builtin(Builtin::Double, p.definitions.double, "Double")?;
+            self.symbol(double)?.name
         } else if result_type == p.definitions.unit {
             self.symbol(unit)?.name
         } else if self.is_planned_sibling_class_type(result_type, Some(result.name)) {

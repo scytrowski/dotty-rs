@@ -374,7 +374,14 @@ impl Validator<'_, '_> {
                 visited,
             )
         } else if target_type == self.plan.definitions.long {
-            self.validate_long_value(source_assign.rhs, typed_assign.rhs, method, depth, visited)
+            self.validate_numeric_value(
+                source_assign.rhs,
+                typed_assign.rhs,
+                method,
+                target_type,
+                depth,
+                visited,
+            )
         } else if target_type == self.plan.definitions.boolean {
             self.validate_if_condition(source_assign.rhs, typed_assign.rhs, method, depth, visited)
         } else {

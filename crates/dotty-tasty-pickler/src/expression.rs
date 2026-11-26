@@ -1275,6 +1275,22 @@ fn lower_expression_inner(
         {
             (LONGCONST_TAG, TermValue::LongInt(*value))
         }
+        (Constant::FloatBits(value), Some(Type::Constant(Constant::FloatBits(type_value))))
+            if value == type_value =>
+        {
+            (
+                dotty_tasty::tasty::FLOATCONST_TAG,
+                TermValue::Int(i32::from_ne_bytes(value.to_ne_bytes())),
+            )
+        }
+        (Constant::DoubleBits(value), Some(Type::Constant(Constant::DoubleBits(type_value))))
+            if value == type_value =>
+        {
+            (
+                dotty_tasty::tasty::DOUBLECONST_TAG,
+                TermValue::LongInt(i64::from_ne_bytes(value.to_ne_bytes())),
+            )
+        }
         (Constant::Boolean(value), Some(Type::Constant(Constant::Boolean(type_value))))
             if value == type_value =>
         {
