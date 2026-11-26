@@ -101,7 +101,7 @@ impl Validator<'_, '_> {
                 .typed_ast
                 .try_get(case.body)
                 .ok_or(PickleError::InvalidTypedTree { tree: case.body })?;
-            if source_case.guard.is_some() || case.guard.is_some() || typed.ty != body.ty {
+            if source_case.guard.is_some() != case.guard.is_some() || typed.ty != body.ty {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
@@ -112,7 +112,13 @@ impl Validator<'_, '_> {
                 .ok_or(PickleError::InvalidTypedTree { tree: case.pattern })?;
             let source_pattern = self.source_tree(source_case.pattern)?;
             let last = ordinal + 1 == source_match.cases.len();
-            if last {
+            let wildcard = matches!(&pattern.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_");
+            if (wildcard && case.guard.is_none()) != last {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            if wildcard {
                 self.source_typed_binding(source_case.pattern, case.pattern)?;
                 self.paired_source_typed_span(
                     source_pattern.position,
@@ -146,6 +152,9 @@ impl Validator<'_, '_> {
                     depth + 2,
                     visited,
                 )?;
+            }
+            if let (Some(source_guard), Some(guard)) = (source_case.guard, case.guard) {
+                self.validate_if_condition(source_guard, guard, method, depth + 2, visited)?;
             }
             self.validate_match_body(
                 source_case.body,

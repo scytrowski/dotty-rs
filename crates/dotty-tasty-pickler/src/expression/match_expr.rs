@@ -78,15 +78,25 @@ pub(super) fn lower_match(
             },
             context,
         )?;
-        if case.guard.is_some() {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::BodyExpression,
-                symbol: Some(method),
-            });
+        let mut case_fields = vec![AstField::Tree(pattern), AstField::Tree(body)];
+        if let Some(guard) = case.guard {
+            let guard = lower_expression_inner(
+                store,
+                ast,
+                guard,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: depth + 2,
+                    budget,
+                },
+                context,
+            )?;
+            case_fields.push(AstField::Tree(guard));
         }
         let case = context.wire_node(AstNode::Length {
             tag: dotty_tasty::tasty::CASEDEF_TAG,
-            fields: vec![AstField::Tree(pattern), AstField::Tree(body)],
+            fields: case_fields,
         })?;
         fields.push(AstField::Tree(case));
     }
