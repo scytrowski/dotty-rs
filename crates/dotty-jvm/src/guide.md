@@ -42,3 +42,8 @@ across normal exits. Match lowering currently requires a planned local layout.
 Binders, guards, extractors and missing wildcard cases return typed errors.
 The semantic TASTy producer retains these source constructs separately; a
 successful JVM emission alone does not certify a paired artifact.
+
+`JvmLocalBinding::pattern` records the exact typed Bind, canonical immutable
+symbol, case scope and typed CaseDef. Validation checks the declaration edge
+and scope membership. JVM lowering initializes the slot only on pattern success
+and removes case-local initialization facts before the next case and match join.

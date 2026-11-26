@@ -40,7 +40,45 @@ pub(super) fn emit_match(
             return Err(unsupported(case_id, "inconsistent match case type"));
         }
         context.visit(case.pattern, depth + 2)?;
-        let pattern = context.tree(case.pattern)?;
+        let mut pattern_id = case.pattern;
+        let mut binder = None;
+        if let TreeKind::Bind(bind) = context.tree(pattern_id)?.kind {
+            if bind.given {
+                return Err(unsupported(pattern_id, "given match binder"));
+            }
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = context
+                .store
+                .types
+                .try_get(context.tree(pattern_id)?.ty)
+                .ok_or_else(|| unsupported(pattern_id, "invalid match binder"))?
+            else {
+                return Err(unsupported(pattern_id, "invalid match binder"));
+            };
+            let symbol = *symbol;
+            let layout = context
+                .local_layout
+                .ok_or(JvmCodegenError::MissingLocalBinding {
+                    tree: pattern_id,
+                    symbol,
+                })?;
+            let local =
+                *layout
+                    .local(symbol)
+                    .map_err(|_| JvmCodegenError::MissingLocalBinding {
+                        tree: pattern_id,
+                        symbol,
+                    })?;
+            if local.declaration() != pattern_id || local.ty() != JvmType::Int {
+                return Err(unsupported(pattern_id, "inconsistent match binder"));
+            }
+            binder = Some(local);
+            pattern_id = bind.body;
+            context.visit(pattern_id, depth + 3)?;
+        }
+        let pattern = context.tree(pattern_id)?;
         let literal = match &pattern.kind {
             TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)) => {
                 let Constant::Int(value) = literal.value else {
@@ -70,7 +108,7 @@ pub(super) fn emit_match(
         if primitive_type(context.store, pattern.ty, context.definitions) != Some(JvmType::Int) {
             return Err(unsupported(case.pattern, "non-Int match pattern type"));
         }
-        cases.push((case.body, literal, case.guard));
+        cases.push((case.body, literal, case.guard, binder));
     }
     if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(JvmType::Int) {
         return Err(unsupported(matched.selector, "non-Int match selector"));
@@ -84,7 +122,12 @@ pub(super) fn emit_match(
 fn emit_cases(
     context: &mut JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
-    cases: &[(TreeId<Typed>, Option<i32>, Option<TreeId<Typed>>)],
+    cases: &[(
+        TreeId<Typed>,
+        Option<i32>,
+        Option<TreeId<Typed>>,
+        Option<JvmLocalSlot>,
+    )],
     expected: Flow,
     slot: usize,
     code: &mut CodeBuilder,
@@ -96,7 +139,7 @@ fn emit_cases(
     let before = context.initialized_locals.clone();
     let mut joined: Option<HashSet<SymbolId>> = None;
     let mut incoming = before.clone();
-    for &(body, literal, guard) in cases {
+    for &(body, literal, guard, binder) in cases {
         context.initialized_locals = incoming.clone();
         let next = if literal.is_some() || guard.is_some() {
             Some(code.new_label().map_err(build_error)?)
@@ -110,23 +153,33 @@ fn emit_cases(
                 .and_then(|c| c.if_icmpne(next.clone()))
                 .map_err(build_error)?;
         }
+        if let Some(local) = binder {
+            code.iload(slot)
+                .and_then(|c| c.istore(usize::from(local.slot())))
+                .map_err(build_error)?;
+            context.initialized_locals.insert(local.symbol());
+        }
         if let Some(guard) = guard {
             if emit_expression(context, guard, code, depth + 2)? != Flow::Value(JvmType::Boolean) {
                 return Err(unsupported(guard, "non-Boolean match guard"));
             }
             code.ifeq(next.as_ref().expect("guard has a continuation").clone())
                 .map_err(build_error)?;
+            let mut after_guard = context.initialized_locals.clone();
+            if let Some(local) = binder {
+                after_guard.remove(&local.symbol());
+            }
             incoming = if literal.is_some() {
-                incoming
-                    .intersection(&context.initialized_locals)
-                    .copied()
-                    .collect()
+                incoming.intersection(&after_guard).copied().collect()
             } else {
-                context.initialized_locals.clone()
+                after_guard
             };
         }
         let flow = emit_expression(context, body, code, depth + 2)?;
         validate_branch(context, body, flow)?;
+        if let Some(local) = binder {
+            context.initialized_locals.remove(&local.symbol());
+        }
         if flow != Flow::Diverges {
             if flow != expected {
                 return Err(unsupported(body, "match case result mismatch"));

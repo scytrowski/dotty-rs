@@ -94,3 +94,9 @@ Each [`TypedLocalBinding`] in [`TypedSourceOutput::local_bindings`] identifies
 the original file and declaration tree, its typed declaration, its symbol and
 its block scope. Resolve the written name against that file’s original parse.
 Bindings from a failed typing transaction are absent from the output.
+
+Pattern binders retain the same canonical tuple shape as ordinary locals through
+`SourceTyper::typed_pattern_binding_at`. `TypedSourceOutput::pattern_bindings`
+keeps their exact source roots, typed Bind declarations, symbols and case scopes
+separately from ValDef locals, in typed declaration order. Preserve these tuples
+with the original session arenas when planning code generation.

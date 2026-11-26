@@ -915,13 +915,14 @@ pub struct JvmMethodPlan {
 /// initialization instructions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JvmLocalBinding {
-    /// Exact typed `ValDef` node in the compilation unit's typed arena.
+    /// Exact typed `ValDef` or pattern `Bind` node in the compilation unit's typed arena.
     pub declaration: TreeId<Typed>,
     /// Existing canonical local symbol in the compilation unit's store.
     pub symbol: SymbolId,
     /// Whether the source declaration is mutable (`var`).
     pub mutable: bool,
     literal_given: Option<defaults::LiteralGiven>,
+    pattern: Option<(dotty_core::ScopeId, TreeId<Typed>)>,
 }
 
 impl JvmLocalBinding {
@@ -932,7 +933,31 @@ impl JvmLocalBinding {
             symbol,
             mutable,
             literal_given: None,
+            pattern: None,
         }
+    }
+    /// Records an immutable pattern binder with its canonical case scope and
+    /// exact typed CaseDef. The case must bind this declaration as its root
+    /// pattern; all IDs must belong to the unit's one semantic session.
+    pub const fn pattern(
+        declaration: TreeId<Typed>,
+        symbol: SymbolId,
+        scope: dotty_core::ScopeId,
+        case: TreeId<Typed>,
+    ) -> Self {
+        Self {
+            declaration,
+            symbol,
+            mutable: false,
+            literal_given: None,
+            pattern: Some((scope, case)),
+        }
+    }
+
+    /// Canonical scope and typed CaseDef for a pattern binder, or None for an
+    /// ordinary local. Validation checks the symbol, scope and pattern edge.
+    pub const fn pattern_case(self) -> Option<(dotty_core::ScopeId, TreeId<Typed>)> {
+        self.pattern
     }
 }
 
@@ -4052,7 +4077,21 @@ impl JvmCompilationUnit<'_> {
                             declaration: binding.declaration,
                         },
                     )?;
-                    if !matches!(declaration.kind, TreeKind::ValDef(_)) {
+                    let valid_pattern = binding.pattern.is_some_and(|(scope, case)| {
+                        matches!(&declaration.kind, TreeKind::Bind(bind) if !bind.given)
+                            && matches!(self.store.types.try_get(declaration.ty), Some(dotty_core::Type::TermRef { prefix, target: dotty_core::TermRefTarget::Symbol(target) })
+                                if *target == binding.symbol && matches!(self.store.types.try_get(*prefix), Some(dotty_core::Type::NoPrefix)))
+                            && matches!(self.typed_ast.try_get(case).map(|n| &n.kind), Some(TreeKind::CaseDef(node)) if node.pattern == binding.declaration)
+                            && typed_tree_contains(self.typed_ast, body, case)
+                            && self.store.scopes.contains(scope) && self.store.symbols.contains(binding.symbol)
+                            && self.store.scopes.get(scope).owner == Some(method_plan.method)
+                            && self.store.scopes.get(scope).lookup_all(&self.store.symbols.get(binding.symbol).name) == [binding.symbol]
+                            && !binding.mutable && binding.literal_given.is_none()
+                    });
+                    if !(binding.pattern.is_none()
+                        && matches!(declaration.kind, TreeKind::ValDef(_))
+                        || valid_pattern)
+                    {
                         return Err(JvmCodegenError::InvalidLocalDeclaration {
                             method: method_plan.method,
                             declaration: binding.declaration,
@@ -4137,7 +4176,7 @@ impl JvmCompilationUnit<'_> {
                             });
                         }
                     };
-                    if declaration.ty != symbol_type {
+                    if !valid_pattern && declaration.ty != symbol_type {
                         return Err(JvmCodegenError::LocalTypeMismatch {
                             declaration: binding.declaration,
                             symbol: binding.symbol,

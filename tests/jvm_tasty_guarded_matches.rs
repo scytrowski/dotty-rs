@@ -55,3 +55,42 @@ fn guards_still_require_a_final_unconditional_case() {
         );
     }
 }
+
+include!("support/guarded_match_plan.rs");
+
+#[test]
+fn jvm_case_bindings_are_canonical_slots_and_cannot_change_case_scope() {
+    with_jvm(
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n + 1; case n => n } }",
+        |unit, definitions| {
+            let class = unit.classes[0].class;
+            let generated = dotty::jvm::emit_class(unit, class, definitions).unwrap();
+            assert!(!generated.bytes().is_empty());
+            let method = &unit.classes[0].methods[0];
+            assert_eq!(method.locals.len(), 2);
+            assert_ne!(method.locals[0].symbol, method.locals[1].symbol);
+            assert_ne!(
+                method.locals[0].pattern_case().unwrap().0,
+                method.locals[1].pattern_case().unwrap().0
+            );
+            let mut classes = unit.classes.clone();
+            let a = classes[0].methods[0].locals[0];
+            let b = classes[0].methods[0].locals[1];
+            classes[0].methods[0].locals[0] = dotty::jvm::JvmLocalBinding::pattern(
+                a.declaration,
+                a.symbol,
+                b.pattern_case().unwrap().0,
+                a.pattern_case().unwrap().1,
+            );
+            let invalid = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: unit.typed_ast,
+                classes,
+            };
+            assert!(matches!(
+                invalid.validate(),
+                Err(dotty::jvm::JvmCodegenError::InvalidLocalDeclaration { .. })
+            ));
+        },
+    );
+}

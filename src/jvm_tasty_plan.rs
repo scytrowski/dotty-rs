@@ -737,6 +737,30 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
                         },
                     ));
                 }
+                for (source_case, node) in parsed.ast.iter() {
+                    let TreeKind::CaseDef(case) = &node.kind else {
+                        continue;
+                    };
+                    let Some(binding) = typer.typed_pattern_binding_at(source_id, case.pattern)
+                    else {
+                        continue;
+                    };
+                    if typer.store().symbols.get(binding.symbol()).owner != Some(method) {
+                        continue;
+                    }
+                    let typed_case = typer
+                        .source_typed_index()
+                        .get(source_id, source_case)
+                        .ok_or(PairedPlanError::UnsupportedSourceShape(
+                            "canonical pattern case binding",
+                        ))?;
+                    locals.push(JvmLocalBinding::pattern(
+                        binding.declaration(),
+                        binding.symbol(),
+                        binding.scope(),
+                        typed_case,
+                    ));
+                }
                 locals.sort_unstable_by_key(|local| local.declaration.index());
                 jvm_methods.push(JvmMethodPlan {
                     method,

@@ -72,6 +72,8 @@ pub struct JvmMethodPlanner<'a> {
     pub typed_index: &'a SourceTypedIndex,
     /// Ordinary locals from the same typer output, in typed declaration order.
     pub local_bindings: &'a [TypedLocalBinding],
+    /// Case-local pattern bindings retained from the same frontend session.
+    pub pattern_bindings: &'a [TypedLocalBinding],
 }
 
 impl<'a> JvmMethodPlanner<'a> {
@@ -89,6 +91,7 @@ impl<'a> JvmMethodPlanner<'a> {
             typed_ast: &output.typed_ast,
             typed_index: &output.source_typed_index,
             local_bindings: &output.local_bindings,
+            pattern_bindings: &output.pattern_bindings,
         }
     }
 
@@ -159,7 +162,9 @@ impl<'a> JvmMethodPlanner<'a> {
             &def.value_param_clauses,
             &typed.value_param_clauses,
         )?;
-        let locals = self.locals_for(method, self.local_bindings)?;
+        let mut locals = self.locals_for(method, self.local_bindings)?;
+        locals.extend(self.locals_for(method, self.pattern_bindings)?);
+        locals.sort_unstable_by_key(|binding| binding.declaration.index());
         Ok(JvmMethodPlan {
             method,
             parameters,
@@ -181,6 +186,33 @@ impl<'a> JvmMethodPlanner<'a> {
             }
             let symbol = self.store.symbols.get(id);
             if symbol.owner != Some(method) {
+                continue;
+            }
+            if matches!(
+                self.typed_ast
+                    .try_get(binding.declaration())
+                    .map(|n| &n.kind),
+                Some(TreeKind::Bind(_))
+            ) {
+                let (source, pattern) = binding.source_declaration();
+                let source_case = self
+                    .source_ast
+                    .iter()
+                    .find_map(|(id, node)| {
+                        matches!(&node.kind, TreeKind::CaseDef(case) if case.pattern == pattern)
+                            .then_some(id)
+                    })
+                    .ok_or(MethodPlanError::Local(id))?;
+                let case = self
+                    .typed_index
+                    .get(source, source_case)
+                    .ok_or(MethodPlanError::Local(id))?;
+                locals.push(JvmLocalBinding::pattern(
+                    binding.declaration(),
+                    id,
+                    binding.scope(),
+                    case,
+                ));
                 continue;
             }
             if symbol.kind != SymbolKind::Local

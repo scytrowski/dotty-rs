@@ -380,6 +380,7 @@ impl JvmLocalBinding {
             declaration: typed,
             symbol,
             mutable: false,
+            pattern: None,
             literal_given: Some(proof),
         };
         if !proof.matches(&binding, method, typed_ast, store) {

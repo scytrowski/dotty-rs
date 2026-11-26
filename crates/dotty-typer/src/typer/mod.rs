@@ -259,11 +259,14 @@ pub struct TypedSourceOutput {
     /// Ordinary local values from this source in typed declaration ID order.
     /// The owning method of each symbol is available in the session store.
     pub local_bindings: Vec<TypedLocalBinding>,
+    /// Case-local pattern bindings in typed declaration order, kept separately
+    /// from ordinary ValDef locals. Their declarations are typed Bind nodes.
+    pub pattern_bindings: Vec<TypedLocalBinding>,
 }
 
-/// Canonical identity for one successfully typed ordinary local value.
+/// Canonical identity for a successfully typed ordinary local or pattern binder.
 ///
-/// The declaration is the exact typed `ValDef` recorded for its source tree;
+/// The declaration is the exact typed `ValDef` or pattern `Bind` recorded for its source tree;
 /// the symbol is the local identity entered by the typer. Consumers should
 /// keep this pair together rather than trying to recover the symbol from the
 /// declaration's printed name or source position.
@@ -292,7 +295,7 @@ impl TypedLocalBinding {
         self.symbol
     }
 
-    /// Block scope that contains this exact local declaration.
+    /// Block or case scope that contains this exact local declaration.
     pub const fn scope(self) -> ScopeId {
         self.scope
     }
@@ -956,7 +959,15 @@ impl<'a> SourceTyper<'a> {
             .filter_map(|&(source, tree)| self.typed_local_binding_at(source, tree))
             .collect();
         local_bindings.sort_unstable_by_key(|binding| binding.declaration().index());
+        let mut pattern_bindings: Vec<_> = self
+            .pattern_bindings
+            .by_tree
+            .keys()
+            .filter_map(|&(source, tree)| self.typed_pattern_binding_at(source, tree))
+            .collect();
+        pattern_bindings.sort_unstable_by_key(|binding| binding.declaration().index());
         TypedSourceOutput {
+            pattern_bindings,
             typed_ast: self.typed_arena,
             source_typed_index: self.typed_index,
             local_bindings,
@@ -1043,6 +1054,31 @@ impl<'a> SourceTyper<'a> {
             )
             .is_empty()
         {
+            return None;
+        }
+        Some(TypedLocalBinding {
+            source_declaration: (source, tree),
+            declaration,
+            symbol,
+            scope,
+        })
+    }
+
+    /// Returns the canonical source/typed/symbol/case-scope tuple for a pattern
+    /// binder. Synthetic wildcard children have no fabricated source mapping.
+    /// Retain this tuple in the same session as the store and typed arena.
+    pub fn typed_pattern_binding_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TypedLocalBinding> {
+        let symbol = self.pattern_binding_symbol_at(source, tree)?;
+        let declaration = self.typed_index.get(source, tree)?;
+        let scope = self.pattern_binding_scope(symbol)?;
+        if !matches!(
+            self.typed_arena.try_get(declaration)?.kind,
+            TreeKind::Bind(_)
+        ) {
             return None;
         }
         Some(TypedLocalBinding {
