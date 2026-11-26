@@ -290,7 +290,9 @@ impl CheckedClassBody {
         }
     }
 
-    /// Ordinary locals in committed members, in typed declaration order.
+    /// Canonical locals in committed members, in typed declaration order.
+    /// Complete bodies include ordinary ValDef locals and case-local Bind
+    /// declarations; partial bodies expose their retained ordinary locals.
     /// Source and typed trees, symbols and scopes belong to this session.
     /// A rejected class or a class without committed locals yields an empty slice.
     pub fn local_bindings(&self) -> &[TypedLocalBinding] {

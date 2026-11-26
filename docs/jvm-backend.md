@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Guarded Int matches and immutable case-local bindings are described in
+[`jvm-tasty-guarded-matches.md`](jvm-tasty-guarded-matches.md).
+
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
 bounded JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output
@@ -1127,7 +1130,7 @@ expression roots, as arguments to other calls, and under supported local
 returns follow the same receiver and result restrictions.
 
 `Return.from = Some(...)` is rejected. Non-intrinsic `Select`, `TypeApply`,
-`Match`, `Try`, `New`, closures, nested `DefDef`s, String and other unsupported
+`Try`, closures, nested `DefDef`s, String and other unsupported
 literals, object/reference joins outside their validated subset, Long
 arithmetic/comparison, and all other typed nodes
 remain unsupported. No source name lookup, implicit boxing, general-purpose

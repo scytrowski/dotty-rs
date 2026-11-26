@@ -36,9 +36,14 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
 Int operands. Int-selector matches accept ordered Int literals and exactly one
-final unguarded wildcard, with Int/Boolean/Unit results. A temporary local
+final unguarded irrefutable case, with Int/Boolean/Unit results. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
-Binders, guards, extractors and missing wildcard cases return typed errors.
+Guards and immutable Int binders are supported; extractors, type tests and missing unconditional fallback cases return typed errors.
 The semantic TASTy producer retains these source constructs separately; a
 successful JVM emission alone does not certify a paired artifact.
+
+`JvmLocalBinding::pattern` records the exact typed Bind, canonical immutable
+symbol, case scope and typed CaseDef. Validation checks the declaration edge
+and scope membership. JVM lowering initializes the slot only on pattern success
+and removes case-local initialization facts before the next case and match join.

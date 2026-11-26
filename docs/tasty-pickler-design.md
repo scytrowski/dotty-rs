@@ -978,3 +978,7 @@ Int equality/inequality and literal Int-selector matches described in
 [jvm-tasty-expressions.md](jvm-tasty-expressions.md). These extend the historical
 literal-only and control-flow slices above. The pinned Scala reader, source
 consumer and `-from-tasty` runtime gate operate on original Rust output.
+
+The subsequent [guarded-match contract](jvm-tasty-guarded-matches.md) adds
+CASEDEF guards and canonical BIND declarations, preserving case scope and
+same-session identities across JVM and TASTy plans.

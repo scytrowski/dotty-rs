@@ -103,7 +103,7 @@ pub enum JvmTastyContractError {
         actual: Option<TreeId<Typed>>,
     },
     /// The JVM local plan and TASTy bindings disagree on the exact canonical
-    /// Int local symbols, typed declarations, or mutability in this method.
+    /// Int local symbols, typed declarations, mutability or pattern case/scope in this method.
     LocalBindingMismatch {
         /// Canonical method whose local evidence differs between producers.
         method: SymbolId,
@@ -6870,10 +6870,14 @@ fn validate_methods(
                 member: symbol,
                 side: "JVM method metadata",
             })?;
-        let is_int_local = |local| matches!(store.symbols.info(local), SymbolInfo::Complete(ty) if *ty == tasty.definitions.int);
-        let expected_locals = tasty
+        let is_int_local = |local| matches!(store.symbols.info(local), SymbolInfo::Complete(ty) if *ty == tasty.definitions.int || matches!(store.types.try_get(*ty), Some(Type::Constant(dotty_core::Constant::Int(_)))));
+        let mut expected_locals = tasty
             .typed_bindings
             .local_value_bindings(tasty.source.id, symbol);
+        let patterns = tasty
+            .typed_bindings
+            .pattern_value_bindings(tasty.source.id, symbol);
+        expected_locals.extend(patterns.iter().copied());
         let expected_locals = expected_locals
             .iter()
             .filter(|local| is_int_local(local.symbol))
@@ -6888,6 +6892,10 @@ fn validate_methods(
                 !actual_locals.iter().any(|actual| {
                     actual.symbol == expected.symbol
                         && actual.declaration == expected.typed_declaration
+                        && (if patterns.iter().any(|pattern| pattern.symbol == expected.symbol) {
+                            actual.pattern_case().is_some_and(|(scope, case)| scope == expected.scope
+                                && matches!(tasty.typed_ast.try_get(case).map(|node| &node.kind), Some(TreeKind::CaseDef(node)) if node.pattern == expected.typed_declaration))
+                        } else { actual.pattern_case().is_none() })
                         && actual.mutable
                             == store
                                 .symbols

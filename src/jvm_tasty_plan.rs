@@ -454,6 +454,7 @@ struct ClassSourceTypedBindings<'a> {
     index: &'a SourceTypedIndex,
     source: SourceId,
     locals: Vec<(SymbolId, LocalValueBinding)>,
+    patterns: Vec<(SymbolId, LocalValueBinding)>,
 }
 
 impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
@@ -470,6 +471,15 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
             return Vec::new();
         }
         self.locals
+            .iter()
+            .filter_map(|(owner, binding)| (*owner == method).then_some(*binding))
+            .collect()
+    }
+    fn pattern_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        if source != self.source {
+            return Vec::new();
+        }
+        self.patterns
             .iter()
             .filter_map(|(owner, binding)| (*owner == method).then_some(*binding))
             .collect()
@@ -606,6 +616,7 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
             .map_err(PairedPlanError::Typer)?;
     }
 
+    let mut pattern_values = Vec::new();
     let mut tasty_members = Vec::with_capacity(template.body.len());
     let mut jvm_fields = Vec::new();
     let mut jvm_methods = Vec::new();
@@ -737,6 +748,39 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
                         },
                     ));
                 }
+                for (source_case, node) in parsed.ast.iter() {
+                    let TreeKind::CaseDef(case) = &node.kind else {
+                        continue;
+                    };
+                    let Some(binding) = typer.typed_pattern_binding_at(source_id, case.pattern)
+                    else {
+                        continue;
+                    };
+                    if typer.store().symbols.get(binding.symbol()).owner != Some(method) {
+                        continue;
+                    }
+                    let typed_case = typer
+                        .source_typed_index()
+                        .get(source_id, source_case)
+                        .ok_or(PairedPlanError::UnsupportedSourceShape(
+                            "canonical pattern case binding",
+                        ))?;
+                    pattern_values.push((
+                        method,
+                        LocalValueBinding {
+                            source_tree: case.pattern,
+                            symbol: binding.symbol(),
+                            typed_declaration: binding.declaration(),
+                            scope: binding.scope(),
+                        },
+                    ));
+                    locals.push(JvmLocalBinding::pattern(
+                        binding.declaration(),
+                        binding.symbol(),
+                        binding.scope(),
+                        typed_case,
+                    ));
+                }
                 locals.sort_unstable_by_key(|local| local.declaration.index());
                 jvm_methods.push(JvmMethodPlan {
                     method,
@@ -773,6 +817,7 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
         index: typer.source_typed_index(),
         source: source_id,
         locals: local_values,
+        patterns: pattern_values,
     };
     let tasty_input = ClassStatePicklePlan {
         store: typer.store(),

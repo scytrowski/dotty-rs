@@ -1869,7 +1869,8 @@ impl Validator<'_, '_> {
                     self.owner(*target, Some(method.symbol))?;
                     let local_type = self.complete(*target)?;
                     let type_matches = (result_type == p.definitions.int
-                        && local_type == p.definitions.int)
+                        && (local_type == p.definitions.int
+                            || matches!(self.ty(local_type)?, Type::Constant(Constant::Int(_)))))
                         || self.same_planned_sibling_class_type(local_type, result_type);
                     if !type_matches
                         || self.symbol(*target)?.name != source_ident.name

@@ -1,5 +1,9 @@
 # Bounded JVM/TASTy expression parity
 
+This records the #2470 increment. The subsequent
+[guarded-match contract](jvm-tasty-guarded-matches.md) extends its match subset
+with guards and immutable Int pattern bindings.
+
 This increment targets Scala 3.9.0 revision
 `777528f19a58e794c9954a42f433373472ec57f8`, TASTy 28.9.0 and JVM class-file
 major 65. Both producers must consume the same canonical source session.

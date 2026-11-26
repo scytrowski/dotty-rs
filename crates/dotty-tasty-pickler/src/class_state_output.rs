@@ -712,6 +712,13 @@ impl ValidatedClassStatePlan<'_, '_> {
                         context.reserve_declaration(parameter)?;
                         method_parameters.push(parameter);
                     }
+                    for pattern in p
+                        .typed_bindings
+                        .pattern_value_bindings(p.source.id, *symbol)
+                    {
+                        context.reserve_local_binding(pattern)?;
+                        method_local_symbols.push(pattern.symbol);
+                    }
                     for local in locals {
                         let fragment_local = fragment_binding.is_some_and(|binding| {
                             binding.prefix_locals.contains(&local.symbol)

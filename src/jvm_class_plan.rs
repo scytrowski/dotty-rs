@@ -81,7 +81,14 @@ impl TypedClassBody {
     /// Split the output of the typer used for this class's body. Pass the arena
     /// to the next typer and keep the body for [`JvmClassPlanner::plan_typed_class`].
     /// All declarations, outputs and the final arena must come from one session.
-    pub fn from_output(class: &SourceClass, output: TypedSourceOutput) -> (AstArena<Typed>, Self) {
+    pub fn from_output(
+        class: &SourceClass,
+        mut output: TypedSourceOutput,
+    ) -> (AstArena<Typed>, Self) {
+        output.local_bindings.extend(output.pattern_bindings);
+        output
+            .local_bindings
+            .sort_unstable_by_key(|binding| binding.declaration().index());
         (
             output.typed_ast,
             Self {
@@ -419,6 +426,7 @@ impl<'a> JvmClassPlanner<'a> {
                         typed_ast,
                         typed_index: &body.index,
                         local_bindings: locals.get(&method.symbol).map_or(&[], Vec::as_slice),
+                        pattern_bindings: &[],
                     };
                     let mut plan = planner
                         .plan(method.symbol)

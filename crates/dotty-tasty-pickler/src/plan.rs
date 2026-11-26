@@ -125,6 +125,19 @@ pub trait SourceTypedBindings {
         Vec::new()
     }
 
+    /// Canonical source/typed/symbol/case-scope tuples for pattern Bind roots.
+    /// The complete class-state producer consumes these separately from ordinary
+    /// ValDef locals; the older literal PicklePlan path rejects case bindings.
+    /// Every supplied binding
+    /// must occur in this method's validated cases, in the same session arenas.
+    fn pattern_value_bindings(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Vec<LocalValueBinding> {
+        Vec::new()
+    }
+
     /// Authenticated direct-New initializer for a local admitted by a
     /// FormalLocalPair or LocalValPair constructor receipt. This is separate
     /// from the legacy PlannedCallBinding path used by helper-local values.
@@ -888,6 +901,7 @@ impl<'a> PicklePlan<'a> {
             mutable_counter_assignment: None,
             conditional_mutable_assignment: None,
             local_bindings: HashMap::new(),
+            pattern_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
             seen_local_bindings: HashSet::new(),
             seen_local_symbols: HashSet::new(),
@@ -955,6 +969,7 @@ pub(crate) fn validate_class_state_method(
                 .conditional_mutable_reference_assignment(class.source.id, method.symbol)
         }),
         local_bindings: HashMap::new(),
+        pattern_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
@@ -987,7 +1002,35 @@ pub(crate) fn validate_class_state_method(
                 symbol: Some(method.symbol),
             });
         }
+        let patterns = class
+            .typed_bindings
+            .pattern_value_bindings(class.source.id, method.symbol);
+        validator.charge(patterns.len())?;
+        let mut sources = HashSet::new();
+        let mut symbols = HashSet::new();
+        for binding in &patterns {
+            if !sources.insert(binding.source_tree)
+                || !symbols.insert(binding.symbol)
+                || validator
+                    .pattern_bindings
+                    .insert(binding.source_tree, *binding)
+                    .is_some()
+            {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: binding.symbol,
+                });
+            }
+        }
         validator.method(method, signature_only)?;
+        if !signature_only {
+            for binding in patterns {
+                if !validator.seen_local_symbols.contains(&binding.symbol) {
+                    return Err(PickleError::SourceDefinition {
+                        symbol: binding.symbol,
+                    });
+                }
+            }
+        }
     }
     if validator.seen_local_bindings.len() != local_values.len() {
         let binding = local_values
@@ -1039,6 +1082,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         mutable_counter_assignment: None,
         conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
+        pattern_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
@@ -1102,6 +1146,7 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         mutable_counter_assignment: Some(assignment),
         conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
+        pattern_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
@@ -1136,6 +1181,7 @@ struct Validator<'p, 'a> {
     mutable_counter_assignment: Option<MutableCounterReferenceAssignmentBinding>,
     conditional_mutable_assignment: Option<ConditionalMutableReferenceAssignmentBinding>,
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
+    pattern_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,
     seen_local_bindings: HashSet<TreeId<Untyped>>,
     seen_local_symbols: HashSet<SymbolId>,
