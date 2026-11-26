@@ -36,7 +36,7 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
 Int operands. Int-selector matches accept ordered Int literals and exactly one
-final unguarded irrefutable case, with Int/Boolean/Unit results. A Nothing-typed
+final unguarded irrefutable case, with Int/Boolean/Unit or Long results. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
@@ -59,3 +59,11 @@ the primitive type of an unreachable tail; lowering still validates that tail
 and proves the actual return flow before omitting its code. A Nothing type
 by itself does not establish a supported exit. Non-local returns and returns
 inside operands, conditions or guards remain unsupported.
+
+
+Long-valued Int matches preserve two-slot stack values at joins and use one
+Long verification entry per value. Guarded cases and normal/returning paths
+share the existing selector-once and case-scope rules. A proven returning Block,
+If or Match can retain the canonical Long type of its unreachable tail, including
+a checked method parameter/local TermRef. This does not add Long selectors,
+arithmetic, conversions or category-two discard operations.

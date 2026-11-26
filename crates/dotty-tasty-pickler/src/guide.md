@@ -1,7 +1,7 @@
 ## Project canonical builtin references
 
 Projection can be used separately from full class emission. This example
-produces a structural type fragment for the current session's Int type.
+produces a structural type fragment for the current session's Int and Long types.
 
 ```rust
 use dotty_core::{Definitions, SemanticStore, SourceId, SourceSemanticIndex};
@@ -14,7 +14,9 @@ let mut context = EncodingContext::new(
     &store, &definitions, &index, SourceId::from_index(0), ProjectionLimits::default(),
 )?;
 let int = context.lower_type(definitions.int)?;
-let fragment = context.finish(&[int])?;
+let long = context.lower_type(definitions.long)?;
+let fragment = context.finish(&[int, long])?;
+assert!(fragment.ast.address(long).is_some());
 assert!(fragment.ast.address(int).is_some());
 assert!(!fragment.ast.bytes().is_empty());
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -65,3 +67,20 @@ the typer's checked Unit adaptation for an If without else. Bare return uses the
 actual synthetic Unit value already supplied by the typer. Non-local targets,
 returns in lambdas/local definitions and reference/category-two results remain
 outside this producer subset.
+
+
+## Bounded Long method values
+
+Ordinary single-clause methods may use canonical Long parameters/results and
+full signed 64-bit constants, including mixed Int/Boolean/Long formal order.
+Long locals may be inferred or explicit, immutable or mutable. Supported If,
+While, Int-selector Match and local Return paths preserve canonical source/typed
+identity, exact values and case scope. A Long return targets the same current
+DEFDEF as other local primitive returns. No scalar value is supplied for a
+proven returning path.
+
+Calls with Long arguments or results, Long fields/constructor parameters, arithmetic,
+conversions, discarded Long expressions and Float/Double parity remain outside
+this producer slice. Interoperability requires consuming original Rust artifacts
+with Scala 3.9 and executing both original JVM output and from-tasty output; the
+Scala numeric raw printer is not used as the value oracle.
