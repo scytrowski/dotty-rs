@@ -450,7 +450,7 @@ fn original_rust_guarded_matches_execute_on_jdk21() {
 fn unsupported_patterns_and_case_binding_escape_never_publish_a_pair() {
     for body in [
         "x match { case n: Int => n; case _ => 0 }",
-        "x match { case 0 | 1 => 1; case _ => 0 }",
+        "x match { case 0 | _ => 1; case _ => 0 }",
         "x match { case n if n > 0 => n }",
         "x match { case n if n > 0 => n; case _ => n }",
         "{ x match { case n => n }; n }",

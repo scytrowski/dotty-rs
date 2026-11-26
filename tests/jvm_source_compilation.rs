@@ -792,25 +792,21 @@ fn compile_source_batch_with_typer_failure_observer(
             };
             let mut locals = Vec::new();
             for (source_tree, node) in parsed.ast.iter() {
-                if let TreeKind::CaseDef(case) = &node.kind {
-                    if let Some(binding) = typer.typed_pattern_binding_at(source_id, case.pattern) {
-                        if typer.store().symbols.get(binding.symbol()).owner
-                            == Some(source_method.symbol)
-                        {
-                            let typed_case = typer
-                                .source_typed_index()
-                                .get(source_id, source_tree)
-                                .ok_or(PipelineFailure::MissingSourceIdentity(
-                                    "typed pattern case",
-                                ))?;
-                            locals.push(JvmLocalBinding::pattern(
-                                binding.declaration(),
-                                binding.symbol(),
-                                binding.scope(),
-                                typed_case,
-                            ));
-                        }
-                    }
+                if let TreeKind::CaseDef(case) = &node.kind
+                    && let Some(binding) = typer.typed_pattern_binding_at(source_id, case.pattern)
+                    && typer.store().symbols.get(binding.symbol()).owner
+                        == Some(source_method.symbol)
+                {
+                    let typed_case = typer
+                        .source_typed_index()
+                        .get(source_id, source_tree)
+                        .ok_or(PipelineFailure::MissingSourceIdentity("typed pattern case"))?;
+                    locals.push(JvmLocalBinding::pattern(
+                        binding.declaration(),
+                        binding.symbol(),
+                        binding.scope(),
+                        typed_case,
+                    ));
                 }
                 if !matches!(node.kind, TreeKind::ValDef(_)) {
                     continue;
