@@ -5472,6 +5472,167 @@ mod tests {
         );
     }
 
+    fn alternative_match_fixture() -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
+        let mut fixture = Fixture::new(&[]);
+        let int = fixture.definitions.int;
+        let selector_ty = fixture.store.types.alloc(Type::Constant(Constant::Int(7)));
+        let selector = fixture.literal(Constant::Int(7), selector_ty);
+        let mut alternatives = Vec::new();
+        for value in [0, 1] {
+            let ty = fixture
+                .store
+                .types
+                .alloc(Type::Constant(Constant::Int(value)));
+            alternatives.push(fixture.literal(Constant::Int(value), ty));
+        }
+        let pattern = fixture.ast.alloc(Tree {
+            kind: TreeKind::Alternative(dotty_core::ast::Alternative { alternatives }),
+            position: None,
+            ty: int,
+        });
+        let wildcard = fixture.ast.alloc(Tree {
+            kind: TreeKind::Ident(dotty_core::ast::Ident {
+                name: Name::new(fixture.store.names.intern("_"), Namespace::Term),
+                backquoted: false,
+            }),
+            position: None,
+            ty: int,
+        });
+        let mut cases = Vec::new();
+        for (pattern, value) in [(pattern, 10), (wildcard, 20)] {
+            let body = fixture.literal(Constant::Int(value), int);
+            cases.push(fixture.ast.alloc(Tree {
+                kind: TreeKind::CaseDef(dotty_core::ast::CaseDef {
+                    pattern,
+                    guard: None,
+                    body,
+                }),
+                position: None,
+                ty: int,
+            }));
+        }
+        let root = fixture.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match { selector, cases }),
+            position: None,
+            ty: int,
+        });
+        (fixture, root, pattern)
+    }
+
+    #[test]
+    fn literal_alternatives_branch_to_one_body_with_one_selector_store() {
+        let (fixture, root, _) = alternative_match_fixture();
+        let layout = JvmLocalLayout {
+            method: fixture.method.symbol(),
+            locals: Vec::new(),
+            by_symbol: Default::default(),
+            max_locals: 1,
+        };
+        let mut context = JvmLoweringContext::new(
+            &fixture.store,
+            &fixture.ast,
+            &fixture.definitions,
+            &fixture.method,
+        );
+        context.local_layout = Some(&layout);
+        let mut code = CodeBuilder::new();
+        assert_eq!(
+            emit_expression(&mut context, root, &mut code, 0).unwrap(),
+            Flow::Value(JvmType::Int)
+        );
+        code.ireturn().unwrap();
+        assert_eq!(
+            method_body_bytes(&fixture, code),
+            [
+                0x10, 7, 0x3c, // selector and its only store
+                0x1b, 0x03, 0x9f, 0, 8, // first literal -> shared hit
+                0x1b, 0x04, 0xa0, 0, 8, // final literal mismatch -> next case
+                0x10, 10, 0xa7, 0, 5, // one body, then join
+                0x10, 20, 0xac,
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_alternatives_reject_before_publishing_expression_code() {
+        for corrupt in 0..6 {
+            let (mut fixture, root, pattern) = alternative_match_fixture();
+            let int = fixture.definitions.int;
+            let TreeKind::Alternative(alternative) = fixture.ast.get(pattern).kind.clone() else {
+                panic!()
+            };
+            let leaf = alternative.alternatives[0];
+            let expected = match corrupt {
+                0 => {
+                    let TreeKind::Alternative(alt) = &mut fixture.ast.get_mut(pattern).kind else {
+                        panic!()
+                    };
+                    alt.alternatives.clear();
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: pattern,
+                        node: "invalid Int match alternative",
+                    }
+                }
+                1 => {
+                    fixture.ast.get_mut(pattern).ty = fixture.definitions.boolean;
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: pattern,
+                        node: "invalid Int match alternative",
+                    }
+                }
+                2 => {
+                    fixture.ast.get_mut(leaf).ty = int;
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: leaf,
+                        node: "inconsistent Int match literal",
+                    }
+                }
+                3 => {
+                    let TreeKind::Alternative(alt) = &mut fixture.ast.get_mut(pattern).kind else {
+                        panic!()
+                    };
+                    alt.alternatives = vec![leaf; JVM_EXPRESSION_NODE_BUDGET + 1];
+                    JvmCodegenError::ExpressionNodeBudgetExceeded {
+                        tree: pattern,
+                        limit: JVM_EXPRESSION_NODE_BUDGET,
+                    }
+                }
+                4 => {
+                    let TreeKind::Alternative(alt) = &mut fixture.ast.get_mut(pattern).kind else {
+                        panic!()
+                    };
+                    alt.alternatives = vec![pattern];
+                    JvmCodegenError::ExpressionDepthExceeded {
+                        tree: pattern,
+                        position: None,
+                        limit: JVM_EXPRESSION_DEPTH_LIMIT,
+                    }
+                }
+                _ => {
+                    fixture.ast.get_mut(leaf).kind = TreeKind::Ident(dotty_core::ast::Ident {
+                        name: Name::new(fixture.store.names.intern("_"), Namespace::Term),
+                        backquoted: false,
+                    });
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: leaf,
+                        node: "unsupported Int match alternative",
+                    }
+                }
+            };
+            assert_eq!(
+                lower_expression(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    root
+                )
+                .unwrap_err(),
+                expected,
+            );
+        }
+    }
+
     #[test]
     fn oversized_match_case_vectors_reject_before_following_case_ids() {
         let mut fixture = Fixture::new(&[]);
