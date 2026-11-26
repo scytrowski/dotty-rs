@@ -5,6 +5,8 @@ Long-valued Int matches and paired Long method values are described in
 
 Guarded Int matches and immutable case-local bindings are described in
 [`jvm-tasty-guarded-matches.md`](jvm-tasty-guarded-matches.md).
+Literal Int alternatives, including shared guards and nested patterns, are covered by
+[`jvm-tasty-alternative-matches.md`](jvm-tasty-alternative-matches.md).
 Local primitive returns, including all-returning matches and preserved
 unreachable tails, are covered by
 [`jvm-tasty-local-returns.md`](jvm-tasty-local-returns.md).

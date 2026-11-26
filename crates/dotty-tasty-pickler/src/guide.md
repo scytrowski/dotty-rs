@@ -42,8 +42,9 @@ shapes independently. This crate performs no filesystem publication.
 
 Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
 Int-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
-final unguarded wildcard and support primitive results; binders, guards and
-extractors remain unsupported. Int `&` and equality/inequality between Int
+final unguarded irrefutable case and support Int/Boolean/Unit/Long results;
+guards and canonical Int binders follow the contract below. Extractors remain
+unsupported. Int `&` and equality/inequality between Int
 operands use Scala 3.9 signed primitive selections. Source Any equality symbols
 remain canonical; only their validated Int application is specialized to the
 Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
@@ -84,3 +85,14 @@ conversions, discarded Long expressions and Float/Double parity remain outside
 this producer slice. Interoperability requires consuming original Rust artifacts
 with Scala 3.9 and executing both original JVM output and from-tasty output; the
 Scala numeric raw printer is not used as the value oracle.
+
+## Literal alternative patterns
+
+Int matches also preserve literal alternatives as nested ALTERNATIVE nodes.
+Validation checks every original source/typed child edge, literal payload,
+constant type, source order and span, with the existing expression budgets.
+Parentheses retain their real source bindings. Guards remain the final CASEDEF
+child after its one pattern and body. Nested alternatives and duplicates are
+supported; wildcards or bindings inside alternatives, bindings around them and
+non-Int selectors are rejected. No semantic-store mutation or partial complete
+artifact escapes validation failure.

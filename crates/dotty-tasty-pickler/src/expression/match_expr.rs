@@ -98,6 +98,29 @@ fn lower_pattern(
     let node = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Alternative(alternative) = &node.kind {
+        state.budget.visit(root, state.depth)?;
+        let mut fields = Vec::new();
+        for &child in &alternative.alternatives {
+            let child = lower_pattern(
+                store,
+                ast,
+                child,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: state.depth + 1,
+                    budget: state.budget,
+                },
+                context,
+            )?;
+            fields.push(AstField::Tree(child));
+        }
+        return context.wire_node(AstNode::Length {
+            tag: dotty_tasty::tasty::ALTERNATIVE_TAG,
+            fields,
+        });
+    }
     if let TreeKind::Bind(bind) = node.kind {
         state.budget.visit(root, state.depth)?;
         let symbol = context

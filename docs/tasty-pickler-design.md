@@ -1006,3 +1006,13 @@ The combined contract projects Long as J without boxing or widening. It retains
 explicit rejection of Long fields/constructors/calls and discarded Long values.
 The oracle uses semantic decompilation and from-tasty execution because the
 pinned Scala raw printer reads signed numeric payloads as a 31-bit Nat.
+
+
+## Literal Int alternative patterns
+
+The [alternative-pattern contract](jvm-tasty-alternative-matches.md) extends
+Int matches with nested ALTERNATIVE nodes containing Int literals. Each source
+and typed child edge is validated in order; parentheses preserve their mappings.
+CASEDEF still contains one pattern, one body and an optional final guard, so
+matching duplicates cannot repeat a guard. Existing Int/Boolean/Unit/Long results,
+local return flow, case scopes and expression limits compose with this slice.

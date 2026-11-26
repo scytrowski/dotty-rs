@@ -1,9 +1,8 @@
 use super::*;
 
-#[derive(Clone, Copy)]
 struct MatchCase {
     body: TreeId<Typed>,
-    literal: Option<i32>,
+    literals: Vec<i32>,
     guard: Option<TreeId<Typed>>,
     binder: Option<JvmLocalSlot>,
 }
@@ -94,7 +93,8 @@ pub(super) fn emit_match(
             context.visit(pattern_id, depth + 3)?;
         }
         let pattern = context.tree(pattern_id)?;
-        let literal = match &pattern.kind {
+        let pattern_type = pattern.ty;
+        let literals = match &pattern.kind {
             TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)) => {
                 let Constant::Int(value) = literal.value else {
                     unreachable!()
@@ -103,29 +103,34 @@ pub(super) fn emit_match(
                 {
                     return Err(unsupported(case.pattern, "inconsistent Int match literal"));
                 }
-                Some(value)
+                vec![value]
             }
             TreeKind::Ident(ident)
                 if !ident.backquoted
                     && ident.name.is_term()
                     && context.store.names.try_resolve(ident.name.text()) == Some("_") =>
             {
-                None
+                Vec::new()
+            }
+            TreeKind::Alternative(_) if binder.is_none() => {
+                let mut literals = Vec::new();
+                collect_alternative_literals(context, pattern_id, depth + 2, &mut literals)?;
+                literals
             }
             _ => return Err(unsupported(case.pattern, "unsupported match pattern")),
         };
-        if (literal.is_none() && case.guard.is_none()) != (index + 1 == matched.cases.len()) {
+        if (literals.is_empty() && case.guard.is_none()) != (index + 1 == matched.cases.len()) {
             return Err(unsupported(
                 case.pattern,
                 "match requires exactly one final wildcard",
             ));
         }
-        if primitive_type(context.store, pattern.ty, context.definitions) != Some(JvmType::Int) {
+        if primitive_type(context.store, pattern_type, context.definitions) != Some(JvmType::Int) {
             return Err(unsupported(case.pattern, "non-Int match pattern type"));
         }
         cases.push(MatchCase {
             body: case.body,
-            literal,
+            literals,
             guard: case.guard,
             binder,
         });
@@ -154,25 +159,43 @@ fn emit_cases(
     let before = context.initialized_locals.clone();
     let mut joined: Option<HashSet<SymbolId>> = None;
     let mut incoming = before.clone();
-    for &MatchCase {
-        body,
-        literal,
-        guard,
-        binder,
-    } in cases
-    {
+    for case in cases {
+        let MatchCase {
+            body,
+            guard,
+            binder,
+            ..
+        } = *case;
+        let literals = &case.literals;
         context.initialized_locals = incoming.clone();
-        let next = if literal.is_some() || guard.is_some() {
+        let next = if !literals.is_empty() || guard.is_some() {
             Some(code.new_label().map_err(build_error)?)
         } else {
             None
         };
-        if let Some(value) = literal {
+        if !literals.is_empty() {
             let next = next.as_ref().expect("literal has a continuation");
-            code.iload(slot)
-                .and_then(|c| c.iconst(value))
-                .and_then(|c| c.if_icmpne(next.clone()))
-                .map_err(build_error)?;
+            // All alternatives enter one shared guard/body. A false guard must
+            // skip the entire case, even if a later alternative also matches.
+            let hit = if literals.len() > 1 {
+                Some(code.new_label().map_err(build_error)?)
+            } else {
+                None
+            };
+            for (ordinal, &value) in literals.iter().enumerate() {
+                code.iload(slot)
+                    .and_then(|c| c.iconst(value))
+                    .map_err(build_error)?;
+                if ordinal + 1 == literals.len() {
+                    code.if_icmpne(next.clone()).map_err(build_error)?;
+                } else {
+                    code.if_icmpeq(hit.as_ref().expect("multiple alternatives").clone())
+                        .map_err(build_error)?;
+                }
+            }
+            if let Some(hit) = hit {
+                code.mark(hit).map_err(build_error)?;
+            }
         }
         if let Some(local) = binder {
             code.iload(slot)
@@ -190,7 +213,7 @@ fn emit_cases(
             if let Some(local) = binder {
                 after_guard.remove(&local.symbol());
             }
-            incoming = if literal.is_some() {
+            incoming = if !literals.is_empty() {
                 incoming.intersection(&after_guard).copied().collect()
             } else {
                 after_guard
@@ -242,4 +265,49 @@ fn emit_cases(
 
 fn unsupported(tree: TreeId<Typed>, node: &'static str) -> JvmCodegenError {
     JvmCodegenError::UnsupportedTypedExpression { tree, node }
+}
+
+// The root was charged by emit_match; every descendant is charged exactly once.
+// Flatten only literal tests, preserving one guard/body and the expanded node budget.
+fn collect_alternative_literals(
+    context: &mut JvmLoweringContext<'_>,
+    root: TreeId<Typed>,
+    depth: usize,
+    literals: &mut Vec<i32>,
+) -> Result<(), JvmCodegenError> {
+    let node = context.tree(root)?;
+    match &node.kind {
+        TreeKind::Literal(literal) => {
+            let Constant::Int(value) = literal.value else {
+                return Err(unsupported(root, "unsupported Int match alternative"));
+            };
+            if !matches!(context.store.types.try_get(node.ty), Some(Type::Constant(Constant::Int(typed))) if *typed == value)
+            {
+                return Err(unsupported(root, "inconsistent Int match literal"));
+            }
+            literals.push(value);
+        }
+        TreeKind::Alternative(alternative) => {
+            if node.ty != context.definitions.int || alternative.alternatives.is_empty() {
+                return Err(unsupported(root, "invalid Int match alternative"));
+            }
+            let count = alternative.alternatives.len();
+            if count > JVM_EXPRESSION_NODE_BUDGET.saturating_sub(context.node_visits) {
+                return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+                    tree: root,
+                    limit: JVM_EXPRESSION_NODE_BUDGET,
+                });
+            }
+            for ordinal in 0..count {
+                let TreeKind::Alternative(alternative) = &context.tree(root)?.kind else {
+                    unreachable!("checked alternative");
+                };
+                let child = alternative.alternatives[ordinal];
+                context.visit(child, depth + 1)?;
+                collect_alternative_literals(context, child, depth + 1, literals)?;
+            }
+        }
+        _ => return Err(unsupported(root, "unsupported Int match alternative")),
+    }
+    Ok(())
 }

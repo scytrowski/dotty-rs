@@ -35,7 +35,7 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
-Int operands. Int-selector matches accept ordered Int literals and exactly one
+Int operands. Int-selector matches accept ordered Int literals, literal alternatives and exactly one
 final unguarded irrefutable case, with Int/Boolean/Unit or Long results. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
@@ -67,3 +67,10 @@ share the existing selector-once and case-scope rules. A proven returning Block,
 If or Match can retain the canonical Long type of its unreachable tail, including
 a checked method parameter/local TermRef. This does not add Long selectors,
 arithmetic, conversions or category-two discard operations.
+
+Literal alternatives such as `case 0 | 1` can be nested or parenthesized and
+retain source case order. Each case has one shared guard/body: even duplicate
+matching alternatives evaluate the guard once, and a false guard skips the case.
+Alternative leaves must be Int literals; bindings over/inside alternatives,
+wildcards inside alternatives, and non-Int selectors remain unsupported.
+The existing expression depth/node budgets apply to every alternative descendant.

@@ -166,6 +166,7 @@ impl Validator<'_, '_> {
                 method,
                 depth + 2,
                 visited,
+                false,
             )?;
             let last = ordinal + 1 == source_match.cases.len();
             if (wildcard && case.guard.is_none()) != last {
@@ -230,6 +231,7 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
+        literal_only: bool,
     ) -> Result<bool, PickleError> {
         if depth > self.limits.expression_depth_limit() {
             return Err(PickleError::LimitExceeded {
@@ -243,6 +245,78 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if literal_only
+            && !matches!(
+                &typed.kind,
+                TreeKind::Alternative(_)
+                    | TreeKind::Literal(dotty_core::ast::Literal {
+                        value: Constant::Int(_)
+                    })
+            )
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
+            self.source_typed_binding(source_id, typed_id)?;
+            self.span(source.position)?;
+            self.charge(1)?;
+            return self.validate_int_case_pattern(
+                parens.inner,
+                typed_id,
+                method,
+                depth + 1,
+                visited,
+                literal_only,
+            );
+        }
+        if let TreeKind::Alternative(alternative) = &typed.kind {
+            self.charge(1)?;
+            self.source_typed_binding(source_id, typed_id)?;
+            self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+            if !visited.insert(typed_id) {
+                return Err(PickleError::RepeatedExpression { tree: typed_id });
+            }
+            let TreeKind::Alternative(source_alternative) = &source.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: source_id,
+                    expected: SourceRole::Body,
+                });
+            };
+            if typed.ty != p.definitions.int {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            }
+            if alternative.alternatives.len() > self.limits.max_items
+                || source_alternative.alternatives.len() > self.limits.max_items
+            {
+                return Err(PickleError::LimitExceeded {
+                    kind: LimitKind::Items,
+                    limit: self.limits.max_items,
+                });
+            }
+            if alternative.alternatives.is_empty()
+                || alternative.alternatives.len() != source_alternative.alternatives.len()
+            {
+                return Err(PickleError::SourceShape {
+                    tree: source_id,
+                    expected: SourceRole::Body,
+                });
+            }
+            // Keep each original child edge and its order, including nested
+            // alternatives. No declaration identity is reconstructed here.
+            let children: Vec<_> = source_alternative
+                .alternatives
+                .iter()
+                .copied()
+                .zip(alternative.alternatives.iter().copied())
+                .collect();
+            for (source, typed) in children {
+                self.validate_int_case_pattern(source, typed, method, depth + 1, visited, true)?;
+            }
+            return Ok(false);
+        }
         if let TreeKind::Bind(bind) = typed.kind {
             self.charge(1)?;
             self.source_typed_binding(source_id, typed_id)?;
@@ -319,7 +393,7 @@ impl Validator<'_, '_> {
                 {
                     if matches!(
                         p.typed_ast.try_get(bind.body).map(|n| &n.kind),
-                        Some(TreeKind::Bind(_))
+                        Some(TreeKind::Bind(_) | TreeKind::Alternative(_))
                     ) {
                         return Err(self
                             .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
@@ -330,6 +404,7 @@ impl Validator<'_, '_> {
                         method,
                         depth + 1,
                         visited,
+                        false,
                     )?
                 }
                 _ => {

@@ -282,12 +282,13 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 33)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 34)
         target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn("jvm_tasty_expressions", target_names)
         self.assertIn("jvm_tasty_guarded_matches", target_names)
         self.assertIn("jvm_tasty_local_returns", target_names)
         self.assertIn("jvm_tasty_long_values", target_names)
+        self.assertIn("jvm_tasty_alternative_matches", target_names)
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
             target_names,

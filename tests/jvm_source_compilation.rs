@@ -792,6 +792,22 @@ fn compile_source_batch_with_typer_failure_observer(
             };
             let mut locals = Vec::new();
             for (source_tree, node) in parsed.ast.iter() {
+                if let TreeKind::CaseDef(case) = &node.kind
+                    && let Some(binding) = typer.typed_pattern_binding_at(source_id, case.pattern)
+                    && typer.store().symbols.get(binding.symbol()).owner
+                        == Some(source_method.symbol)
+                {
+                    let typed_case = typer
+                        .source_typed_index()
+                        .get(source_id, source_tree)
+                        .ok_or(PipelineFailure::MissingSourceIdentity("typed pattern case"))?;
+                    locals.push(JvmLocalBinding::pattern(
+                        binding.declaration(),
+                        binding.symbol(),
+                        binding.scope(),
+                        typed_case,
+                    ));
+                }
                 if !matches!(node.kind, TreeKind::ValDef(_)) {
                     continue;
                 }
@@ -32532,4 +32548,53 @@ class Caller:
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn literal_alternative_matches_execute_with_one_guard_per_case_on_jdk21() {
+    let output = TestOutputDirectory::new("literal-alternative-matches");
+    let artifacts = compile_source_classes(
+        include_str!("fixtures/jvm_tasty_alternative_matches/AlternativeMatches.scala"),
+        "AlternativeMatches.scala",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(artifacts.len(), 1);
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let client = output.path().join("JavaConsumer.java");
+    fs::write(
+        &client,
+        include_str!("fixtures/jvm_tasty_alternative_matches/JavaConsumer.java"),
+    )
+    .unwrap();
+    let compile = Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(output.path())
+        .arg("JavaConsumer")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "alternative match oracle ok"
+    );
 }
