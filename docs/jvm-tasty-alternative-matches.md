@@ -36,5 +36,38 @@ than the pinned raw numeric printer, which mishandles signed constants.
 The fixture covers guard hits/misses, duplicate alternatives, false-guard continuation,
 selector/guard effects, nested patterns/matches, existing binders, local values,
 loop returns, Boolean/Unit results and Long.MIN/MAX values. Independent Java and Scala
-clients consume the original pair; Java also executes classes rebuilt by `-from-tasty`.
+clients consume the original pair and classes rebuilt by `-from-tasty`.
 Limits, source/typed identity and read-only failure must remain enforced.
+
+## Implementation and reproduction
+
+JVM lowering recursively validates literal alternatives before emitting the selector.
+It flattens only the ordered literal tests: early matches jump to one shared hit
+label, the final mismatch goes to the next case, and a false guard also goes to
+that next case. Nested alternatives do not duplicate guards or bodies. Existing
+initialization facts and normal/returning joins remain authoritative. Every
+alternative descendant is charged against the expression node/depth limits.
+
+The semantic pickler retains nested ALTERNATIVE structure, rather than flattening
+source edges. It verifies canonical Int joins, each leaf's exact constant and type,
+source/typed mappings and spans, arity, order and literal-only membership. Bindings
+and wildcards inside alternatives are explicit errors. Tests corrupt child order,
+identity, values, types, spans, cycles and widths and check read-only rejection.
+The legacy method plan also exercises explicit expression-depth limits.
+
+`tests/jvm_tasty_alternative_matches.rs` checks exact `(IJJ)J` descriptors,
+branch instructions, local-slot counts and full stack-map frames for Long joins
+and all-returning matches, nested wire structure, independent fresh-session
+output, existing binder scope and unsupported inputs. The direct JVM source test
+also executes the fixture independently of the semantic pickler.
+
+```sh
+SCALA39_ROOT=/path/to/pinned/scala3 JAVA_HOME=/path/to/jdk21 \
+COURSIER_MAVEN_ROOT=/path/to/cached/maven \
+DOTTY_CLASSFILE_REQUIRE_JDK=1 DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
+cargo test --test jvm_tasty_alternative_matches --locked -- --nocapture --test-threads=1
+```
+
+Put the JDK's `bin` directory on PATH as well. The required JDK workflow includes
+this target. The strict TASTy manifest and aggregate inventory also require it;
+ordinary Rust tests may skip external consumers unless the flags above are set.

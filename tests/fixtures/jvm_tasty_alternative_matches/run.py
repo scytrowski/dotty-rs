@@ -47,14 +47,16 @@ def main():
                 result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
                                   f"{java_out}:{producer}:{toolchain.runtime_classpath}", "JavaConsumer"])
                 assert result.strip() == "alternative match oracle ok", result
-            toolchain.compiler(["-d", scala_out, HERE / "ScalaConsumer.scala"],
-                               classpath=f"{args.candidate}:{toolchain.runtime_classpath}")
-            result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
-                              f"{scala_out}:{args.candidate}:{toolchain.runtime_classpath}", "ScalaConsumer"])
-            assert result.strip() == "alternative match oracle ok", result
+            for producer in [args.candidate, rebuilt]:
+                toolchain.compiler(["-d", scala_out, HERE / "ScalaConsumer.scala"],
+                                   classpath=f"{producer}:{toolchain.runtime_classpath}")
+                result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
+                                  f"{scala_out}:{producer}:{toolchain.runtime_classpath}", "ScalaConsumer"])
+                assert result.strip() == "alternative match oracle ok", result
             print(json.dumps({
                 "java_original": "alternative match oracle ok",
                 "scala_original": "alternative match oracle ok",
+                "scala_from_tasty": "alternative match oracle ok",
                 "java_from_tasty": "alternative match oracle ok",
                 "original_sha256": {str(p.relative_to(args.candidate)): hashlib.sha256(data).hexdigest()
                                     for p, data in originals.items()},

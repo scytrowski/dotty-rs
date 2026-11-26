@@ -28,6 +28,10 @@ wire order is pattern, body, optional guard. BIND declares the canonical
 symbol; TERMREFdirect must address its declaration, including when two cases
 use the same printed name.
 
+The later [Long value contract](jvm-tasty-long-values.md) adds Long results;
+the [alternative-pattern contract](jvm-tasty-alternative-matches.md) adds literal
+Int alternatives while retaining the guard and case-scope rules below.
+
 ## Canonical input and implementation
 
 The complete class-state/paired producer consumes pattern proofs through
