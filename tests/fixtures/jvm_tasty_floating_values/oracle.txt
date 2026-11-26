@@ -1,0 +1,115 @@
+/** Decompiled from <oracle>/example/FloatingValues.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("FloatingValues.scala") class FloatingValues() {
+    def fzero(): scala.Float = 0.0f
+    def fnegativeZero(): scala.Float = -0.0f
+    def fsmall(): scala.Float = 1.4E-45f
+    def flarge(): scala.Float = 3.4028235E38f
+    def dzero(): scala.Double = 0.0
+    def dnegativeZero(): scala.Double = -0.0
+    def dsmall(): scala.Double = 4.9E-324
+    def dlarge(): scala.Double = 1.7976931348623157E308
+    def directF(x: scala.Float): scala.Float = x
+    def directD(`x₂`: scala.Double): scala.Double = `x₂`
+    def savedF(`x₃`: scala.Float): scala.Float = {
+      val saved: scala.Float = `x₃`
+
+      (saved: scala.Float)
+    }
+    def savedD(`x₄`: scala.Double): scala.Double = {
+      var `saved₂`: scala.Double = `x₄`
+      `saved₂` = `x₄`
+
+      (`saved₂`: scala.Double)
+    }
+    def chooseF(flag: scala.Boolean, a: scala.Float, b: scala.Float): scala.Float = if (flag) a else b
+    def chooseD(`flag₂`: scala.Boolean, `a₂`: scala.Double, `b₂`: scala.Double): scala.Double = if (`flag₂`) `a₂` else `b₂`
+    def rotateF(n: scala.Int, `a₃`: scala.Float, `b₃`: scala.Float): scala.Float = {
+      var `saved₃`: scala.Float = `a₃`
+      var i: scala.Int = n
+      while (i.>(0)) {
+        `saved₃` = `b₃`
+        i = i.-(1)
+      }
+
+      (`saved₃`: scala.Float)
+    }
+    def rotateD(`n₂`: scala.Int, `a₄`: scala.Double, `b₄`: scala.Double): scala.Double = {
+      var `saved₄`: scala.Double = `a₄`
+      var `i₂`: scala.Int = `n₂`
+      while (`i₂`.>(0)) {
+        `saved₄` = `b₄`
+        `i₂` = `i₂`.-(1)
+      }
+
+      (`saved₄`: scala.Double)
+    }
+    def returnedF(`flag₃`: scala.Boolean, `a₅`: scala.Float, `b₅`: scala.Float): scala.Float = if (`flag₃`) return `a₅` else return `b₅`
+    def returnedD(`flag₄`: scala.Boolean, `a₆`: scala.Double, `b₆`: scala.Double): scala.Double = if (`flag₄`) return `a₆` else `b₆`
+    def allReturnF(`x₅`: scala.Int, `a₇`: scala.Float, `b₇`: scala.Float): scala.Float = `x₅` match {
+      case (0 | 1) =>
+        return `a₇`
+      case _ =>
+        return `b₇`
+    }
+    def allReturnD(`x₆`: scala.Int, `a₈`: scala.Double, `b₈`: scala.Double): scala.Double = `x₆` match {
+      case (0 | 1) =>
+        return `a₈`
+      case _ =>
+        return `b₈`
+    }
+    def mixed(`i₃`: scala.Int, `a₉`: scala.Float, `n₃`: scala.Long, `b₉`: scala.Double, `flag₅`: scala.Boolean): scala.Double = if (`flag₅`) `b₉` else -0.0
+    def matchedF(`x₇`: scala.Int, `flag₆`: scala.Boolean, `a₁₀`: scala.Float, `b₁₀`: scala.Float): scala.Float = `x₇` match {
+      case (0 | 1) if `flag₆` =>
+        `a₁₀`
+      case _ =>
+        `b₁₀`
+    }
+    def matchedD(`x₈`: scala.Int, `flag₇`: scala.Boolean, `a₁₁`: scala.Double, `b₁₁`: scala.Double): scala.Double = `x₈` match {
+      case (0 | 1) if `flag₇` =>
+        `a₁₁`
+      case _ =>
+        `b₁₁`
+    }
+    def deadF(`flag₈`: scala.Boolean, `a₁₂`: scala.Float, `b₁₂`: scala.Float): scala.Float = if (`flag₈`) {
+      return `a₁₂`
+      `b₁₂`
+    } else `b₁₂`
+    def deadD(`flag₉`: scala.Boolean, `a₁₃`: scala.Double, `b₁₃`: scala.Double): scala.Double = if (`flag₉`) {
+      val `saved₅`: scala.Double = `b₁₃`
+      return `a₁₃`
+
+      (`saved₅`: scala.Double)
+    } else `b₁₃`
+    private[this] var trace: scala.Int = 0
+    def next(`x₉`: scala.Int): scala.Int = {
+      FloatingValues.this.trace = FloatingValues.this.trace.*(10).+(1)
+      `x₉`
+    }
+    def guardCode(): scala.Int = {
+      FloatingValues.this.trace = FloatingValues.this.trace.*(10).+(2)
+      0
+    }
+    def observed(): scala.Int = FloatingValues.this.trace
+    def guardedF(`x₁₀`: scala.Int, `a₁₄`: scala.Float, `b₁₄`: scala.Float): scala.Float = FloatingValues.this.next(`x₁₀`) match {
+      case (0 | 0) if FloatingValues.this.guardCode().>(0) =>
+        `a₁₄`
+      case _ =>
+        `b₁₄`
+    }
+    def boundD(`x₁₁`: scala.Int, `a₁₅`: scala.Double, `b₁₅`: scala.Double): scala.Double = `x₁₁` match {
+      case n if `n₄`.>(0) =>
+        `a₁₅`
+      case _ =>
+        `b₁₅`
+    }
+    def inLoopD(`n₅`: scala.Int, `a₁₆`: scala.Double, `b₁₆`: scala.Double): scala.Double = {
+      var `i₄`: scala.Int = `n₅`
+      while (`i₄`.>(0)) {
+        if (`i₄`.==(2)) return `a₁₆` else ()
+        `i₄` = `i₄`.-(1)
+      }
+      `b₁₆`
+    }
+  }
+}
