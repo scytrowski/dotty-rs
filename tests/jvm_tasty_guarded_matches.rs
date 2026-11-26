@@ -56,7 +56,11 @@ fn guards_still_require_a_final_unconditional_case() {
     }
 }
 
-include!("support/guarded_match_plan.rs");
+#[path = "support/guarded_match_plan.rs"]
+mod guarded_match_plan;
+use dotty::core::{SourceId, ast::TreeKind};
+use dotty::jvm::JvmCompilationUnit;
+use guarded_match_plan::with_jvm;
 
 #[test]
 fn jvm_case_bindings_are_canonical_slots_and_cannot_change_case_scope() {
@@ -284,4 +288,188 @@ fn tasty_rejects_missing_duplicate_or_cross_case_pattern_evidence_without_mutati
         },
     )
     .unwrap();
+}
+
+fn copied_typed_ast(
+    unit: &JvmCompilationUnit<'_>,
+) -> dotty::core::ast::AstArena<dotty::core::Typed> {
+    let mut ast = dotty::core::ast::AstArena::new();
+    for (id, node) in unit.typed_ast.iter() {
+        assert_eq!(id, ast.alloc(node.clone()));
+    }
+    ast
+}
+
+#[test]
+fn jvm_rejects_non_boolean_guards_and_cross_case_binder_references() {
+    with_jvm(
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if x > 0 => n; case n => n } }",
+        |unit, definitions| {
+            let method = &unit.classes[0].methods[0];
+            let case_id = method.locals[0].pattern_case().unwrap().1;
+            let root = method.body.unwrap();
+            let TreeKind::Match(matched) = &unit.typed_ast.get(root).kind else {
+                panic!()
+            };
+            let selector = matched.selector;
+            let mut ast = copied_typed_ast(unit);
+            let TreeKind::CaseDef(case) = &mut ast.get_mut(case_id).kind else {
+                panic!()
+            };
+            case.guard = Some(selector);
+            let invalid = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(
+                matches!(dotty::jvm::emit_class(&invalid, unit.classes[0].class, definitions), Err(dotty::jvm::JvmCodegenError::UnsupportedTypedExpression { tree, node: "non-Boolean match guard" }) if tree == selector)
+            );
+            let mut ast = copied_typed_ast(unit);
+            let TreeKind::CaseDef(case) = ast.get(case_id).kind else {
+                panic!()
+            };
+            let TreeKind::Block(block) = &ast.get(case.body).kind else {
+                panic!()
+            };
+            let expr = block.expr;
+            let foreign_type = ast.get(method.locals[1].declaration).ty;
+            ast.get_mut(expr).ty = foreign_type;
+            ast.get_mut(case.body).ty = foreign_type;
+            ast.get_mut(case_id).ty = foreign_type;
+            let invalid = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &ast,
+                classes: unit.classes.clone(),
+            };
+            let error =
+                dotty::jvm::emit_class(&invalid, unit.classes[0].class, definitions).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    dotty::jvm::JvmCodegenError::UninitializedLocalRead { .. }
+                ),
+                "{error:?}"
+            );
+        },
+    );
+}
+
+fn jdk_available() -> bool {
+    let version = std::process::Command::new("java")
+        .arg("-version")
+        .output()
+        .ok();
+    let major = version.as_ref().and_then(|output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.split('"')
+            .nth(1)?
+            .split('.')
+            .next()?
+            .parse::<u32>()
+            .ok()
+    });
+    let available = major.is_some_and(|major| major >= 21);
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        assert!(
+            available,
+            "mandatory guarded-match runtime gate requires JDK 21+"
+        );
+    }
+    available
+}
+
+fn run_java(pair: &dotty::jvm_tasty_artifacts::PairedJvmTastyArtifacts, name: &str, source: &str) {
+    let directory = std::env::temp_dir().join(format!(
+        "dotty-guarded-matches-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(directory.join("example")).unwrap();
+    std::fs::write(
+        directory.join(pair.classfile_path()),
+        pair.classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(directory.join(pair.tasty_path()), pair.tasty_bytes()).unwrap();
+    let client = directory.join(format!("{name}.java"));
+    std::fs::write(&client, source).unwrap();
+    let compile = std::process::Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(&directory)
+        .arg("-d")
+        .arg(&directory)
+        .arg(&client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(&directory)
+        .arg(name)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "guarded match oracle ok"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn original_rust_guarded_matches_execute_on_jdk21() {
+    if !jdk_available() {
+        return;
+    }
+    let pair = dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_guarded_matches/GuardedMatches.scala"),
+        "GuardedMatches.scala",
+        SourceId::from_index(2471),
+    )
+    .unwrap();
+    run_java(
+        &pair,
+        "JavaConsumer",
+        include_str!("fixtures/jvm_tasty_guarded_matches/JavaConsumer.java"),
+    );
+}
+
+#[test]
+fn unsupported_patterns_and_case_binding_escape_never_publish_a_pair() {
+    for body in [
+        "x match { case n: Int => n; case _ => 0 }",
+        "x match { case 0 | 1 => 1; case _ => 0 }",
+        "x match { case n if n > 0 => n }",
+        "x match { case n if n > 0 => n; case _ => n }",
+        "{ x match { case n => n }; n }",
+        "x match { case n => n = 1 }",
+    ] {
+        let source =
+            format!("package example; class GuardedMatches {{ def f(x: Int): Int = {body} }}");
+        let error = dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class(
+            &source,
+            "GuardedMatches.scala",
+            SourceId::from_index(2471),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                dotty::jvm_tasty_artifacts::PairedArtifactError::Plan(_)
+            ),
+            "{body}: {error:?}"
+        );
+    }
 }

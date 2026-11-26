@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct MatchCase {
+    body: TreeId<Typed>,
+    literal: Option<i32>,
+    guard: Option<TreeId<Typed>>,
+    binder: Option<JvmLocalSlot>,
+}
+
 pub(super) fn emit_match(
     context: &mut JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
@@ -71,7 +79,12 @@ pub(super) fn emit_match(
                         tree: pattern_id,
                         symbol,
                     })?;
-            if local.declaration() != pattern_id || local.ty() != JvmType::Int {
+            if local.declaration() != pattern_id
+                || local.ty() != JvmType::Int
+                || !local
+                    .pattern_case()
+                    .is_some_and(|(_, case)| case == case_id)
+            {
                 return Err(unsupported(pattern_id, "inconsistent match binder"));
             }
             binder = Some(local);
@@ -108,7 +121,12 @@ pub(super) fn emit_match(
         if primitive_type(context.store, pattern.ty, context.definitions) != Some(JvmType::Int) {
             return Err(unsupported(case.pattern, "non-Int match pattern type"));
         }
-        cases.push((case.body, literal, case.guard, binder));
+        cases.push(MatchCase {
+            body: case.body,
+            literal,
+            guard: case.guard,
+            binder,
+        });
     }
     if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(JvmType::Int) {
         return Err(unsupported(matched.selector, "non-Int match selector"));
@@ -122,12 +140,7 @@ pub(super) fn emit_match(
 fn emit_cases(
     context: &mut JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
-    cases: &[(
-        TreeId<Typed>,
-        Option<i32>,
-        Option<TreeId<Typed>>,
-        Option<JvmLocalSlot>,
-    )],
+    cases: &[MatchCase],
     expected: Flow,
     slot: usize,
     code: &mut CodeBuilder,
@@ -139,7 +152,13 @@ fn emit_cases(
     let before = context.initialized_locals.clone();
     let mut joined: Option<HashSet<SymbolId>> = None;
     let mut incoming = before.clone();
-    for &(body, literal, guard, binder) in cases {
+    for &MatchCase {
+        body,
+        literal,
+        guard,
+        binder,
+    } in cases
+    {
         context.initialized_locals = incoming.clone();
         let next = if literal.is_some() || guard.is_some() {
             Some(code.new_label().map_err(build_error)?)

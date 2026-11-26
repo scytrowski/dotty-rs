@@ -950,8 +950,9 @@ impl<'a> SourceTyper<'a> {
         (self.typed_arena, self.typed_index)
     }
 
-    /// Moves the arena and index out of the driver and retains its ordinary
-    /// local bindings. Uses the same eligibility rules as [`Self::typed_local_binding_at`].
+    /// Moves the arena and index out of the driver and retains ordinary locals
+    /// and pattern bindings separately. Uses the eligibility rules of
+    /// [`Self::typed_local_binding_at`] and [`Self::typed_pattern_binding_at`].
     pub fn into_typed_output(self) -> TypedSourceOutput {
         let mut local_bindings: Vec<_> = self
             .local_symbols

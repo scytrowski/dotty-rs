@@ -300,6 +300,7 @@ pub struct JvmLocalSlot {
     ty: JvmType,
     slot: u16,
     mutable: bool,
+    pattern: Option<(dotty_core::ScopeId, TreeId<Typed>)>,
 }
 
 /// Deterministic, method-scoped JVM local storage layout.
@@ -3384,7 +3385,13 @@ impl JvmParameterLocal {
 }
 
 impl JvmLocalSlot {
-    /// Exact typed `ValDef` that supplied this canonical binding.
+    /// Pattern scope and typed CaseDef preserved from the validated local plan.
+    /// None identifies an ordinary ValDef local.
+    pub const fn pattern_case(self) -> Option<(dotty_core::ScopeId, TreeId<Typed>)> {
+        self.pattern
+    }
+
+    /// Exact typed ValDef or pattern Bind that supplied this canonical binding.
     pub const fn declaration(self) -> TreeId<Typed> {
         self.declaration
     }
@@ -4078,7 +4085,9 @@ impl JvmCompilationUnit<'_> {
                         },
                     )?;
                     let valid_pattern = binding.pattern.is_some_and(|(scope, case)| {
-                        matches!(&declaration.kind, TreeKind::Bind(bind) if !bind.given)
+                        matches!(&declaration.kind, TreeKind::Bind(bind) if !bind.given && bind.name.is_term()
+                            && self.store.symbols.contains(binding.symbol)
+                            && bind.name == self.store.symbols.get(binding.symbol).name)
                             && matches!(self.store.types.try_get(declaration.ty), Some(dotty_core::Type::TermRef { prefix, target: dotty_core::TermRefTarget::Symbol(target) })
                                 if *target == binding.symbol && matches!(self.store.types.try_get(*prefix), Some(dotty_core::Type::NoPrefix)))
                             && matches!(self.typed_ast.try_get(case).map(|n| &n.kind), Some(TreeKind::CaseDef(node)) if node.pattern == binding.declaration)

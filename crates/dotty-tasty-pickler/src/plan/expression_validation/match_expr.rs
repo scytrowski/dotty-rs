@@ -171,6 +171,7 @@ impl Validator<'_, '_> {
             let value_type = self.complete(binding.symbol)?;
             if binding.typed_declaration != typed_id
                 || bind.given
+                || !bind.name.is_term()
                 || name == "_"
                 || symbol.name != bind.name
                 || symbol.kind != SymbolKind::Local
@@ -216,7 +217,7 @@ impl Validator<'_, '_> {
                         .typed_ast
                         .try_get(bind.body)
                         .ok_or(PickleError::InvalidTypedTree { tree: bind.body })?;
-                    if !matches!(&child.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_")
+                    if !matches!(&child.kind, TreeKind::Ident(ident) if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
                         || child.ty != value_type
                     {
                         return Err(PickleError::BodyType {
@@ -253,7 +254,7 @@ impl Validator<'_, '_> {
             self.visible_locals.insert(binding.symbol);
             return Ok(wildcard);
         }
-        if matches!(&typed.kind, TreeKind::Ident(ident) if !ident.backquoted && self.name_text(ident.name.text())? == "_")
+        if matches!(&typed.kind, TreeKind::Ident(ident) if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
         {
             self.charge(1)?;
             self.source_typed_binding(source_id, typed_id)?;

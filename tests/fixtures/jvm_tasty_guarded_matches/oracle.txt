@@ -2,9 +2,9 @@
 Header:
   version: 28.9.0
   tooling: Scala 3.9.0
-     UUID: 00c4beac-4680-07dd-0001-6acc31b4762e
+     UUID: 00840a77-cddb-c4cb-0088-a3f123b23838
 
-Names (333 bytes, starting from 35):
+Names (420 bytes, starting from 35):
      0: ASTs
      1: example
      2: GuardedMatches
@@ -42,25 +42,35 @@ Names (333 bytes, starting from 35):
     34: ==[Signed Signature(List(scala.Int),scala.Boolean) @==]
     35: nested
     36: m
-    37: SourceFile
-    38: annotation
-    39: scala[Qualified . annotation]
-    40: internal
-    41: scala[Qualified . annotation][Qualified . internal]
-    42: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
-    43: String
-    44: java[Qualified . lang][Qualified . String]
-    45: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
-    46: GuardedMatches.scala
-    47: Positions
-    48: Comments
-    49: Attributes
+    37: constant
+    38: negative
+    39: shadow
+    40: flag
+    41: enabled
+    42: &&
+    43: &&[Signed Signature(List(scala.Boolean),scala.Boolean) @&&]
+    44: shortCircuit
+    45: literalFirst
+    46: touch
+    47: SourceFile
+    48: annotation
+    49: scala[Qualified . annotation]
+    50: internal
+    51: scala[Qualified . annotation][Qualified . internal]
+    52: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    53: String
+    54: java[Qualified . lang][Qualified . String]
+    55: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    56: GuardedMatches.scala
+    57: Positions
+    58: Comments
+    59: Attributes
 
-Trees (491 bytes, starting from 371):
-     0: PACKAGE(488)
+Trees (941 bytes, starting from 458):
+     0: PACKAGE(938)
      3:   TERMREFpkg 1 [example]
-     5:   TYPEDEF(483) 2 [GuardedMatches]
-     9:     TEMPLATE(459)
+     5:   TYPEDEF(933) 2 [GuardedMatches]
+     9:     TEMPLATE(909)
     12:       APPLY(10)
     14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
     17:           NEW
@@ -275,26 +285,230 @@ Trees (491 bytes, starting from 371):
    464:               SHAREDtype 37
    466:             BLOCK(3)
    468:               SHAREDtype 384
-   471:     ANNOTATION(18)
-   473:       TYPEREF 37 [SourceFile]
-   475:         TERMREFpkg 41 [scala[Qualified . annotation][Qualified . internal]]
-   477:       APPLY(12)
-   479:         SELECTin(8) 45 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
-   482:           NEW
-   483:             SHAREDtype 473
-   486:           SHAREDtype 473
-   489:         STRINGconst 46 [GuardedMatches.scala]
-   491:
+   471:       DEFDEF(32) 37 [constant]
+   474:         EMPTYCLAUSE
+   475:         IDENTtpt 13 [Int]
+   477:           SHAREDtype 37
+   479:         MATCH(24)
+   481:           INTconst 0
+   483:           CASEDEF(20)
+   485:             BIND(8) 29 [n]
+   488:               INTconst 0
+   490:               IDENT 30 [_]
+   492:                 SHAREDtype 488
+   495:             BLOCK(8)
+   497:               TYPED(6)
+   499:                 TERMREFdirect 485
+   502:                 SHAREDtype 488
+   505:       DEFDEF(45) 38 [negative]
+   508:         PARAM(5) 32 [x]
+   511:           IDENTtpt 13 [Int]
+   513:             SHAREDtype 37
+   515:         IDENTtpt 13 [Int]
+   517:           SHAREDtype 37
+   519:         MATCH(31)
+   521:           TERMREFdirect 508
+   524:           CASEDEF(16)
+   526:             BIND(5) 29 [n]
+   529:               SHAREDtype 37
+   531:               INTconst 127
+   533:             BLOCK(7)
+   535:               TYPED(5)
+   537:                 TERMREFdirect 526
+   540:                 SHAREDtype 37
+   542:           CASEDEF(8)
+   544:             IDENT 30 [_]
+   546:               SHAREDtype 37
+   548:             BLOCK(2)
+   550:               INTconst 0
+   552:       DEFDEF(65) 39 [shadow]
+   555:         PARAM(5) 29 [n]
+   558:           IDENTtpt 13 [Int]
+   560:             SHAREDtype 37
+   562:         IDENTtpt 13 [Int]
+   564:           SHAREDtype 37
+   566:         MATCH(51)
+   568:           TERMREFdirect 555
+   571:           CASEDEF(35)
+   573:             BIND(7) 29 [n]
+   576:               SHAREDtype 37
+   578:               IDENT 30 [_]
+   580:                 SHAREDtype 37
+   582:             BLOCK(12)
+   584:               APPLY(10)
+   586:                 SELECTin(6) 17 [+[Signed Signature(List(scala.Int),scala.Int) @+]]
+   589:                   TERMREFdirect 573
+   592:                   SHAREDtype 86
+   594:                 INTconst 1
+   596:             APPLY(10)
+   598:               SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   601:                 SHAREDtype 589
+   604:                 SHAREDtype 86
+   606:               INTconst 0
+   608:           CASEDEF(9)
+   610:             IDENT 30 [_]
+   612:               SHAREDtype 37
+   614:             BLOCK(3)
+   616:               SHAREDtype 568
+   619:       DEFDEF(74) 40 [flag]
+   622:         PARAM(5) 32 [x]
+   625:           IDENTtpt 13 [Int]
+   627:             SHAREDtype 37
+   629:         PARAM(7) 41 [enabled]
+   632:           IDENTtpt 25 [Boolean]
+   634:             TYPEREF 25 [Boolean]
+   636:               SHAREDtype 39
+   638:         IDENTtpt 25 [Boolean]
+   640:           SHAREDtype 634
+   643:         MATCH(50)
+   645:           TERMREFdirect 622
+   648:           CASEDEF(36)
+   650:             BIND(7) 29 [n]
+   653:               SHAREDtype 37
+   655:               IDENT 30 [_]
+   657:                 SHAREDtype 37
+   659:             BLOCK(1)
+   661:               TRUEconst
+   662:             APPLY(22)
+   664:               SELECTin(8) 43 [&&[Signed Signature(List(scala.Boolean),scala.Boolean) @&&]]
+   667:                 TERMREFdirect 629
+   670:                 TYPEREF 25 [Boolean]
+   672:                   SHAREDtype 30
+   674:               APPLY(10)
+   676:                 SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   679:                   TERMREFdirect 650
+   682:                   SHAREDtype 86
+   684:                 INTconst 0
+   686:           CASEDEF(7)
+   688:             IDENT 30 [_]
+   690:               SHAREDtype 37
+   692:             BLOCK(1)
+   694:               FALSEconst
+   695:       DEFDEF(76) 44 [shortCircuit]
+   698:         PARAM(6) 41 [enabled]
+   701:           IDENTtpt 25 [Boolean]
+   703:             SHAREDtype 634
+   706:         IDENTtpt 13 [Int]
+   708:           SHAREDtype 37
+   710:         MATCH(61)
+   712:           INTconst 1
+   714:           CASEDEF(41)
+   716:             IDENT 30 [_]
+   718:               INTconst 1
+   720:             BLOCK(3)
+   722:               INTconst 99
+   725:             APPLY(30)
+   727:               SELECTin(7) 43 [&&[Signed Signature(List(scala.Boolean),scala.Boolean) @&&]]
+   730:                 TERMREFdirect 698
+   733:                 SHAREDtype 670
+   736:               APPLY(19)
+   738:                 SELECTin(15) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   741:                   APPLY(10)
+   743:                     SELECTin(8) 28 [guardCode[Signed Signature(List(),scala.Int) @guardCode]]
+   746:                       QUALTHIS
+   747:                         IDENTtpt 2 [GuardedMatches]
+   749:                           SHAREDtype 65
+   751:                       SHAREDtype 65
+   753:                   SHAREDtype 86
+   755:                 INTconst 0
+   757:           CASEDEF(14)
+   759:             IDENT 30 [_]
+   761:               SHAREDtype 718
+   764:             BLOCK(7)
+   766:               SELECT 12 [trace]
+   768:                 QUALTHIS
+   769:                   IDENTtpt 2 [GuardedMatches]
+   771:                     SHAREDtype 65
+   773:       DEFDEF(65) 45 [literalFirst]
+   776:         PARAM(5) 32 [x]
+   779:           IDENTtpt 13 [Int]
+   781:             SHAREDtype 37
+   783:         IDENTtpt 13 [Int]
+   785:           SHAREDtype 37
+   787:         MATCH(51)
+   789:           TERMREFdirect 776
+   792:           CASEDEF(28)
+   794:             INTconst 0
+   796:             BLOCK(3)
+   798:               INTconst 99
+   801:             APPLY(19)
+   803:               SELECTin(15) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   806:                 APPLY(10)
+   808:                   SELECTin(8) 28 [guardCode[Signed Signature(List(),scala.Int) @guardCode]]
+   811:                     QUALTHIS
+   812:                       IDENTtpt 2 [GuardedMatches]
+   814:                         SHAREDtype 65
+   816:                     SHAREDtype 65
+   818:                 SHAREDtype 86
+   820:               INTconst 0
+   822:           CASEDEF(6)
+   824:             INTconst 0
+   826:             BLOCK(2)
+   828:               INTconst 10
+   830:           CASEDEF(8)
+   832:             IDENT 30 [_]
+   834:               SHAREDtype 37
+   836:             BLOCK(2)
+   838:               INTconst 20
+   840:       DEFDEF(79) 46 [touch]
+   843:         PARAM(5) 32 [x]
+   846:           IDENTtpt 13 [Int]
+   848:             SHAREDtype 37
+   850:         IDENTtpt 10 [Unit]
+   852:           TYPEREF 10 [Unit]
+   854:             SHAREDtype 39
+   856:         MATCH(63)
+   858:           TERMREFdirect 843
+   861:           CASEDEF(49)
+   863:             BIND(7) 29 [n]
+   866:               SHAREDtype 37
+   868:               IDENT 30 [_]
+   870:                 SHAREDtype 37
+   872:             BLOCK(26)
+   874:               ASSIGN(24)
+   876:                 SELECT 12 [trace]
+   878:                   QUALTHIS
+   879:                     IDENTtpt 2 [GuardedMatches]
+   881:                       SHAREDtype 65
+   883:                 APPLY(15)
+   885:                   SELECTin(10) 17 [+[Signed Signature(List(scala.Int),scala.Int) @+]]
+   888:                     SELECT 12 [trace]
+   890:                       QUALTHIS
+   891:                         IDENTtpt 2 [GuardedMatches]
+   893:                           SHAREDtype 65
+   895:                     SHAREDtype 86
+   897:                   TERMREFdirect 863
+   900:             APPLY(10)
+   902:               SELECTin(6) 27 [>[Signed Signature(List(scala.Int),scala.Boolean) @>]]
+   905:                 SHAREDtype 897
+   908:                 SHAREDtype 86
+   910:               INTconst 0
+   912:           CASEDEF(7)
+   914:             IDENT 30 [_]
+   916:               SHAREDtype 37
+   918:             BLOCK(1)
+   920:               UNITconst
+   921:     ANNOTATION(18)
+   923:       TYPEREF 47 [SourceFile]
+   925:         TERMREFpkg 51 [scala[Qualified . annotation][Qualified . internal]]
+   927:       APPLY(12)
+   929:         SELECTin(8) 55 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   932:           NEW
+   933:             SHAREDtype 923
+   936:           SHAREDtype 923
+   939:         STRINGconst 56 [GuardedMatches.scala]
+   941:
 
-Positions (528 bytes, starting from 865):
-  lines: 25
+Positions (1066 bytes, starting from 1402):
+  lines: 42
   line sizes:
      15, 22, 28, 49, 54, 29, 33, 35, 34, 28, 15, 3, 36, 29, 15, 3, 37, 32, 26, 17
-     5, 15, 3, 1, 0
+     5, 15, 3, 47, 71, 77, 57, 38, 19, 3, 53, 46, 19, 3, 43, 35, 16, 16, 3, 90
+     1, 0
   positions:
-     0: 0 .. 587
-     5: 16 .. 587
-     9: 41 .. 585
+     0: 0 .. 1240
+     5: 16 .. 1240
+     9: 41 .. 1238
     18: 22 .. 22
     24: 41 .. 41
     28: 41 .. 41
@@ -422,15 +636,151 @@ Positions (528 bytes, starting from 865):
    462: 575 .. 576
    466: 577 .. 581
    468: 580 .. 581
-   477: 16 .. 587
-   483: 16 .. 16
-   489: 16 .. 16
+   471: 588 .. 633
+   475: 604 .. 607
+   479: 610 .. 633
+   481: 610 .. 611
+   483: 620 .. 631
+   485: 625 .. 626
+   490: 625 .. 625
+   495: 627 .. 631
+   499: 630 .. 631
+   502: 631 .. 631
+   505: 636 .. 705
+   508: 649 .. 655
+   511: 652 .. 655
+   515: 658 .. 661
+   519: 664 .. 705
+   521: 664 .. 665
+   524: 674 .. 691
+   526: 679 .. 685
+   531: 683 .. 685
+   533: 686 .. 691
+   537: 689 .. 690
+   540: 690 .. 690
+   542: 692 .. 703
+   544: 697 .. 698
+   548: 699 .. 703
+   550: 702 .. 703
+   552: 708 .. 783
+   555: 719 .. 725
+   558: 722 .. 725
+   562: 728 .. 731
+   566: 734 .. 783
+   568: 734 .. 735
+   571: 744 .. 769
+   573: 749 .. 750
+   578: 749 .. 749
+   582: 760 .. 769
+   586: 763 .. 766
+   589: 763 .. 764
+   594: 767 .. 768
+   598: 754 .. 757
+   601: 754 .. 755
+   606: 758 .. 759
+   608: 770 .. 781
+   610: 775 .. 776
+   614: 777 .. 781
+   616: 780 .. 781
+   619: 786 .. 904
+   622: 795 .. 801
+   625: 798 .. 801
+   629: 803 .. 819
+   632: 812 .. 819
+   638: 822 .. 829
+   643: 832 .. 904
+   645: 832 .. 833
+   648: 846 .. 880
+   650: 851 .. 852
+   655: 851 .. 851
+   659: 873 .. 880
+   661: 876 .. 880
+   664: 856 .. 866
+   667: 856 .. 863
+   676: 867 .. 870
+   679: 867 .. 868
+   684: 871 .. 872
+   686: 885 .. 900
+   688: 890 .. 891
+   692: 892 .. 900
+   694: 895 .. 900
+   695: 907 .. 1029
+   698: 924 .. 940
+   701: 933 .. 940
+   706: 943 .. 946
+   710: 949 .. 1029
+   712: 949 .. 950
+   714: 963 .. 1005
+   716: 968 .. 969
+   720: 1000 .. 1005
+   722: 1003 .. 1005
+   727: 973 .. 983
+   730: 973 .. 980
+   738: 984 .. 997
+   741: 984 .. 995
+   743: 984 .. 993
+   747: 984 .. 984
+   755: 998 .. 999
+   757: 1010 .. 1025
+   759: 1015 .. 1016
+   764: 1017 .. 1025
+   766: 1020 .. 1025
+   769: 1020 .. 1020
+   773: 1032 .. 1147
+   776: 1049 .. 1055
+   779: 1052 .. 1055
+   783: 1058 .. 1061
+   787: 1064 .. 1147
+   789: 1064 .. 1065
+   792: 1078 .. 1109
+   794: 1083 .. 1084
+   796: 1104 .. 1109
+   798: 1107 .. 1109
+   803: 1088 .. 1101
+   806: 1088 .. 1099
+   808: 1088 .. 1097
+   812: 1088 .. 1088
+   820: 1102 .. 1103
+   822: 1114 .. 1126
+   824: 1119 .. 1120
+   826: 1121 .. 1126
+   828: 1124 .. 1126
+   830: 1131 .. 1143
+   832: 1136 .. 1137
+   836: 1138 .. 1143
+   838: 1141 .. 1143
+   840: 1150 .. 1238
+   843: 1160 .. 1166
+   846: 1163 .. 1166
+   850: 1169 .. 1173
+   856: 1176 .. 1238
+   858: 1176 .. 1177
+   861: 1186 .. 1223
+   863: 1191 .. 1192
+   868: 1191 .. 1191
+   872: 1202 .. 1223
+   876: 1205 .. 1210
+   879: 1205 .. 1205
+   885: 1213 .. 1220
+   888: 1213 .. 1218
+   891: 1213 .. 1213
+   897: 1221 .. 1222
+   902: 1196 .. 1199
+   905: 1196 .. 1197
+   910: 1200 .. 1201
+   912: 1224 .. 1236
+   914: 1229 .. 1230
+   918: 1231 .. 1236
+   920: 1234 .. 1236
+   927: 16 .. 1240
+   933: 16 .. 16
+   939: 16 .. 16
 
   source paths:
-     0: 46 [GuardedMatches.scala]
+     0: 56 [GuardedMatches.scala]
 
-Attributes (2 bytes, starting from 1397):
-  SOURCEFILEattr 46 [GuardedMatches.scala]
+Attributes (2 bytes, starting from 2472):
+  SOURCEFILEattr 56 [GuardedMatches.scala]
 
 **** end of pickled info of class GuardedMatches
 
@@ -473,6 +823,48 @@ package example {
         }
       case _ =>
         `x₂`
+    }
+    def constant(): scala.Int = 0 match {
+      case n =>
+        (`n₆`: 0)
+    }
+    def negative(`x₃`: scala.Int): scala.Int = `x₃` match {
+      case n @ -1 =>
+        (`n₇`: scala.Int)
+      case _ =>
+        0
+    }
+    def shadow(`n₈`: scala.Int): scala.Int = `n₈` match {
+      case n if `n₉`.>(0) =>
+        `n₉`.+(1)
+      case _ =>
+        `n₈`
+    }
+    def flag(`x₄`: scala.Int, enabled: scala.Boolean): scala.Boolean = `x₄` match {
+      case n if enabled.&&(`n₁₀`.>(0)) =>
+        true
+      case _ =>
+        false
+    }
+    def shortCircuit(`enabled₂`: scala.Boolean): scala.Int = 1 match {
+      case _ if `enabled₂`.&&(GuardedMatches.this.guardCode().>(0)) =>
+        99
+      case _ =>
+        GuardedMatches.this.trace
+    }
+    def literalFirst(`x₅`: scala.Int): scala.Int = `x₅` match {
+      case 0 if GuardedMatches.this.guardCode().>(0) =>
+        99
+      case 0 =>
+        10
+      case _ =>
+        20
+    }
+    def touch(`x₆`: scala.Int): scala.Unit = `x₆` match {
+      case n if `n₁₁`.>(0) =>
+        GuardedMatches.this.trace = GuardedMatches.this.trace.+(`n₁₁`)
+      case _ =>
+        ()
     }
   }
 }

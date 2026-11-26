@@ -73,6 +73,7 @@ impl JvmLocalAllocator {
             ty,
             slot,
             mutable: binding.mutable,
+            pattern: binding.pattern_case(),
         });
         self.by_symbol.insert(binding.symbol, index);
         self.next_slot = end;
