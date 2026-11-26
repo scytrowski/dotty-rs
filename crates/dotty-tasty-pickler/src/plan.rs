@@ -1535,6 +1535,7 @@ impl<'a> Validator<'_, 'a> {
         }
         let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
         let boolean = self.builtin(Builtin::Boolean, self.plan.definitions.boolean, "Boolean")?;
+        let long = self.builtin(Builtin::Long, self.plan.definitions.long, "Long")?;
         let mut seen = HashSet::new();
         for (clause, (symbols, trees)) in clauses
             .iter()
@@ -1571,7 +1572,9 @@ impl<'a> Validator<'_, 'a> {
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
                 };
-                let declared_type = if parameter_type.name == self.symbol(int)?.name {
+                let declared_type = if parameter_type.name == self.symbol(long)?.name {
+                    Some(self.plan.definitions.long)
+                } else if parameter_type.name == self.symbol(int)?.name {
                     Some(self.plan.definitions.int)
                 } else if parameter_type.name == self.symbol(boolean)?.name {
                     Some(self.plan.definitions.boolean)
@@ -2666,6 +2669,7 @@ impl<'a> Validator<'_, 'a> {
                     ty: p.definitions.int,
                     role: TypeRole::Builtin(Builtin::Int),
                 })?;
+        let long = self.builtin(Builtin::Long, p.definitions.long, "Long")?;
         let boolean = self.ty(p.definitions.boolean)?.reference_symbol().ok_or(
             PickleError::MalformedType {
                 ty: p.definitions.boolean,
@@ -2743,6 +2747,7 @@ impl<'a> Validator<'_, 'a> {
                     || formal.name.as_name() != &self.symbol(parameter)?.name
                     || (formal.ty != p.definitions.int
                         && formal.ty != p.definitions.boolean
+                        && formal.ty != p.definitions.long
                         && !self.is_planned_sibling_class_type(formal.ty, None))
                     || self.complete(parameter)? != formal.ty
                     || formal.erased
@@ -2763,6 +2768,17 @@ impl<'a> Validator<'_, 'a> {
         {
             return self.context_result_closure(definition, method, result_type);
         }
+        let has_long = result_type == p.definitions.long || method.parameter_clauses.iter().flatten().any(|&s| matches!(self.plan.store.symbols.get(s).info, SymbolInfo::Complete(ty) if ty == p.definitions.long));
+        if has_long
+            && (curried
+                || method
+                    .parameter_clauses
+                    .iter()
+                    .flatten()
+                    .any(|&s| !self.plan.store.symbols.get(s).flags.is_empty()))
+        {
+            return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
+        }
         let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
             return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
         };
@@ -2770,6 +2786,7 @@ impl<'a> Validator<'_, 'a> {
         let supports_result = |validator: &Self, result_ty| {
             result_ty == p.definitions.int
                 || result_ty == p.definitions.boolean
+                || result_ty == p.definitions.long
                 || result_ty == p.definitions.unit
                 || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
         };
@@ -2783,6 +2800,8 @@ impl<'a> Validator<'_, 'a> {
             self.symbol(int)?.name
         } else if result_type == p.definitions.boolean {
             self.symbol(boolean)?.name
+        } else if result_type == p.definitions.long {
+            self.symbol(long)?.name
         } else if result_type == p.definitions.unit {
             self.symbol(unit)?.name
         } else if self.is_planned_sibling_class_type(result_type, Some(result.name)) {

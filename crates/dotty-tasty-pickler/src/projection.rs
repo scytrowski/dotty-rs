@@ -327,6 +327,7 @@ impl<'a> EncodingContext<'a> {
         }
         for builtin in [
             Builtin::Int,
+            Builtin::Long,
             Builtin::Boolean,
             Builtin::Unit,
             Builtin::Object,
@@ -720,6 +721,7 @@ impl<'a> EncodingContext<'a> {
         self.charge(1)?;
         let (ty, expected) = match builtin {
             Builtin::Int => (self.definitions.int, "Int"),
+            Builtin::Long => (self.definitions.long, "Long"),
             Builtin::Boolean => (self.definitions.boolean, "Boolean"),
             Builtin::Unit => (self.definitions.unit, "Unit"),
             Builtin::Object => (self.definitions.object_type, "Object"),
@@ -2147,6 +2149,7 @@ impl<'a> EncodingContext<'a> {
     fn external_inner(&mut self, symbol: SymbolId) -> Result<AstLabel, PickleError> {
         for builtin in [
             Builtin::Int,
+            Builtin::Long,
             Builtin::Boolean,
             Builtin::Unit,
             Builtin::Object,
@@ -2268,6 +2271,7 @@ impl<'a> EncodingContext<'a> {
                             depth,
                         )?
                     } else if *symbol == self.builtin(Builtin::Int)?
+                        || *symbol == self.builtin(Builtin::Long)?
                         || *symbol == self.builtin(Builtin::Boolean)?
                         || *symbol == self.builtin(Builtin::Object)?
                     {
@@ -2420,6 +2424,19 @@ impl<'a> EncodingContext<'a> {
             self.int_type_syntax()
         } else if ty == self.definitions.boolean {
             self.boolean_type_syntax()
+        } else if ty == self.definitions.long {
+            self.run(|c| {
+                let symbol = c.builtin(Builtin::Long)?;
+                let name = c.utf8(c.text(c.symbol(symbol)?.name.text())?)?;
+                let child = c.lower(c.definitions.long, 0)?;
+                c.wire
+                    .push(AstNode::NatAst {
+                        tag: IDENTTPT_TAG,
+                        value: AstOperand::Nat(name),
+                        child,
+                    })
+                    .map_err(construction)
+            })
         } else if ty == self.definitions.unit {
             self.constructor_return_syntax()
         } else {
