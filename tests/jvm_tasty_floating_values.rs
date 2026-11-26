@@ -96,3 +96,209 @@ fn mixed_primitive_formals_have_exact_f_d_descriptors_and_physical_slots() {
         assert_eq!(code.code, bytes);
     }
 }
+
+#[test]
+fn floating_locals_if_loops_and_local_returns_compose() {
+    for method in [
+        "def f(x: Float): Float = { val saved = x; saved }",
+        "def f(x: Double): Double = { val saved = x; saved }",
+        "def f(): Double = { val saved = -0.0; saved }",
+        "def f(a: Float, b: Float): Float = { var saved: Float = a; saved = b; saved }",
+        "def f(a: Double, b: Double): Double = { var saved: Double = a; saved = b; saved }",
+        "def f(flag: Boolean, a: Float, b: Float): Float = if flag then a else b",
+        "def f(flag: Boolean, a: Double, b: Double): Double = if flag then a else b",
+        "def f(n: Int, a: Float, b: Float): Float = { var saved: Float = a; var i: Int = n; while i > 0 do { saved = b; i = i - 1 }; saved }",
+        "def f(n: Int, a: Double, b: Double): Double = { var saved: Double = a; var i: Int = n; while i > 0 do { if i == 2 then return a; saved = b; i = i - 1 }; saved }",
+        "def f(x: Double): Double = return x",
+        "def f(flag: Boolean, a: Float, b: Float): Float = if flag then return a else return b",
+        "def f(flag: Boolean, a: Double, b: Double): Double = if flag then return a else b",
+        "def f(flag: Boolean, a: Double, b: Double): Double = { val saved: Double = if flag then a else b; saved }",
+        "def f(flag: Boolean, a: Float, b: Float): Float = { var saved: Float = a; saved = if flag then b else a; saved }",
+        "def f(x: Int, a: Float, b: Float): Float = x match { case 0 | 1 => return a; case _ => return b }",
+        "def f(x: Int, a: Double, b: Double): Double = x match { case 0 | 1 => return a; case _ => return b }",
+    ] {
+        emit(method);
+    }
+}
+
+#[test]
+fn forged_floating_bits_bindings_types_and_returns_fail_read_only() {
+    use dotty::core::{
+        Constant, SymbolKind, TermRefTarget, Type, Typed,
+        ast::{AstArena, TreeKind},
+    };
+    use dotty_tasty_pickler::{ClassStatePicklePlan, PickleError, PrimaryConstructorInputPlan};
+    for (ty, zero, negative) in [("Float", "0.0f", "-0.0f"), ("Double", "0.0", "-0.0")] {
+        for mode in 0..9 {
+            let methods = match mode {
+                0 | 1 | 8 => format!("def a(): {ty} = {zero}; def b(): {ty} = {negative}"),
+                2 | 3 => format!("def f(x: {ty}): {ty} = return x"),
+                4 => format!("def f(x: {ty}): {ty} = {{ val saved: {ty} = x; saved }}"),
+                5 => format!("def a(x: {ty}): {ty} = x; def b(x: {ty}): {ty} = x"),
+                6 => {
+                    format!("def f(flag: Boolean, a: {ty}, b: {ty}): {ty} = if flag then a else b")
+                }
+                7 => format!(
+                    "def a(x: {ty}): {ty} = {{ val saved: {ty} = x; saved }}; def b(x: {ty}): {ty} = {{ val saved: {ty} = x; saved }}"
+                ),
+                _ => unreachable!(),
+            };
+            let source = format!("package example; class FloatingValues {{ {methods} }}");
+            dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
+                &source,
+                "FloatingValues.scala",
+                SourceId::from_index(2475),
+                |paired| {
+                    let raw = paired.tasty_plan.plan();
+                    let checkpoint = raw.store.checkpoint();
+                    let mut ast = AstArena::<Typed>::new();
+                    for (id, n) in raw.typed_ast.iter() {
+                        assert_eq!(id, ast.alloc(n.clone()));
+                    }
+                    match mode {
+                        0 | 1 | 8 => {
+                            let literals: Vec<_> = ast
+                                .iter()
+                                .filter(|(_, n)| {
+                                    matches!(
+                                        n.kind,
+                                        TreeKind::Literal(dotty::core::ast::Literal {
+                                            value: Constant::FloatBits(_) | Constant::DoubleBits(_)
+                                        })
+                                    )
+                                })
+                                .map(|(id, n)| (id, n.kind.clone(), n.ty))
+                                .collect();
+                            assert_eq!(literals.len(), 2);
+                            if mode == 0 {
+                                ast.get_mut(literals[0].0).kind = literals[1].1.clone();
+                                ast.get_mut(literals[0].0).ty = literals[1].2;
+                            } else if mode == 1 {
+                                ast.get_mut(literals[0].0).ty = raw.definitions.long;
+                            } else {
+                                ast.get_mut(literals[0].0).ty = literals[1].2;
+                            }
+                        }
+                        2 | 3 => {
+                            let id = ast
+                                .iter()
+                                .find(|(_, n)| matches!(n.kind, TreeKind::Return(_)))
+                                .unwrap()
+                                .0;
+                            if mode == 2 {
+                                ast.get_mut(id).ty = raw.definitions.float;
+                            } else {
+                                let TreeKind::Return(r) = &mut ast.get_mut(id).kind else {
+                                    panic!()
+                                };
+                                r.from = r.expr;
+                            }
+                        }
+                        4 => {
+                            let id = ast
+                                .iter()
+                                .find_map(|(_, n)| {
+                                    if let TreeKind::ValDef(v) = &n.kind {
+                                        Some(v.tpt)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap();
+                            ast.get_mut(id).ty = raw.definitions.long;
+                        }
+                        5 | 7 => {
+                            let kind = if mode == 5 {
+                                SymbolKind::Parameter
+                            } else {
+                                SymbolKind::Local
+                            };
+                            let reads: Vec<_> = ast
+                                .iter()
+                                .filter(|(_, n)| matches!(n.kind, TreeKind::Ident(_)))
+                                .filter_map(|(id, n)| match raw.store.types.try_get(n.ty) {
+                                    Some(Type::TermRef {
+                                        target: TermRefTarget::Symbol(s),
+                                        ..
+                                    }) if raw.store.symbols.get(*s).kind == kind => {
+                                        Some((id, n.ty))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            assert_eq!(reads.len(), 2);
+                            ast.get_mut(reads[1].0).ty = reads[0].1;
+                            if mode == 7 {
+                                let blocks: Vec<_> = ast
+                                    .iter()
+                                    .filter_map(|(id, n)| match &n.kind {
+                                        TreeKind::Block(b) if b.expr == reads[1].0 => Some(id),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                for id in blocks {
+                                    ast.get_mut(id).ty = reads[0].1;
+                                }
+                            }
+                        }
+                        6 => {
+                            let id = ast
+                                .iter()
+                                .find(|(_, n)| matches!(n.kind, TreeKind::If(_)))
+                                .unwrap()
+                                .0;
+                            ast.get_mut(id).ty = raw.definitions.nothing_type;
+                        }
+                        _ => unreachable!(),
+                    }
+                    let input = ClassStatePicklePlan {
+                        store: raw.store,
+                        definitions: raw.definitions,
+                        typed_ast: &ast,
+                        source_ast: raw.source_ast,
+                        source_index: raw.source_index,
+                        typed_bindings: raw.typed_bindings,
+                        source: raw.source.clone(),
+                        class: raw.class,
+                        class_tree: raw.class_tree,
+                        constructor: PrimaryConstructorInputPlan {
+                            symbol: raw.constructor.symbol,
+                            source_tree: raw.constructor.source_tree,
+                            parameter_clauses: raw.constructor.parameter_clauses.clone(),
+                        },
+                        members: raw.members,
+                    };
+                    let error = input
+                        .validate()
+                        .and_then(|v| v.validate_method_bodies())
+                        .unwrap_err();
+                    match mode {
+                        0 => assert!(
+                            matches!(error, PickleError::SourceShape { .. }),
+                            "{ty}/{mode}: {error:?}"
+                        ),
+                        1 | 6 | 8 => assert!(
+                            matches!(error, PickleError::BodyType { .. }),
+                            "{ty}/{mode}: {error:?}"
+                        ),
+                        2 | 3 => assert!(
+                            matches!(error, PickleError::Unsupported { .. }),
+                            "{ty}/{mode}: {error:?}"
+                        ),
+                        4 => assert!(
+                            matches!(error, PickleError::UnsupportedTypeReference { .. }),
+                            "{ty}/{mode}: {error:?}"
+                        ),
+                        5 | 7 => assert!(
+                            matches!(error, PickleError::Reference { .. }),
+                            "{ty}/{mode}: {error:?}"
+                        ),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(checkpoint, raw.store.checkpoint());
+                },
+            )
+            .unwrap();
+        }
+    }
+}

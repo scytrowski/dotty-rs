@@ -383,7 +383,7 @@ fn lower_expression_inner(
                     && symbol.flags == dotty_core::SymbolFlags::MUTABLE
                     && symbol.name == ident.name
                     && *prefix == context.definitions().no_prefix
-                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long) =>
+                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long || ty == context.definitions().float || ty == context.definitions().double) =>
             {
                 context.local_reference(target, None)?
             }

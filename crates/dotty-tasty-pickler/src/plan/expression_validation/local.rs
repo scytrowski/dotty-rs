@@ -166,6 +166,8 @@ impl Validator<'_, '_> {
         let local_type = self.complete(binding.symbol)?;
         if (local_type != self.plan.definitions.int
             && local_type != self.plan.definitions.long
+            && local_type != self.plan.definitions.float
+            && local_type != self.plan.definitions.double
             && !reference_local_type.is_some_and(|expected| {
                 expected == local_type && self.is_planned_sibling_class_type(local_type, None)
             }))
@@ -206,7 +208,9 @@ impl Validator<'_, '_> {
         }
         let source_type_matches = matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
             || ((local_type == self.plan.definitions.int
-                || local_type == self.plan.definitions.long)
+                || local_type == self.plan.definitions.long
+                || local_type == self.plan.definitions.float
+                || local_type == self.plan.definitions.double)
                 && matches!(source_tpt.kind, TreeKind::TypeTree(_)));
         if !source_type_matches
             || !matches!(typed_tpt.kind, TreeKind::TypeTree(_))

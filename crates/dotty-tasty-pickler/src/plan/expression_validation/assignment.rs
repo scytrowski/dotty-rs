@@ -281,6 +281,8 @@ impl Validator<'_, '_> {
                 || self.symbol(target)?.flags != SymbolFlags::MUTABLE
                 || (complete_type != self.plan.definitions.int
                     && complete_type != self.plan.definitions.long
+                    && complete_type != self.plan.definitions.float
+                    && complete_type != self.plan.definitions.double
                     && !authenticated_counter_target)
                 || *prefix != self.plan.definitions.no_prefix
             {
@@ -373,7 +375,13 @@ impl Validator<'_, '_> {
                 depth,
                 visited,
             )
-        } else if target_type == self.plan.definitions.long {
+        } else if [
+            self.plan.definitions.long,
+            self.plan.definitions.float,
+            self.plan.definitions.double,
+        ]
+        .contains(&target_type)
+        {
             self.validate_numeric_value(
                 source_assign.rhs,
                 typed_assign.rhs,
