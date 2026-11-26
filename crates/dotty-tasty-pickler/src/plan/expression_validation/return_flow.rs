@@ -6,28 +6,29 @@ impl Validator<'_, '_> {
         &self,
         source: TreeId<Untyped>,
         root: TreeId<Typed>,
-    ) -> Result<bool, PickleError> {
-        let mut pending = vec![(source, root, 0)];
+    ) -> bool {
+        // Dispatch must not change diagnostics or depth accounting for bodies
+        // without returns. Bound this iterative search separately and defer
+        // malformed IDs, cycles and exhausted budgets to the real validator.
+        let mut pending = vec![(source, root)];
+        let mut seen = HashSet::new();
         let mut remaining = self.limits.max_items;
-        while let Some((source_id, id, depth)) = pending.pop() {
-            if depth > self.limits.expression_depth_limit() {
-                return Err(PickleError::LimitExceeded {
-                    kind: LimitKind::ExpressionDepth,
-                    limit: self.limits.expression_depth_limit(),
-                });
+        while let Some((source_id, id)) = pending.pop() {
+            if !seen.insert((source_id, id)) {
+                continue;
             }
-            remaining = remaining.checked_sub(1).ok_or(PickleError::LimitExceeded {
-                kind: LimitKind::Items,
-                limit: self.limits.max_items,
-            })?;
-            let node = self
-                .plan
-                .typed_ast
-                .try_get(id)
-                .ok_or(PickleError::InvalidTypedTree { tree: id })?;
-            let source = self.source_tree(source_id)?;
-            // This is dispatch only. Leave malformed shape pairs to the existing
-            // validator instead of following an unrelated typed subtree first.
+            let Some(next) = remaining.checked_sub(1) else {
+                return false;
+            };
+            remaining = next;
+            let Some(node) = self.plan.typed_ast.try_get(id) else {
+                return false;
+            };
+            let Ok(source) = self.source_tree(source_id) else {
+                return false;
+            };
+            // Leave malformed shape pairs to the existing validator instead of
+            // following an unrelated typed subtree first.
             let children: Vec<_> = match (&source.kind, &node.kind) {
                 (TreeKind::PhaseSpecific(UntypedNode::Parens(parens)), _) => {
                     vec![(parens.inner, id)]
@@ -46,16 +47,10 @@ impl Validator<'_, '_> {
                     // If and the complete synthetic Unit adaptation shape.
                     vec![(source_id, block.stats[0])]
                 }
-                (TreeKind::Return(_), TreeKind::Return(_)) => return Ok(true),
+                (TreeKind::Return(_), TreeKind::Return(_)) => return true,
                 (TreeKind::Block(source), TreeKind::Block(block)) => {
-                    if source.stats.len() != block.stats.len() {
-                        return Ok(false);
-                    }
-                    if block.stats.len() > remaining {
-                        return Err(PickleError::LimitExceeded {
-                            kind: LimitKind::Items,
-                            limit: self.limits.max_items,
-                        });
+                    if source.stats.len() != block.stats.len() || block.stats.len() > remaining {
+                        return false;
                     }
                     source
                         .stats
@@ -71,14 +66,8 @@ impl Validator<'_, '_> {
                 ],
                 (TreeKind::While(source), TreeKind::While(node)) => vec![(source.body, node.body)],
                 (TreeKind::Match(source), TreeKind::Match(node)) => {
-                    if source.cases.len() != node.cases.len() {
-                        return Ok(false);
-                    }
-                    if node.cases.len() > remaining {
-                        return Err(PickleError::LimitExceeded {
-                            kind: LimitKind::Items,
-                            limit: self.limits.max_items,
-                        });
+                    if source.cases.len() != node.cases.len() || node.cases.len() > remaining {
+                        return false;
                     }
                     source
                         .cases
@@ -93,18 +82,11 @@ impl Validator<'_, '_> {
                 _ => Vec::new(),
             };
             if children.len() > remaining.saturating_sub(pending.len()) {
-                return Err(PickleError::LimitExceeded {
-                    kind: LimitKind::Items,
-                    limit: self.limits.max_items,
-                });
+                return false;
             }
-            pending.extend(
-                children
-                    .into_iter()
-                    .map(|(source, typed)| (source, typed, depth + 1)),
-            );
+            pending.extend(children);
         }
-        Ok(false)
+        false
     }
 
     pub(super) fn primitive_flow_type(
