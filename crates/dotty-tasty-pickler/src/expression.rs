@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod block;
+mod match_expr;
 pub(crate) use block::{
     MutableCounterAssignmentFragmentTrees, MutableCounterFragmentTrees,
     lower_mutable_counter_assignment_fragment, lower_mutable_counter_declaration_fragment,
@@ -64,7 +65,14 @@ impl ExpressionBudget {
 fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
     if matches!(
         ast.try_get(tree).map(|tree| &tree.kind),
-        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
+        Some(
+            TreeKind::Apply(_)
+                | TreeKind::Block(_)
+                | TreeKind::If(_)
+                | TreeKind::Select(_)
+                | TreeKind::Match(_)
+                | TreeKind::Typed(_)
+        )
     ) {
         depth + 1
     } else {
@@ -136,6 +144,17 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Match(matched) = &tree.kind {
+        return match_expr::lower_match(
+            store,
+            ast,
+            matched,
+            method,
+            parameters,
+            ExpressionState { depth, budget },
+            context,
+        );
+    }
     if let TreeKind::Typed(ascription) = tree.kind {
         let tpt = ast
             .try_get(ascription.tpt)

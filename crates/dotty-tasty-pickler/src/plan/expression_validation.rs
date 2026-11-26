@@ -4,6 +4,7 @@ mod ascription;
 mod assignment;
 mod block;
 mod local;
+mod match_expr;
 mod while_loop;
 
 fn validate_cross_class_target_signature(
@@ -1183,6 +1184,16 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if matches!(source.kind, TreeKind::Match(_)) && matches!(typed.kind, TreeKind::Match(_)) {
+            return self.validate_primitive_match(
+                source_id,
+                typed_id,
+                method,
+                self.plan.definitions.boolean,
+                depth + 1,
+                visited,
+            );
+        }
         if matches!(source.kind, TreeKind::Typed(_)) && matches!(typed.kind, TreeKind::Typed(_)) {
             return self.validate_primitive_ascription(
                 source_id,
@@ -1658,6 +1669,12 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
+        if matches!(source_rhs.kind, TreeKind::Match(_)) && matches!(node.kind, TreeKind::Match(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_primitive_match(rhs, body, method, result_type, depth + 1, seen);
+        }
         if self.is_constructor_application_shape(rhs, body)? {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);

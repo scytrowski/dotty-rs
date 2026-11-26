@@ -1273,6 +1273,14 @@ impl Validator<'_, '_> {
             );
         }
         match (&self.source_tree(source_id)?.kind, &typed.kind) {
+            (TreeKind::Match(_), TreeKind::Match(_)) => self.validate_primitive_match(
+                source_id,
+                typed_id,
+                method,
+                self.plan.definitions.unit,
+                depth + 1,
+                visited,
+            ),
             (TreeKind::Typed(_), TreeKind::Typed(_)) => self.validate_primitive_ascription(
                 source_id,
                 typed_id,

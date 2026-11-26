@@ -11,6 +11,7 @@ use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::reference::ReferenceUnit;
+mod match_expr;
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmBooleanIntrinsic,
     JvmCallTarget, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow,
@@ -39,6 +40,7 @@ enum ExpressionShape {
     Apply,
     Assign,
     Ascription,
+    Match,
     Unsupported(&'static str),
 }
 
@@ -977,6 +979,7 @@ fn emit_expression_with_identity_context(
             TreeKind::Apply(_) => ExpressionShape::Apply,
             TreeKind::Assign(_) => ExpressionShape::Assign,
             TreeKind::Typed(_) => ExpressionShape::Ascription,
+            TreeKind::Match(_) => ExpressionShape::Match,
             kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
         }
     };
@@ -1031,6 +1034,7 @@ fn emit_expression_with_identity_context(
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
         ExpressionShape::Assign => emit_assignment(context, tree_id, code, depth),
         ExpressionShape::Ascription => emit_ascription(context, tree_id, code, depth),
+        ExpressionShape::Match => match_expr::emit_match(context, tree_id, code, depth),
         ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node,
@@ -5402,6 +5406,47 @@ mod tests {
             })
         );
         assert_eq!(code_bytes(&fixture, &code), before);
+    }
+
+    #[test]
+    fn malformed_matches_require_a_final_unbound_wildcard_before_lowering() {
+        let mut fixture = Fixture::new(&[]);
+        let int = fixture.store.types.alloc(Type::Constant(Constant::Int(0)));
+        let selector = fixture.literal(Constant::Int(0), int);
+        let pattern = fixture.literal(Constant::Int(0), int);
+        let body = fixture.literal(Constant::Int(0), int);
+        let case = fixture.ast.alloc(Tree {
+            kind: TreeKind::CaseDef(dotty_core::ast::CaseDef {
+                pattern,
+                guard: None,
+                body,
+            }),
+            position: None,
+            ty: int,
+        });
+        let root = fixture.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match {
+                selector,
+                cases: vec![case],
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let error = lower_expression(
+            &fixture.store,
+            &fixture.ast,
+            &fixture.definitions,
+            &fixture.method,
+            root,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: pattern,
+                node: "match requires exactly one final wildcard"
+            }
+        );
     }
 
     #[test]
