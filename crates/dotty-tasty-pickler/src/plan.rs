@@ -872,7 +872,7 @@ impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
 
 impl<'a> PicklePlan<'a> {
     /// Check the canonical class, default constructor, method signatures and
-    /// bounded primitive bodies, including supported local Int returns.
+    /// bounded primitive bodies, including supported local Int/Long returns.
     /// Stateful classes and case bindings use the separate class-state plan.
     /// Neither success nor failure changes stores, arenas, indices, or files.
     pub fn validate(&self) -> Result<ValidatedPicklePlan<'_, 'a>, PickleError> {
@@ -1535,7 +1535,6 @@ impl<'a> Validator<'_, 'a> {
         }
         let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
         let boolean = self.builtin(Builtin::Boolean, self.plan.definitions.boolean, "Boolean")?;
-        let long = self.builtin(Builtin::Long, self.plan.definitions.long, "Long")?;
         let mut seen = HashSet::new();
         for (clause, (symbols, trees)) in clauses
             .iter()
@@ -1572,12 +1571,14 @@ impl<'a> Validator<'_, 'a> {
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
                 };
-                let declared_type = if parameter_type.name == self.symbol(long)?.name {
-                    Some(self.plan.definitions.long)
-                } else if parameter_type.name == self.symbol(int)?.name {
+                let declared_type = if parameter_type.name == self.symbol(int)?.name {
                     Some(self.plan.definitions.int)
                 } else if parameter_type.name == self.symbol(boolean)?.name {
                     Some(self.plan.definitions.boolean)
+                } else if self.complete(symbol)? == self.plan.definitions.long {
+                    let long = self.builtin(Builtin::Long, self.plan.definitions.long, "Long")?;
+                    (parameter_type.name == self.symbol(long)?.name)
+                        .then_some(self.plan.definitions.long)
                 } else {
                     None
                 };
@@ -2669,7 +2670,6 @@ impl<'a> Validator<'_, 'a> {
                     ty: p.definitions.int,
                     role: TypeRole::Builtin(Builtin::Int),
                 })?;
-        let long = self.builtin(Builtin::Long, p.definitions.long, "Long")?;
         let boolean = self.ty(p.definitions.boolean)?.reference_symbol().ok_or(
             PickleError::MalformedType {
                 ty: p.definitions.boolean,
@@ -2801,6 +2801,7 @@ impl<'a> Validator<'_, 'a> {
         } else if result_type == p.definitions.boolean {
             self.symbol(boolean)?.name
         } else if result_type == p.definitions.long {
+            let long = self.builtin(Builtin::Long, p.definitions.long, "Long")?;
             self.symbol(long)?.name
         } else if result_type == p.definitions.unit {
             self.symbol(unit)?.name

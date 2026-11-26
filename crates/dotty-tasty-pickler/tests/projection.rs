@@ -891,3 +891,39 @@ fn unfilled_error_and_structural_name_types_are_never_projected_as_placeholders(
         assert_eq!(context(&f).lower_type(ty).err(), Some(expected));
     }
 }
+
+#[test]
+fn canonical_long_type_projects_as_scala_long_without_a_class_info() {
+    let f = Fixture::new();
+    let mut c = context(&f);
+    let root = c.lower_type(f.definitions.long).unwrap();
+    let fragment = c.finish(&[root]).unwrap();
+    assert_eq!(
+        external_meaning(at(&fragment, root), &fragment.names),
+        ("scala".to_owned(), "Long".to_owned())
+    );
+}
+
+#[test]
+fn a_replaced_long_builtin_is_rejected_without_semantic_mutation() {
+    let mut f = Fixture::new();
+    f.definitions.long = f.definitions.double;
+    let checkpoint = f.store.checkpoint();
+    let mut context = EncodingContext::new(
+        &f.store,
+        &f.definitions,
+        &f.index,
+        f.source,
+        ProjectionLimits::default(),
+    )
+    .unwrap();
+    let error = context.lower_type(f.definitions.long).unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::BuiltinIdentity {
+            builtin: Builtin::Long,
+            ty: f.definitions.double
+        }
+    );
+    assert_eq!(checkpoint, f.store.checkpoint());
+}

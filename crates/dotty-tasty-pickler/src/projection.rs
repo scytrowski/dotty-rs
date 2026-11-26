@@ -327,7 +327,6 @@ impl<'a> EncodingContext<'a> {
         }
         for builtin in [
             Builtin::Int,
-            Builtin::Long,
             Builtin::Boolean,
             Builtin::Unit,
             Builtin::Object,
@@ -2146,10 +2145,12 @@ impl<'a> EncodingContext<'a> {
             })
             .map_err(construction)
     }
+    fn is_long_symbol(&self, symbol: SymbolId) -> bool {
+        matches!(self.store.types.try_get(self.definitions.long), Some(Type::TypeRef {target: TypeRefTarget::Symbol(expected), ..}) if *expected == symbol)
+    }
     fn external_inner(&mut self, symbol: SymbolId) -> Result<AstLabel, PickleError> {
         for builtin in [
             Builtin::Int,
-            Builtin::Long,
             Builtin::Boolean,
             Builtin::Unit,
             Builtin::Object,
@@ -2157,6 +2158,9 @@ impl<'a> EncodingContext<'a> {
             if self.builtin(builtin)? == symbol {
                 return self.builtin_ref(builtin);
             }
+        }
+        if self.is_long_symbol(symbol) {
+            return self.builtin_ref(Builtin::Long);
         }
         self.symbol(symbol)?;
         let &(package, name) = self
@@ -2271,9 +2275,9 @@ impl<'a> EncodingContext<'a> {
                             depth,
                         )?
                     } else if *symbol == self.builtin(Builtin::Int)?
-                        || *symbol == self.builtin(Builtin::Long)?
                         || *symbol == self.builtin(Builtin::Boolean)?
                         || *symbol == self.builtin(Builtin::Object)?
+                        || self.is_long_symbol(*symbol)
                     {
                         if *prefix != self.definitions.no_prefix {
                             return Err(reference(*symbol, ReferenceError::Owner));
