@@ -126,7 +126,9 @@ pub trait SourceTypedBindings {
     }
 
     /// Canonical source/typed/symbol/case-scope tuples for pattern Bind roots.
-    /// These are distinct from ordinary ValDef locals. Every supplied binding
+    /// The complete class-state producer consumes these separately from ordinary
+    /// ValDef locals; the older literal PicklePlan path rejects case bindings.
+    /// Every supplied binding
     /// must occur in this method's validated cases, in the same session arenas.
     fn pattern_value_bindings(
         &self,

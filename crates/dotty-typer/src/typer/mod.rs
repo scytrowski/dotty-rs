@@ -285,7 +285,7 @@ impl TypedLocalBinding {
         self.source_declaration
     }
 
-    /// Typed `ValDef` declaration in this typer's arena.
+    /// Exact typed ValDef or pattern Bind declaration in this typer's arena.
     pub const fn declaration(self) -> TreeId<Typed> {
         self.declaration
     }

@@ -292,7 +292,7 @@ pub struct JvmParameterLocal {
     width: u8,
 }
 
-/// One ordinary method-local's reserved JVM slot and canonical identity.
+/// One ordinary local or case binder's reserved JVM slot and canonical identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JvmLocalSlot {
     declaration: TreeId<Typed>,
@@ -939,7 +939,9 @@ impl JvmLocalBinding {
     }
     /// Records an immutable pattern binder with its canonical case scope and
     /// exact typed CaseDef. The case must bind this declaration as its root
-    /// pattern; all IDs must belong to the unit's one semantic session.
+    /// pattern; all IDs must belong to the unit's one semantic session. A Bind's
+    /// tree type references its symbol; the symbol's completed info supplies
+    /// the stored value type. Scope/case mismatches are typed validation errors.
     pub const fn pattern(
         declaration: TreeId<Typed>,
         symbol: SymbolId,
@@ -1219,7 +1221,7 @@ pub enum JvmCodegenError {
         /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
-    /// A local binding's typed node is not an ordinary `ValDef`.
+    /// A local binding is neither an ordinary ValDef nor a Bind with a valid case/scope proof.
     InvalidLocalDeclaration {
         /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,

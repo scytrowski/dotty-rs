@@ -70,7 +70,9 @@ pub struct JvmMethodPlanner<'a> {
     pub typed_ast: &'a AstArena<Typed>,
     /// Mappings produced when the method was typed.
     pub typed_index: &'a SourceTypedIndex,
-    /// Ordinary locals from the same typer output, in typed declaration order.
+    /// Canonical local tuples from the same typer output, in typed declaration
+    /// order. Deferred class planning may merge ordinary and pattern bindings
+    /// here; do not also repeat those bindings in `pattern_bindings`.
     pub local_bindings: &'a [TypedLocalBinding],
     /// Case-local pattern bindings retained from the same frontend session.
     pub pattern_bindings: &'a [TypedLocalBinding],
