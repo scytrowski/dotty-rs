@@ -51,7 +51,7 @@ and removes case-local initialization facts before the next case and match join.
 
 ## Local primitive method returns
 
-Ordinary planned methods with Int, Boolean or Unit results can return directly
+Ordinary planned methods with Int, Boolean, Unit or Long results can return directly
 or from blocks, If branches, While bodies and supported Int matches. A local
 return emits the method's exact primitive return instruction. All-returning
 branches contribute no join value or trailing epilogue. A block may retain
