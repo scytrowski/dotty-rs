@@ -99,3 +99,69 @@ fn long_locals_if_while_and_local_returns_compose_in_the_real_pipeline() {
         emit(method);
     }
 }
+
+#[test]
+fn long_matches_and_proved_abrupt_long_tails_emit_without_a_placeholder_value() {
+    for method in [
+        "def f(x: Int, a: Long, b: Long): Long = x match { case 0 => a; case _ => b }",
+        "def f(x: Int, a: Long, b: Long): Long = x match { case n if n < 0 => a; case _ => b }",
+        "def f(x: Int): Long = x match { case 0 => 1L; case _ => 9000000000L }",
+        "def f(x: Int, a: Long, b: Long): Long = x match { case 0 => return a; case _ => b }",
+        "def f(x: Int, a: Long, b: Long): Long = x match { case 0 => return a; case _ => return b }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = if flag then { return a; b } else b",
+        "def f(x: Int, a: Long, b: Long): Long = x match { case 0 => { return a; b }; case _ => b }",
+        "def f(flag: Boolean, a: Long, b: Long): Long = if flag then { val saved: Long = b; return a; saved } else b",
+    ] {
+        emit(method);
+    }
+}
+
+#[test]
+fn the_full_long_fixture_is_deterministic_across_fresh_sessions() {
+    let source = include_str!("fixtures/jvm_tasty_long_values/LongValues.scala");
+    let first = emit_paired_jvm_tasty_class(source, "LongValues.scala", SourceId::from_index(2473))
+        .unwrap();
+    let second =
+        emit_paired_jvm_tasty_class(source, "LongValues.scala", SourceId::from_index(2474))
+            .unwrap();
+    assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+    assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+}
+
+#[test]
+fn pinned_scala_consumes_and_recompiles_original_rust_long_tasty() {
+    if std::env::var("DOTTY_REQUIRE_SCALA_TASTY_CONSUMER").as_deref() != Ok("1") {
+        return;
+    }
+    let pair = emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_long_values/LongValues.scala"),
+        "LongValues.scala",
+        SourceId::from_index(2473),
+    )
+    .unwrap();
+    let directory =
+        std::env::temp_dir().join(format!("dotty-long-value-scala-{}", std::process::id()));
+    std::fs::create_dir_all(directory.join("example")).unwrap();
+    std::fs::write(
+        directory.join(pair.classfile_path()),
+        pair.classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(directory.join(pair.tasty_path()), pair.tasty_bytes()).unwrap();
+    let output = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/jvm_tasty_long_values/run.py"
+        ))
+        .arg(&directory)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    std::fs::remove_dir_all(directory).unwrap();
+}

@@ -4518,6 +4518,16 @@ fn validate_branch(
             // Recursive lowering proves the exit. A block can retain the type
             // of its unreachable tail without producing a value on that path.
             let kind = &context.tree(tree)?.kind;
+            // The typer can retain a Long parameter/local singleton as the
+            // unreachable tail's type. Use the exact planned binding rather
+            // than treating that TermRef as a reference-valued JVM result.
+            let long_binding_type = matches!(context.store.types.try_get(tree_ty),
+                Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) })
+                    if *prefix == context.definitions.no_prefix
+                        && context.store.symbols.contains(*symbol)
+                        && context.store.symbols.get(*symbol).info == SymbolInfo::Complete(context.definitions.long)
+                        && (context.method.parameters().iter().any(|p| p.symbol() == *symbol && p.ty() == JvmType::Long)
+                            || context.local_layout.is_some_and(|l| l.local(*symbol).is_ok_and(|slot| slot.ty() == JvmType::Long))));
             let diverges_with_supported_type =
                 is_nothing_type(context.store, tree_ty, context.definitions)
                     || (is_unit_type(context.store, tree_ty, context.definitions)
@@ -4528,13 +4538,15 @@ fn validate_branch(
                                 | TreeKind::Block(_)
                                 | TreeKind::Match(_)
                         ))
-                    || (matches!(
-                        primitive_type(context.store, tree_ty, context.definitions),
-                        Some(JvmType::Int | JvmType::Boolean)
-                    ) && matches!(
-                        kind,
-                        TreeKind::If(_) | TreeKind::Block(_) | TreeKind::Match(_)
-                    ));
+                    || ((long_binding_type
+                        || matches!(
+                            primitive_type(context.store, tree_ty, context.definitions),
+                            Some(JvmType::Int | JvmType::Boolean | JvmType::Long)
+                        ))
+                        && matches!(
+                            kind,
+                            TreeKind::If(_) | TreeKind::Block(_) | TreeKind::Match(_)
+                        ));
             if diverges_with_supported_type {
                 Ok(())
             } else {

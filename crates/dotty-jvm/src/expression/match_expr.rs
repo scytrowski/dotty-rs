@@ -32,7 +32,7 @@ pub(super) fn emit_match(
         Flow::Unit
     } else {
         match primitive_type(context.store, node.ty, context.definitions) {
-            Some(value @ (JvmType::Int | JvmType::Boolean)) => Flow::Value(value),
+            Some(value @ (JvmType::Int | JvmType::Boolean | JvmType::Long)) => Flow::Value(value),
             _ => return Err(unsupported(tree, "unsupported match result type")),
         }
     };
