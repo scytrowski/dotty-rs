@@ -20,15 +20,45 @@ def main():
     args = parser.parse_args()
     toolchain = ORACLE["Toolchain"]()
     if args.candidate:
+        provenance = json.loads((HERE / "provenance.json").read_text())
+        assert provenance["scala_source_revision"] == ORACLE["REVISION"]
+        assert hashlib.sha256((HERE / "Expressions.scala").read_bytes()).hexdigest() == provenance["source_sha256"]
+        assert hashlib.sha256((HERE / "oracle.txt").read_bytes()).hexdigest() == provenance["oracle_sha256"]
         candidate = args.candidate / "example/Expressions.tasty"
         classfile = args.candidate / "example/Expressions.class"
         originals = {path: path.read_bytes() for path in [candidate, classfile]}
         with tempfile.TemporaryDirectory(prefix="expression-consumer-") as scratch:
             output = Path(scratch)
+            rebuilt = output / "from-tasty"
+            java_out = output / "java"
+            scala_out = output / "scala"
+            for directory in [rebuilt, java_out, scala_out]:
+                directory.mkdir()
             printed = toolchain.compiler(["-print-tasty", candidate], decompile=True)
-            print(printed)
-            toolchain.compiler(["-from-tasty", "-d", output, candidate], classpath=str(args.candidate) + ":" + toolchain.runtime_classpath)
-            assert (output / "example/Expressions.class").is_file()
+            for shape in ["match", "case 0", "case _", "scala.Int", ".&(", ".==(", ".!=("]:
+                assert shape in printed, f"official Scala reader lost {shape}"
+            toolchain.compiler(["-from-tasty", "-d", rebuilt, candidate],
+                               classpath=str(args.candidate) + ":" + toolchain.runtime_classpath)
+            assert (rebuilt / "example/Expressions.class").is_file()
+            execute = ORACLE["execute"]
+            execute([toolchain.javac, "--release", "21", "-cp", args.candidate,
+                     "-d", java_out, HERE / "JavaConsumer.java"])
+            for producer in [args.candidate, rebuilt]:
+                result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
+                                  f"{java_out}:{producer}:{toolchain.runtime_classpath}", "JavaConsumer"])
+                assert result.strip() == "expression parity ok", result
+            toolchain.compiler(["-d", scala_out, HERE / "ScalaConsumer.scala"],
+                               classpath=f"{args.candidate}:{toolchain.runtime_classpath}")
+            result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
+                              f"{scala_out}:{args.candidate}:{toolchain.runtime_classpath}", "ScalaConsumer"])
+            assert result.strip() == "expression parity ok", result
+            print(json.dumps({
+                "java_original": "expression parity ok",
+                "scala_original": "expression parity ok",
+                "java_from_tasty": "expression parity ok",
+                "original_sha256": {str(p.relative_to(args.candidate)): hashlib.sha256(data).hexdigest()
+                                    for p, data in originals.items()},
+            }, sort_keys=True))
         assert all(path.read_bytes() == data for path, data in originals.items())
         print("Rust expression TASTy accepted and compiled by pinned Scala 3.9")
         return

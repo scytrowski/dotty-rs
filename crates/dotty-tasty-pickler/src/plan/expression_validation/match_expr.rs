@@ -34,6 +34,15 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Body,
             });
         };
+        // Check both lengths before allocating private traversal copies.
+        if source_match.cases.len() > self.limits.max_items
+            || typed_match.cases.len() > self.limits.max_items
+        {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::Items,
+                limit: self.limits.max_items,
+            });
+        }
         let source_match = source_match.clone();
         let typed_match = typed_match.clone();
         self.source_typed_binding(source_id, typed_id)?;

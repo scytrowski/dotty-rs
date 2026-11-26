@@ -5450,6 +5450,37 @@ mod tests {
     }
 
     #[test]
+    fn oversized_match_case_vectors_reject_before_following_case_ids() {
+        let mut fixture = Fixture::new(&[]);
+        let selector = fixture.literal(Constant::Int(0), fixture.definitions.int);
+        // The IDs deliberately do not designate CaseDefs: the item limit must
+        // reject this input before cloning or inspecting the supplied cases.
+        let root = fixture.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match {
+                selector,
+                cases: vec![selector; JVM_EXPRESSION_NODE_BUDGET + 1],
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let error = lower_expression(
+            &fixture.store,
+            &fixture.ast,
+            &fixture.definitions,
+            &fixture.method,
+            root,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            JvmCodegenError::ExpressionNodeBudgetExceeded {
+                tree: root,
+                limit: JVM_EXPRESSION_NODE_BUDGET
+            }
+        );
+    }
+
+    #[test]
     fn malformed_primitive_ascriptions_fail_before_returning_code() {
         let mut fixture = Fixture::new(&[]);
         let expr = fixture.literal(Constant::Int(7), fixture.definitions.int);

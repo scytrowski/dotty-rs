@@ -244,6 +244,7 @@ fn pinned_scala_reads_and_recompiles_rust_expression_tasty() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -275,4 +276,109 @@ fn paired_contract_rejects_missing_canonical_primitive_local_evidence() {
         assert!(matches!(error, JvmTastyContractError::LocalBindingMismatch { method } if method == symbol), "{error:?}");
         assert_eq!(before, plan.jvm_unit.store.checkpoint());
     }).unwrap();
+}
+
+fn jdk_available() -> bool {
+    let version = std::process::Command::new("java")
+        .arg("-version")
+        .output()
+        .ok();
+    let major = version.as_ref().and_then(|output| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        text.split('"')
+            .nth(1)?
+            .split('.')
+            .next()?
+            .parse::<u32>()
+            .ok()
+    });
+    let available = major.is_some_and(|major| major >= 21);
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        assert!(
+            available,
+            "mandatory expression runtime gate requires JDK 21+"
+        );
+    }
+    available
+}
+
+fn run_java(pair: &dotty::jvm_tasty_artifacts::PairedJvmTastyArtifacts, name: &str, source: &str) {
+    let directory =
+        std::env::temp_dir().join(format!("dotty-expressions-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(directory.join("example")).unwrap();
+    std::fs::write(
+        directory.join(pair.classfile_path()),
+        pair.classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(directory.join(pair.tasty_path()), pair.tasty_bytes()).unwrap();
+    let client = directory.join(format!("{name}.java"));
+    std::fs::write(&client, source).unwrap();
+    let compile = std::process::Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(&directory)
+        .arg("-d")
+        .arg(&directory)
+        .arg(&client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(&directory)
+        .arg(name)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "expression parity ok"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn composed_expressions_and_effectful_operands_execute_on_jdk21() {
+    if !jdk_available() {
+        return;
+    }
+    let pair = emit_paired_jvm_tasty_class(
+        include_str!("fixtures/jvm_tasty_expressions/Expressions.scala"),
+        "Expressions.scala",
+        SourceId::from_index(2470),
+    )
+    .unwrap();
+    run_java(
+        &pair,
+        "JavaConsumer",
+        include_str!("fixtures/jvm_tasty_expressions/JavaConsumer.java"),
+    );
+    let effects = emit(
+        "private var count: Int = 0; def left(): Int = { count = count * 10 + 1; 7 }; def right(): Int = { count = count * 10 + 2; 3 }; def read(): Int = count; def mask(): Int = left() & right(); def same(): Boolean = left() == right(); def different(): Boolean = left() != right()",
+    );
+    run_java(
+        &effects,
+        "JavaEffects",
+        r#"public class JavaEffects {
+      public static void main(String[] args) {
+        example.Expressions x = new example.Expressions();
+        if (x.mask() != 3 || x.read() != 12) throw new AssertionError("and operand order/count");
+        if (x.same() || x.read() != 1212) throw new AssertionError("equal operand order/count");
+        if (!x.different() || x.read() != 121212) throw new AssertionError("not-equal operand order/count");
+        System.out.println("expression parity ok");
+      }
+    }"#,
+    );
 }

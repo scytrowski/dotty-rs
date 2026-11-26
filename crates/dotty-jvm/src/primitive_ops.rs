@@ -154,8 +154,10 @@ pub enum JvmIntIntrinsicError {
     },
 }
 
-/// Resolves a typed application only when it selects one of the registered
-/// canonical `scala.Int` operator symbols and all of its semantic types agree.
+/// Resolves a typed application selecting a registered canonical `scala.Int`
+/// operator, or canonical `Any.==/!=` with two Int operands. Validates the
+/// original owner/signature and every operand/result type before reporting a
+/// primitive JVM operation; it never manufactures an Int equality symbol.
 /// This function only reads the store and typed AST; it does not emit code.
 /// Ordinary calls to user-defined or otherwise non-registered methods return
 /// `Ok(None)`.

@@ -10,6 +10,13 @@ pub(super) fn emit_match(
     let TreeKind::Match(matched) = &node.kind else {
         unreachable!("match shape was checked")
     };
+    // Bound the allocation before cloning an externally supplied case vector.
+    if matched.cases.len() > JVM_EXPRESSION_NODE_BUDGET.saturating_sub(context.node_visits) {
+        return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+            tree,
+            limit: JVM_EXPRESSION_NODE_BUDGET,
+        });
+    }
     let matched = matched.clone();
     let expected = if is_unit_type(context.store, node.ty, context.definitions) {
         Flow::Unit
