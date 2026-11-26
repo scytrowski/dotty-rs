@@ -279,7 +279,9 @@ impl Validator<'_, '_> {
                 });
             if !self.visible_locals.contains(&target)
                 || self.symbol(target)?.flags != SymbolFlags::MUTABLE
-                || (complete_type != self.plan.definitions.int && !authenticated_counter_target)
+                || (complete_type != self.plan.definitions.int
+                    && complete_type != self.plan.definitions.long
+                    && !authenticated_counter_target)
                 || *prefix != self.plan.definitions.no_prefix
             {
                 return Err(PickleError::Reference {
@@ -371,6 +373,8 @@ impl Validator<'_, '_> {
                 depth,
                 visited,
             )
+        } else if target_type == self.plan.definitions.long {
+            self.validate_long_value(source_assign.rhs, typed_assign.rhs, method, depth, visited)
         } else if target_type == self.plan.definitions.boolean {
             self.validate_if_condition(source_assign.rhs, typed_assign.rhs, method, depth, visited)
         } else {

@@ -95,11 +95,19 @@ impl Validator<'_, '_> {
     ) -> Result<Option<TypeId>, PickleError> {
         let p = self.plan;
         for _ in 0..=self.limits.expression_depth_limit() {
-            if [p.definitions.int, p.definitions.boolean, p.definitions.unit].contains(&ty) {
+            if [
+                p.definitions.int,
+                p.definitions.boolean,
+                p.definitions.unit,
+                p.definitions.long,
+            ]
+            .contains(&ty)
+            {
                 return Ok(Some(ty));
             }
             match self.ty(ty)? {
                 Type::Constant(Constant::Int(_)) => return Ok(Some(p.definitions.int)),
+                Type::Constant(Constant::Long(_)) => return Ok(Some(p.definitions.long)),
                 Type::Constant(Constant::Boolean(_)) => return Ok(Some(p.definitions.boolean)),
                 Type::Constant(Constant::Unit) => return Ok(Some(p.definitions.unit)),
                 Type::TermRef {
@@ -317,7 +325,7 @@ impl Validator<'_, '_> {
                                     ty: node.ty,
                                 })?
                         };
-                        exits |= self.validate_return_flow(
+                        let stat_exits = self.validate_return_flow(
                             source_stat,
                             stat,
                             method,
@@ -325,6 +333,13 @@ impl Validator<'_, '_> {
                             depth + 1,
                             visited,
                         )?;
+                        if expected_stat == p.definitions.long && !stat_exits {
+                            return Err(self.unsupported(
+                                UnsupportedFeature::BodyExpression,
+                                Some(method.symbol),
+                            ));
+                        }
+                        exits |= stat_exits;
                     }
                 }
                 exits |= self.validate_return_flow(

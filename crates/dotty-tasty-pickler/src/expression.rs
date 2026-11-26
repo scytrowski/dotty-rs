@@ -8,7 +8,7 @@ use dotty_core::{
 };
 use dotty_tasty::tasty::{
     APPLY_TAG, ASSIGN_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG,
-    NEW_TAG, SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG, WHILE_TAG,
+    LONGCONST_TAG, NEW_TAG, SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG, WHILE_TAG,
 };
 
 use crate::{
@@ -383,7 +383,7 @@ fn lower_expression_inner(
                     && symbol.flags == dotty_core::SymbolFlags::MUTABLE
                     && symbol.name == ident.name
                     && *prefix == context.definitions().no_prefix
-                    && symbol.info == SymbolInfo::Complete(context.definitions().int) =>
+                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long) =>
             {
                 context.local_reference(target, None)?
             }
@@ -1269,6 +1269,11 @@ fn lower_expression_inner(
             if value == type_value =>
         {
             (INTCONST_TAG, TermValue::Int(*value))
+        }
+        (Constant::Long(value), Some(Type::Constant(Constant::Long(type_value))))
+            if value == type_value =>
+        {
+            (LONGCONST_TAG, TermValue::LongInt(*value))
         }
         (Constant::Boolean(value), Some(Type::Constant(Constant::Boolean(type_value))))
             if value == type_value =>

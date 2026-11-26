@@ -1041,8 +1041,9 @@ impl ValidatedClassStatePlan<'_, '_> {
                                     expected: crate::SourceRole::TypeSyntax,
                                 });
                             };
-                            let primitive_parameter =
-                                expected == p.definitions.int || expected == p.definitions.boolean;
+                            let primitive_parameter = expected == p.definitions.int
+                                || expected == p.definitions.boolean
+                                || expected == p.definitions.long;
                             let planned_class_parameter = match p.store.types.try_get(expected) {
                                 Some(Type::TypeRef {
                                     target: dotty_core::TypeRefTarget::Symbol(class),
@@ -1075,6 +1076,8 @@ impl ValidatedClassStatePlan<'_, '_> {
                                     && p.store.names.try_resolve(parameter_type.name.text())
                                         != Some(if expected == p.definitions.int {
                                             "Int"
+                                        } else if expected == p.definitions.long {
+                                            "Long"
                                         } else {
                                             "Boolean"
                                         }))
@@ -1120,6 +1123,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                     }
                     let result_type = if result_ty == p.definitions.int
                         || result_ty == p.definitions.boolean
+                        || result_ty == p.definitions.long
                         || result_ty == p.definitions.unit
                     {
                         context.primitive_type_syntax(result_ty)?

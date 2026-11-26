@@ -872,7 +872,7 @@ impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
 
 impl<'a> PicklePlan<'a> {
     /// Check the canonical class, default constructor, method signatures and
-    /// bounded primitive bodies, including supported local Int returns.
+    /// bounded primitive bodies, including supported local Int/Long returns.
     /// Stateful classes and case bindings use the separate class-state plan.
     /// Neither success nor failure changes stores, arenas, indices, or files.
     pub fn validate(&self) -> Result<ValidatedPicklePlan<'_, 'a>, PickleError> {
@@ -1575,6 +1575,10 @@ impl<'a> Validator<'_, 'a> {
                     Some(self.plan.definitions.int)
                 } else if parameter_type.name == self.symbol(boolean)?.name {
                     Some(self.plan.definitions.boolean)
+                } else if self.complete(symbol)? == self.plan.definitions.long {
+                    let long = self.builtin(Builtin::Long, self.plan.definitions.long, "Long")?;
+                    (parameter_type.name == self.symbol(long)?.name)
+                        .then_some(self.plan.definitions.long)
                 } else {
                     None
                 };
@@ -2743,6 +2747,7 @@ impl<'a> Validator<'_, 'a> {
                     || formal.name.as_name() != &self.symbol(parameter)?.name
                     || (formal.ty != p.definitions.int
                         && formal.ty != p.definitions.boolean
+                        && formal.ty != p.definitions.long
                         && !self.is_planned_sibling_class_type(formal.ty, None))
                     || self.complete(parameter)? != formal.ty
                     || formal.erased
@@ -2763,6 +2768,17 @@ impl<'a> Validator<'_, 'a> {
         {
             return self.context_result_closure(definition, method, result_type);
         }
+        let has_long = result_type == p.definitions.long || method.parameter_clauses.iter().flatten().any(|&s| matches!(self.plan.store.symbols.get(s).info, SymbolInfo::Complete(ty) if ty == p.definitions.long));
+        if has_long
+            && (curried
+                || method
+                    .parameter_clauses
+                    .iter()
+                    .flatten()
+                    .any(|&s| !self.plan.store.symbols.get(s).flags.is_empty()))
+        {
+            return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
+        }
         let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
             return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
         };
@@ -2770,6 +2786,7 @@ impl<'a> Validator<'_, 'a> {
         let supports_result = |validator: &Self, result_ty| {
             result_ty == p.definitions.int
                 || result_ty == p.definitions.boolean
+                || result_ty == p.definitions.long
                 || result_ty == p.definitions.unit
                 || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
         };
@@ -2783,6 +2800,9 @@ impl<'a> Validator<'_, 'a> {
             self.symbol(int)?.name
         } else if result_type == p.definitions.boolean {
             self.symbol(boolean)?.name
+        } else if result_type == p.definitions.long {
+            let long = self.builtin(Builtin::Long, p.definitions.long, "Long")?;
+            self.symbol(long)?.name
         } else if result_type == p.definitions.unit {
             self.symbol(unit)?.name
         } else if self.is_planned_sibling_class_type(result_type, Some(result.name)) {

@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Long-valued Int matches and paired Long method values are described in
+[`jvm-tasty-long-values.md`](jvm-tasty-long-values.md).
+
 Guarded Int matches and immutable case-local bindings are described in
 [`jvm-tasty-guarded-matches.md`](jvm-tasty-guarded-matches.md).
 Local primitive returns, including all-returning matches and preserved

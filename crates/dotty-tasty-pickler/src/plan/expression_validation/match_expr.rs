@@ -90,11 +90,17 @@ impl Validator<'_, '_> {
         let typed_match = typed_match.clone();
         self.source_typed_binding(source_id, typed_id)?;
         self.paired_source_typed_span(source.position, typed.position, typed_id)?;
-        let supported =
-            [p.definitions.int, p.definitions.boolean, p.definitions.unit].contains(&result_type);
+        let supported = [
+            p.definitions.int,
+            p.definitions.boolean,
+            p.definitions.unit,
+            p.definitions.long,
+        ]
+        .contains(&result_type);
         let bottom = typed.ty == p.definitions.nothing_type;
         let type_matches = (returning && bottom)
             || typed.ty == result_type
+            || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::Long(_)), ty) if ty == p.definitions.long)
             || matches!((self.ty(typed.ty)?, result_type),
             (Type::Constant(Constant::Int(_)), ty) if ty == p.definitions.int)
             || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::Boolean(_)), ty) if ty == p.definitions.boolean)

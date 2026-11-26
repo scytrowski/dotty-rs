@@ -995,3 +995,14 @@ source-to-typed bindings, synthetic Unit shape and primitive branch joins;
 `Nothing` alone never authenticates a return. Original Rust artifacts are read
 by pinned Scala 3.9, consumed independently by Scala and Java, and recompiled
 with `-from-tasty` before a second Java execution.
+
+
+## Long method value parity
+
+The [Long value contract](jvm-tasty-long-values.md) adds canonical scala.Long
+method signatures and LONGconst leaves, exact 64-bit source/typed value checks,
+ordered mixed-width formals, locals and existing primitive control-flow shapes.
+The combined contract projects Long as J without boxing or widening. It retains
+explicit rejection of Long fields/constructors/calls and discarded Long values.
+The oracle uses semantic decompilation and from-tasty execution because the
+pinned Scala raw printer reads signed numeric payloads as a 31-bit Nat.

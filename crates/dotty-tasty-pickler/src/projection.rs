@@ -720,6 +720,7 @@ impl<'a> EncodingContext<'a> {
         self.charge(1)?;
         let (ty, expected) = match builtin {
             Builtin::Int => (self.definitions.int, "Int"),
+            Builtin::Long => (self.definitions.long, "Long"),
             Builtin::Boolean => (self.definitions.boolean, "Boolean"),
             Builtin::Unit => (self.definitions.unit, "Unit"),
             Builtin::Object => (self.definitions.object_type, "Object"),
@@ -2144,6 +2145,9 @@ impl<'a> EncodingContext<'a> {
             })
             .map_err(construction)
     }
+    fn is_long_symbol(&self, symbol: SymbolId) -> bool {
+        matches!(self.store.types.try_get(self.definitions.long), Some(Type::TypeRef {target: TypeRefTarget::Symbol(expected), ..}) if *expected == symbol)
+    }
     fn external_inner(&mut self, symbol: SymbolId) -> Result<AstLabel, PickleError> {
         for builtin in [
             Builtin::Int,
@@ -2154,6 +2158,9 @@ impl<'a> EncodingContext<'a> {
             if self.builtin(builtin)? == symbol {
                 return self.builtin_ref(builtin);
             }
+        }
+        if self.is_long_symbol(symbol) {
+            return self.builtin_ref(Builtin::Long);
         }
         self.symbol(symbol)?;
         let &(package, name) = self
@@ -2270,6 +2277,7 @@ impl<'a> EncodingContext<'a> {
                     } else if *symbol == self.builtin(Builtin::Int)?
                         || *symbol == self.builtin(Builtin::Boolean)?
                         || *symbol == self.builtin(Builtin::Object)?
+                        || self.is_long_symbol(*symbol)
                     {
                         if *prefix != self.definitions.no_prefix {
                             return Err(reference(*symbol, ReferenceError::Owner));
@@ -2420,6 +2428,19 @@ impl<'a> EncodingContext<'a> {
             self.int_type_syntax()
         } else if ty == self.definitions.boolean {
             self.boolean_type_syntax()
+        } else if ty == self.definitions.long {
+            self.run(|c| {
+                let symbol = c.builtin(Builtin::Long)?;
+                let name = c.utf8(c.text(c.symbol(symbol)?.name.text())?)?;
+                let child = c.lower(c.definitions.long, 0)?;
+                c.wire
+                    .push(AstNode::NatAst {
+                        tag: IDENTTPT_TAG,
+                        value: AstOperand::Nat(name),
+                        child,
+                    })
+                    .map_err(construction)
+            })
         } else if ty == self.definitions.unit {
             self.constructor_return_syntax()
         } else {

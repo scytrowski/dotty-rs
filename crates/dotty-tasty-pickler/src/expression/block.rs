@@ -56,6 +56,7 @@ fn lower_local_value_inner(
     let name = context.intern_name(*value.name.as_name())?;
     let type_syntax = if tree.ty == context.definitions().int
         || tree.ty == context.definitions().boolean
+        || tree.ty == context.definitions().long
         || tree.ty == context.definitions().unit
     {
         context.primitive_type_syntax(tree.ty)?
