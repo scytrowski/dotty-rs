@@ -15,8 +15,8 @@
     "JAVA_VERSION": "21.0.13",
     "OS_ARCH": "x86_64"
   },
-  "oracle_sha256": "0aba9f3f16766e4ab62a37b8cbc20aabeb31d1f85037e9c9f171be3e0a1f9001",
+  "oracle_sha256": "17657cf8ce51cdb063b86bc67d3b76fff2d322335560b14aac181c74c410f21b",
   "scala_source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
-  "source_sha256": "1d24efa0bec633278124805d7f6866f6551232decfd0b159cb73e8288eddc459",
-  "tasty_sha256": "2381d3beacf68df64d18afc7b69d53f47b4be57bf35cb418df700949b495a9ac"
+  "source_sha256": "9b0268abc68663341f6e25d650cd93a52b8346d8b002c82c912f47cc21721f3e",
+  "tasty_sha256": "7e9517bbe55188e3defb828d363a1b3e2fb26856a1adb370a0b290e993c88fca"
 }

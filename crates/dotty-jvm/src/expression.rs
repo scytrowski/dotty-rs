@@ -4515,15 +4515,26 @@ fn validate_branch(
     let tree_ty = context.tree(tree)?.ty;
     match flow {
         Flow::Diverges => {
-            // Recursive lowering proves terminal flow before these Unit-valued
-            // forms can return Diverges; other Unit nodes remain unsupported.
+            // Recursive lowering proves the exit. A block can retain the type
+            // of its unreachable tail without producing a value on that path.
+            let kind = &context.tree(tree)?.kind;
             let diverges_with_supported_type =
                 is_nothing_type(context.store, tree_ty, context.definitions)
                     || (is_unit_type(context.store, tree_ty, context.definitions)
                         && matches!(
-                            &context.tree(tree)?.kind,
-                            TreeKind::If(_) | TreeKind::Assign(_) | TreeKind::Block(_)
-                        ));
+                            kind,
+                            TreeKind::If(_)
+                                | TreeKind::Assign(_)
+                                | TreeKind::Block(_)
+                                | TreeKind::Match(_)
+                        ))
+                    || (matches!(
+                        primitive_type(context.store, tree_ty, context.definitions),
+                        Some(JvmType::Int | JvmType::Boolean)
+                    ) && matches!(
+                        kind,
+                        TreeKind::If(_) | TreeKind::Block(_) | TreeKind::Match(_)
+                    ));
             if diverges_with_supported_type {
                 Ok(())
             } else {

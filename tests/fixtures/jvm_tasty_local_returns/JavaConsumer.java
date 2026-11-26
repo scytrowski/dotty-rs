@@ -13,6 +13,8 @@ public final class JavaConsumer {
   if(v.observed()!=2) throw new AssertionError("Unit return");
   v.stop(false);
   if(v.observed()!=102 || v.once()!=103 || v.observed()!=103) throw new AssertionError("unreachable effects");
+  if(v.deadIf(true)!=7 || v.deadIf(false)!=3 || v.deadMatch(0)!=7 || v.deadMatch(1)!=3
+      || v.deadBoth(true)!=1 || v.deadBoth(false)!=2 || v.observed()!=103) throw new AssertionError("unreachable branch effects");
   System.out.println("local return oracle ok");
  }
 }

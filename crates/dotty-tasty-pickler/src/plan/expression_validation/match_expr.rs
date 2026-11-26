@@ -116,6 +116,7 @@ impl Validator<'_, '_> {
             visited,
         )?;
         let mut all_exit = returning;
+        let mut semantic_join = None;
         for (ordinal, (&source_case, &typed_case)) in source_match
             .cases
             .iter()
@@ -170,6 +171,21 @@ impl Validator<'_, '_> {
                 self.validate_if_condition(source_guard, guard, method, depth + 2, visited)?;
             }
             if returning {
+                if body.ty != p.definitions.nothing_type {
+                    let ty = self
+                        .primitive_flow_type(body.ty)?
+                        .ok_or(PickleError::BodyType {
+                            tree: case.body,
+                            ty: body.ty,
+                        })?;
+                    if semantic_join.is_some_and(|prior| prior != ty) {
+                        return Err(PickleError::BodyType {
+                            tree: typed_id,
+                            ty: typed.ty,
+                        });
+                    }
+                    semantic_join = Some(ty);
+                }
                 all_exit &= self.validate_return_flow(
                     source_case.body,
                     case.body,
@@ -190,7 +206,9 @@ impl Validator<'_, '_> {
             }
             self.visible_locals = visible;
         }
-        if bottom && !all_exit {
+        if (bottom && !all_exit)
+            || (returning && typed.ty != semantic_join.unwrap_or(p.definitions.nothing_type))
+        {
             return Err(PickleError::BodyType {
                 tree: typed_id,
                 ty: typed.ty,

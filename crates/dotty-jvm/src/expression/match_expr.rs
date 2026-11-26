@@ -26,7 +26,9 @@ pub(super) fn emit_match(
         });
     }
     let matched = matched.clone();
-    let expected = if is_unit_type(context.store, node.ty, context.definitions) {
+    let expected = if is_nothing_type(context.store, node.ty, context.definitions) {
+        Flow::Diverges
+    } else if is_unit_type(context.store, node.ty, context.definitions) {
         Flow::Unit
     } else {
         match primitive_type(context.store, node.ty, context.definitions) {
@@ -148,7 +150,7 @@ fn emit_cases(
 ) -> Result<Flow, JvmCodegenError> {
     let build_error = |error| JvmCodegenError::CodeBuilder { tree, error };
     code.istore(slot).map_err(build_error)?;
-    let join = code.new_label().map_err(build_error)?;
+    let mut join: Option<dotty_classfile::bytecode::CodeLabel> = None;
     let before = context.initialized_locals.clone();
     let mut joined: Option<HashSet<SymbolId>> = None;
     let mut incoming = before.clone();
@@ -211,14 +213,23 @@ fn emit_cases(
                     .collect(),
             });
             if next.is_some() {
-                code.goto(join.clone()).map_err(build_error)?;
+                let target = if let Some(join) = &join {
+                    join.clone()
+                } else {
+                    let label = code.new_label().map_err(build_error)?;
+                    join = Some(label.clone());
+                    label
+                };
+                code.goto(target).map_err(build_error)?;
             }
         }
         if let Some(next) = next {
             code.mark(next).map_err(build_error)?;
         }
     }
-    code.mark(join).map_err(build_error)?;
+    if let Some(join) = join {
+        code.mark(join).map_err(build_error)?;
+    }
     let flow = if let Some(initialized) = joined {
         context.initialized_locals = initialized;
         expected

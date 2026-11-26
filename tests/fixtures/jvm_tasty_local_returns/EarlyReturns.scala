@@ -20,4 +20,7 @@ class EarlyReturns {
   def stop(flag: Boolean): Unit = { if flag then return; hits = hits + 100 }
   def positive(x: Int): Boolean = { if x < 0 then return false; true }
   def once(): Int = { return tick(); tick() }
+  def deadIf(flag: Boolean): Int = if flag then { return 7; tick() } else 3
+  def deadMatch(x: Int): Int = x match { case 0 => { return 7; tick() }; case _ => 3 }
+  def deadBoth(flag: Boolean): Int = if flag then { return 1; tick() } else { return 2; tick() }
 }

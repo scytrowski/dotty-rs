@@ -57,7 +57,10 @@ impl Validator<'_, '_> {
         Ok(false)
     }
 
-    fn primitive_flow_type(&self, mut ty: TypeId) -> Result<Option<TypeId>, PickleError> {
+    pub(super) fn primitive_flow_type(
+        &self,
+        mut ty: TypeId,
+    ) -> Result<Option<TypeId>, PickleError> {
         let p = self.plan;
         for _ in 0..self.limits.expression_depth_limit() {
             if [p.definitions.int, p.definitions.boolean, p.definitions.unit].contains(&ty) {
@@ -334,6 +337,36 @@ impl Validator<'_, '_> {
                     visited,
                 )?;
                 self.visible_locals = visible;
+                let branch_type = |id| -> Result<Option<TypeId>, PickleError> {
+                    let node = p
+                        .typed_ast
+                        .try_get(id)
+                        .ok_or(PickleError::InvalidTypedTree { tree: id })?;
+                    if node.ty == p.definitions.nothing_type {
+                        Ok(None)
+                    } else {
+                        self.primitive_flow_type(node.ty)
+                    }
+                };
+                let left = branch_type(conditional.then_branch)?;
+                let right = branch_type(conditional.else_branch)?;
+                let joined = match (left, right) {
+                    (None, None) => p.definitions.nothing_type,
+                    (Some(value), None) | (None, Some(value)) => value,
+                    (Some(a), Some(b)) if a == b => a,
+                    _ => {
+                        return Err(PickleError::BodyType {
+                            tree: typed_id,
+                            ty: typed.ty,
+                        });
+                    }
+                };
+                if typed.ty != joined {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                }
                 a && b
             }
             (TreeKind::While(source_loop), TreeKind::While(looped)) => {

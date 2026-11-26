@@ -2,9 +2,9 @@
 Header:
   version: 28.9.0
   tooling: Scala 3.9.0
-     UUID: 0005a913-5898-07c6-001b-47b5d6e70f49
+     UUID: 007c7eed-effd-36cb-0061-25dd39302044
 
-Names (385 bytes, starting from 35):
+Names (414 bytes, starting from 35):
      0: ASTs
      1: example
      2: EarlyReturns
@@ -49,25 +49,28 @@ Names (385 bytes, starting from 35):
     41: stop
     42: positive
     43: once
-    44: SourceFile
-    45: annotation
-    46: scala[Qualified . annotation]
-    47: internal
-    48: scala[Qualified . annotation][Qualified . internal]
-    49: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
-    50: String
-    51: java[Qualified . lang][Qualified . String]
-    52: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
-    53: EarlyReturns.scala
-    54: Positions
-    55: Comments
-    56: Attributes
+    44: deadIf
+    45: deadMatch
+    46: deadBoth
+    47: SourceFile
+    48: annotation
+    49: scala[Qualified . annotation]
+    50: internal
+    51: scala[Qualified . annotation][Qualified . internal]
+    52: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    53: String
+    54: java[Qualified . lang][Qualified . String]
+    55: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    56: EarlyReturns.scala
+    57: Positions
+    58: Comments
+    59: Attributes
 
-Trees (597 bytes, starting from 423):
-     0: PACKAGE(594)
+Trees (752 bytes, starting from 452):
+     0: PACKAGE(749)
      3:   TERMREFpkg 1 [example]
-     5:   TYPEDEF(589) 2 [EarlyReturns]
-     9:     TEMPLATE(565)
+     5:   TYPEDEF(744) 2 [EarlyReturns]
+     9:     TEMPLATE(720)
     12:       APPLY(10)
     14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
     17:           NEW
@@ -322,26 +325,94 @@ Trees (597 bytes, starting from 423):
    571:                   IDENTtpt 2 [EarlyReturns]
    573:                     SHAREDtype 61
    575:                 SHAREDtype 61
-   577:     ANNOTATION(18)
-   579:       TYPEREF 44 [SourceFile]
-   581:         TERMREFpkg 48 [scala[Qualified . annotation][Qualified . internal]]
-   583:       APPLY(12)
-   585:         SELECTin(8) 52 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
-   588:           NEW
-   589:             SHAREDtype 579
-   592:           SHAREDtype 579
-   595:         STRINGconst 53 [EarlyReturns.scala]
-   597:
+   577:       DEFDEF(40) 44 [deadIf]
+   580:         PARAM(6) 22 [flag]
+   583:           IDENTtpt 23 [Boolean]
+   585:             SHAREDtype 134
+   588:         IDENTtpt 13 [Int]
+   590:           SHAREDtype 37
+   592:         IF(25)
+   594:           TERMREFdirect 580
+   597:           BLOCK(18)
+   599:             APPLY(10)
+   601:               SELECTin(8) 26 [tick[Signed Signature(List(),scala.Int) @tick]]
+   604:                 QUALTHIS
+   605:                   IDENTtpt 2 [EarlyReturns]
+   607:                     SHAREDtype 61
+   609:                 SHAREDtype 61
+   611:             RETURN(4) 577
+   615:               INTconst 7
+   617:           INTconst 3
+   619:       DEFDEF(51) 45 [deadMatch]
+   622:         PARAM(5) 20 [x]
+   625:           IDENTtpt 13 [Int]
+   627:             SHAREDtype 37
+   629:         IDENTtpt 13 [Int]
+   631:           SHAREDtype 37
+   633:         MATCH(37)
+   635:           TERMREFdirect 622
+   638:           CASEDEF(22)
+   640:             INTconst 0
+   642:             BLOCK(18)
+   644:               APPLY(10)
+   646:                 SELECTin(8) 26 [tick[Signed Signature(List(),scala.Int) @tick]]
+   649:                   QUALTHIS
+   650:                     IDENTtpt 2 [EarlyReturns]
+   652:                       SHAREDtype 61
+   654:                   SHAREDtype 61
+   656:               RETURN(4) 619
+   660:                 INTconst 7
+   662:           CASEDEF(8)
+   664:             IDENT 33 [_]
+   666:               SHAREDtype 37
+   668:             BLOCK(2)
+   670:               INTconst 3
+   672:       DEFDEF(58) 46 [deadBoth]
+   675:         PARAM(6) 22 [flag]
+   678:           IDENTtpt 23 [Boolean]
+   680:             SHAREDtype 134
+   683:         IDENTtpt 13 [Int]
+   685:           SHAREDtype 37
+   687:         IF(43)
+   689:           TERMREFdirect 675
+   692:           BLOCK(18)
+   694:             APPLY(10)
+   696:               SELECTin(8) 26 [tick[Signed Signature(List(),scala.Int) @tick]]
+   699:                 QUALTHIS
+   700:                   IDENTtpt 2 [EarlyReturns]
+   702:                     SHAREDtype 61
+   704:                 SHAREDtype 61
+   706:             RETURN(4) 672
+   710:               INTconst 1
+   712:           BLOCK(18)
+   714:             APPLY(10)
+   716:               SELECTin(8) 26 [tick[Signed Signature(List(),scala.Int) @tick]]
+   719:                 QUALTHIS
+   720:                   IDENTtpt 2 [EarlyReturns]
+   722:                     SHAREDtype 61
+   724:                 SHAREDtype 61
+   726:             RETURN(4) 672
+   730:               INTconst 2
+   732:     ANNOTATION(18)
+   734:       TYPEREF 47 [SourceFile]
+   736:         TERMREFpkg 51 [scala[Qualified . annotation][Qualified . internal]]
+   738:       APPLY(12)
+   740:         SELECTin(8) 55 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   743:           NEW
+   744:             SHAREDtype 734
+   747:           SHAREDtype 734
+   750:         STRINGconst 56 [EarlyReturns.scala]
+   752:
 
-Positions (633 bytes, starting from 1023):
-  lines: 24
+Positions (827 bytes, starting from 1207):
+  lines: 27
   line sizes:
      15, 20, 27, 45, 28, 36, 56, 27, 72, 67, 38, 31, 26, 3, 29, 18, 57, 5, 3, 76
-     70, 45, 1, 0
+     70, 45, 75, 86, 96, 1, 0
   positions:
-     0: 0 .. 817
-     5: 16 .. 817
-     9: 39 .. 815
+     0: 0 .. 1077
+     5: 16 .. 1077
+     9: 39 .. 1075
     18: 22 .. 22
     24: 39 .. 39
     28: 39 .. 39
@@ -497,15 +568,64 @@ Positions (633 bytes, starting from 1023):
    565: 799 .. 805
    567: 799 .. 803
    571: 799 .. 799
-   583: 16 .. 817
-   589: 16 .. 16
-   595: 16 .. 16
+   577: 818 .. 891
+   580: 829 .. 842
+   583: 835 .. 842
+   588: 845 .. 848
+   592: 851 .. 891
+   594: 854 .. 858
+   597: 864 .. 884
+   599: 876 .. 882
+   601: 876 .. 880
+   605: 876 .. 876
+   611: 866 .. 874
+   615: 873 .. 874
+   617: 890 .. 891
+   619: 894 .. 978
+   622: 908 .. 914
+   625: 911 .. 914
+   629: 917 .. 920
+   633: 923 .. 978
+   635: 923 .. 924
+   638: 933 .. 964
+   640: 938 .. 939
+   642: 943 .. 963
+   644: 955 .. 961
+   646: 955 .. 959
+   650: 955 .. 955
+   656: 945 .. 953
+   660: 952 .. 953
+   662: 965 .. 976
+   664: 970 .. 971
+   668: 972 .. 976
+   670: 975 .. 976
+   672: 981 .. 1075
+   675: 994 .. 1007
+   678: 1000 .. 1007
+   683: 1010 .. 1013
+   687: 1016 .. 1075
+   689: 1019 .. 1023
+   692: 1029 .. 1049
+   694: 1041 .. 1047
+   696: 1041 .. 1045
+   700: 1041 .. 1041
+   706: 1031 .. 1039
+   710: 1038 .. 1039
+   712: 1055 .. 1075
+   714: 1067 .. 1073
+   716: 1067 .. 1071
+   720: 1067 .. 1067
+   726: 1057 .. 1065
+   730: 1064 .. 1065
+   738: 16 .. 1077
+   744: 16 .. 16
+   750: 16 .. 16
 
   source paths:
-     0: 53 [EarlyReturns.scala]
+     0: 56 [EarlyReturns.scala]
 
-Attributes (2 bytes, starting from 1660):
-  SOURCEFILEattr 53 [EarlyReturns.scala]
+Attributes (2 bytes, starting from 2038):
+  SOURCEFILEattr 56 [EarlyReturns.scala]
 
 **** end of pickled info of class EarlyReturns
 
@@ -550,6 +670,24 @@ package example {
     }
     def once(): scala.Int = {
       return EarlyReturns.this.tick()
+      EarlyReturns.this.tick()
+    }
+    def deadIf(`flag₃`: scala.Boolean): scala.Int = if (`flag₃`) {
+      return 7
+      EarlyReturns.this.tick()
+    } else 3
+    def deadMatch(`x₇`: scala.Int): scala.Int = `x₇` match {
+      case 0 =>
+        return 7
+        EarlyReturns.this.tick()
+      case _ =>
+        3
+    }
+    def deadBoth(`flag₄`: scala.Boolean): scala.Int = if (`flag₄`) {
+      return 1
+      EarlyReturns.this.tick()
+    } else {
+      return 2
       EarlyReturns.this.tick()
     }
   }
