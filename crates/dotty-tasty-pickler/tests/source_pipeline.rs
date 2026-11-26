@@ -1393,6 +1393,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::If(_)
                 | TreeKind::Block(_)
                 | TreeKind::Closure(_)
+                | TreeKind::Return(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1403,7 +1404,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::Apply(_)
         | TreeKind::If(_)
         | TreeKind::Block(_)
-        | TreeKind::Closure(_) => None,
+        | TreeKind::Closure(_)
+        | TreeKind::Return(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -1452,6 +1454,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 dotty_tasty::tasty::APPLY_TAG
                     | dotty_tasty::tasty::IF_TAG
                     | dotty_tasty::tasty::BLOCK_TAG
+                    | dotty_tasty::tasty::RETURN_TAG
             ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
@@ -4991,4 +4994,29 @@ fn two_formal_default_getter_rejects_the_other_copy_owned_by_the_same_getter() {
             output.unwrap();
         }
     }
+}
+
+#[test]
+fn local_return_depth_limits_count_the_value_child_without_charging_dispatch() {
+    let source = "package example\nclass ShallowReturn:\n  def f(): Int = return 1\n";
+    let validate = |max_expression_depth| {
+        source_outputs_named_with_limits(
+            source,
+            "ShallowReturn.scala",
+            ValidationLimits {
+                max_expression_depth,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .map(|_| ())
+    };
+    assert_eq!(
+        validate(0),
+        Err(PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        })
+    );
+    assert_eq!(validate(1), Ok(()));
 }

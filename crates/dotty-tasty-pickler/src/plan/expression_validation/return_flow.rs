@@ -94,7 +94,7 @@ impl Validator<'_, '_> {
         mut ty: TypeId,
     ) -> Result<Option<TypeId>, PickleError> {
         let p = self.plan;
-        for _ in 0..self.limits.expression_depth_limit() {
+        for _ in 0..=self.limits.expression_depth_limit() {
             if [p.definitions.int, p.definitions.boolean, p.definitions.unit].contains(&ty) {
                 return Ok(Some(ty));
             }
@@ -119,7 +119,7 @@ impl Validator<'_, '_> {
         self.kind(method.symbol, SymbolKind::Method)?;
         self.owner(method.symbol, Some(self.plan.class))?;
         let mut ty = self.complete(method.symbol)?;
-        for _ in 0..self.limits.expression_depth_limit() {
+        for _ in 0..=self.limits.expression_depth_limit() {
             match self.ty(ty)? {
                 Type::Method(signature) if signature.kind == MethodKind::Plain => {
                     ty = signature.result
