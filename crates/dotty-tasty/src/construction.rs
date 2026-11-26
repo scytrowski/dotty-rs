@@ -489,13 +489,13 @@ impl AstBuilder {
         }
         for &label in order {
             for field in self.node(label)?.fields() {
-                if let AstField::Reference(target) = field {
-                    if self.node(target)?.tag() != DEFDEF_TAG {
-                        return Err(AstBuildError::InvalidReference {
-                            tag: RETURN_TAG,
-                            target,
-                        });
-                    }
+                if let AstField::Reference(target) = field
+                    && self.node(target)?.tag() != DEFDEF_TAG
+                {
+                    return Err(AstBuildError::InvalidReference {
+                        tag: RETURN_TAG,
+                        target,
+                    });
                 }
             }
         }

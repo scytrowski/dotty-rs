@@ -25,3 +25,55 @@ supported terminating operation.
 The fixture under `tests/fixtures/jvm_tasty_local_returns` is reference evidence
 from pinned Scala, not Rust-produced TASTy. The complete producer gate must
 read and execute actual Rust artifacts and preserve their original bytes.
+
+
+## Implemented producer contract
+
+`tests/jvm_tasty_local_returns.rs` assembles the real frontend and both output
+paths in the same canonical session. The public backend and pickler remain
+separate borrowed-plan APIs. Methods require explicit primitive results; return
+values use the existing primitive leaf validator. Returns inside operands,
+conditions, match guards or unsupported nested definitions are rejected.
+
+The semantic validator checks every source/typed edge and span, including
+unreachable statements. Branch-local and case-local visibility is restored
+after each branch. `If` and `Match` types must equal the semantic primitive
+join, with Nothing contributing no value. Bare source `return` in a Unit method
+uses the typer's actual Unit constant with the Return span. A then-branch Unit
+adaptation is accepted only for an incomplete source else chain and the exact
+synthetic Block/stat/Unit shape recorded by the typer. Both are validated
+without changing the borrowed session. A separate bounded dispatch scan never
+charges expression-validation limits or replaces legacy diagnostics for bodies
+without returns; the existing depth-zero and repeated-node regressions stay
+unchanged.
+
+The structural builder's `AstField::Reference` writes the first RETURN Nat
+field after resolving its DEFDEF label. It supports forward and ancestor
+addresses across Nat-width changes without treating the method reference as
+a recursive child. Invalid label ownership, field placement and target kind
+are rejected.
+
+JVM lowering requires a proven local exit before accepting a Nothing-typed
+match. Join labels are created only for real normal exits. Blocks with an
+unreachable primitive tail retain the canonical typed tree and still undergo
+validation; their returning branch contributes no value or epilogue. Tests
+assert exact direct-return opcodes and the full all-returning match code.
+
+## Execution and rejection evidence
+
+The fixture covers direct Int/Boolean/Unit returns, both-returning and mixed
+If branches, guards and immutable match binders, loops, mutable state, and
+unreachable side effects. Fresh frontend sessions produce identical class
+and TASTy bytes. Negative tests cover foreign return targets, missing values,
+forged types and Unit adaptations, cyclic trees, normal cases relabeled
+Nothing, and returns outside supported positions. Validation errors leave
+the canonical semantic store unchanged and publish no artifact.
+
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` makes Java 21 verification and execution of
+original Rust class bytes mandatory. `DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1`
+makes the pinned Scala reader/consumer gate mandatory: it reads original
+Rust TASTy, runs independent Java and Scala clients against original output,
+then runs Java against Scala's `-from-tasty` result. The gate hashes original
+artifacts before and after these operations. `run.py` uses the frozen Scala
+fixture only as an oracle; it never substitutes Scala output for Rust output.
+The test target is included in required CI: the JDK job and strict TASTy shard 3.

@@ -982,3 +982,16 @@ consumer and `-from-tasty` runtime gate operate on original Rust output.
 The subsequent [guarded-match contract](jvm-tasty-guarded-matches.md) adds
 CASEDEF guards and canonical BIND declarations, preserving case scope and
 same-session identities across JVM and TASTy plans.
+
+
+## Local primitive returns
+
+The [local-return contract](jvm-tasty-local-returns.md) extends ordinary
+explicit Int/Boolean/Unit methods with `RETURN` and bounded abrupt flow in
+blocks, If branches, While bodies and Int matches. The first RETURN field is
+a symbolic address of the exact current method's DEFDEF. It is resolved after
+layout and is not a child edge. Validation proves each supported exit, exact
+source-to-typed bindings, synthetic Unit shape and primitive branch joins;
+`Nothing` alone never authenticates a return. Original Rust artifacts are read
+by pinned Scala 3.9, consumed independently by Scala and Java, and recompiled
+with `-from-tasty` before a second Java execution.

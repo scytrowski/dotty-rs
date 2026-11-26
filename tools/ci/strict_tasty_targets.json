@@ -5,14 +5,14 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
   },
   "baseline": {
-    "inventory_count": 31,
-    "accounted_test_seconds": 1732.28,
+    "inventory_count": 32,
+    "accounted_test_seconds": 1736.88,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1808.28,
-    "full_job_seconds": 1982.87
+    "strict_step_seconds": 1812.88,
+    "full_job_seconds": 1987.47
   },
   "targets": [
     {
@@ -138,12 +138,16 @@
     {
       "name": "jvm_tasty_guarded_matches",
       "measured_seconds": 4.54
+    },
+    {
+      "name": "jvm_tasty_local_returns",
+      "measured_seconds": 4.6
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 27.37,
+    "estimated_runner_minutes": 27.45,
     "estimated_critical_path_minutes": 10.6,
     "shards": [
       {
@@ -173,7 +177,7 @@
       },
       {
         "id": "shard-3",
-        "estimated_test_seconds": 373.15,
+        "estimated_test_seconds": 377.75,
         "targets": [
           "jvm_tasty_dual_reference_forwarding_scala_consumer",
           "jvm_tasty_reference_local_scala_consumer",
@@ -183,7 +187,8 @@
           "jvm_tasty_scala_consumer",
           "jvm_tasty_mutable_local_reference_reassignment_proof",
           "jvm_tasty_expressions",
-          "jvm_tasty_guarded_matches"
+          "jvm_tasty_guarded_matches",
+          "jvm_tasty_local_returns"
         ]
       },
       {

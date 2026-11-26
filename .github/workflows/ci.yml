@@ -155,6 +155,7 @@ jobs:
             --test jvm_tasty_artifacts \
             --test jvm_tasty_expressions \
             --test jvm_tasty_guarded_matches \
+            --test jvm_tasty_local_returns \
             --test jvm_tasty_mixed_origin_runtime \
             --test jvm_tasty_dual_reference_identity \
             --test jvm_stateful_class_contract \
