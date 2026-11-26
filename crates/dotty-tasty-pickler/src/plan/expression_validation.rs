@@ -1669,7 +1669,7 @@ impl Validator<'_, '_> {
                 self.plan.definitions.unit,
             ]
             .contains(&result_type)
-            && self.contains_local_return(typed)?
+            && self.contains_local_return(source, typed)?
         {
             return self
                 .validate_return_flow(source, typed, method, result_type, 0, &mut HashSet::new())

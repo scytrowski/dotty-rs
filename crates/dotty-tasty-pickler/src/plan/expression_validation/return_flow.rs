@@ -2,10 +2,14 @@
 use super::*;
 
 impl Validator<'_, '_> {
-    pub(super) fn contains_local_return(&self, root: TreeId<Typed>) -> Result<bool, PickleError> {
-        let mut pending = vec![(root, 0)];
+    pub(super) fn contains_local_return(
+        &self,
+        source: TreeId<Untyped>,
+        root: TreeId<Typed>,
+    ) -> Result<bool, PickleError> {
+        let mut pending = vec![(source, root, 0)];
         let mut remaining = self.limits.max_items;
-        while let Some((id, depth)) = pending.pop() {
+        while let Some((source_id, id, depth)) = pending.pop() {
             if depth > self.limits.expression_depth_limit() {
                 return Err(PickleError::LimitExceeded {
                     kind: LimitKind::ExpressionDepth,
@@ -21,29 +25,71 @@ impl Validator<'_, '_> {
                 .typed_ast
                 .try_get(id)
                 .ok_or(PickleError::InvalidTypedTree { tree: id })?;
-            let children: Vec<_> = match &node.kind {
-                TreeKind::Return(_) => return Ok(true),
-                TreeKind::Block(block) => {
+            let source = self.source_tree(source_id)?;
+            // This is dispatch only. Leave malformed shape pairs to the existing
+            // validator instead of following an unrelated typed subtree first.
+            let children: Vec<_> = match (&source.kind, &node.kind) {
+                (TreeKind::PhaseSpecific(UntypedNode::Parens(parens)), _) => {
+                    vec![(parens.inner, id)]
+                }
+                (_, TreeKind::Block(block))
+                    if node.ty == self.plan.definitions.unit
+                        && block.stats.len() == 1
+                        && block.stats[0] != id
+                        && self
+                            .plan
+                            .typed_bindings
+                            .typed_at(self.plan.source.id, source_id)
+                            == Some(block.stats[0]) =>
+                {
+                    // The flow validator authenticates the enclosing incomplete
+                    // If and the complete synthetic Unit adaptation shape.
+                    vec![(source_id, block.stats[0])]
+                }
+                (TreeKind::Return(_), TreeKind::Return(_)) => return Ok(true),
+                (TreeKind::Block(source), TreeKind::Block(block)) => {
+                    if source.stats.len() != block.stats.len() {
+                        return Ok(false);
+                    }
                     if block.stats.len() > remaining {
                         return Err(PickleError::LimitExceeded {
                             kind: LimitKind::Items,
                             limit: self.limits.max_items,
                         });
                     }
-                    block.stats.iter().copied().chain([block.expr]).collect()
+                    source
+                        .stats
+                        .iter()
+                        .copied()
+                        .zip(block.stats.iter().copied())
+                        .chain([(source.expr, block.expr)])
+                        .collect()
                 }
-                TreeKind::If(node) => vec![node.then_branch, node.else_branch],
-                TreeKind::While(node) => vec![node.body],
-                TreeKind::Match(node) => {
+                (TreeKind::If(source), TreeKind::If(node)) => vec![
+                    (source.then_branch, node.then_branch),
+                    (source.else_branch, node.else_branch),
+                ],
+                (TreeKind::While(source), TreeKind::While(node)) => vec![(source.body, node.body)],
+                (TreeKind::Match(source), TreeKind::Match(node)) => {
+                    if source.cases.len() != node.cases.len() {
+                        return Ok(false);
+                    }
                     if node.cases.len() > remaining {
                         return Err(PickleError::LimitExceeded {
                             kind: LimitKind::Items,
                             limit: self.limits.max_items,
                         });
                     }
-                    node.cases.clone()
+                    source
+                        .cases
+                        .iter()
+                        .copied()
+                        .zip(node.cases.iter().copied())
+                        .collect()
                 }
-                TreeKind::CaseDef(node) => vec![node.body],
+                (TreeKind::CaseDef(source), TreeKind::CaseDef(node)) => {
+                    vec![(source.body, node.body)]
+                }
                 _ => Vec::new(),
             };
             if children.len() > remaining.saturating_sub(pending.len()) {
@@ -52,7 +98,11 @@ impl Validator<'_, '_> {
                     limit: self.limits.max_items,
                 });
             }
-            pending.extend(children.into_iter().map(|child| (child, depth + 1)));
+            pending.extend(
+                children
+                    .into_iter()
+                    .map(|(source, typed)| (source, typed, depth + 1)),
+            );
         }
         Ok(false)
     }

@@ -372,7 +372,7 @@ fn synthetic_unit_adaptations_and_semantic_joins_cannot_be_forged() {
                     .unwrap_err();
                 if mode == 3 {
                     assert!(
-                        matches!(error, PickleError::LimitExceeded { .. }),
+                        matches!(error, PickleError::Unsupported { .. }),
                         "{error:?}"
                     );
                 } else {
