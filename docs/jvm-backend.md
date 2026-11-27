@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Same-type Int/Boolean typed wildcard and binder patterns in both output paths
+are covered by [the typed primitive pattern contract](jvm-tasty-typed-primitive-patterns.md).
+
 Canonical Long/Float/Double expression ascriptions in both output paths are
 described in [the numeric-ascription contract](jvm-tasty-numeric-ascriptions.md).
 

@@ -65,6 +65,15 @@ mutation. The subset includes variable roots and explicit bindings over Int/Bool
 literals or wildcards, with a final unguarded irrefutable case or complete
 unguarded Boolean coverage as described below.
 
+Same-type primitive patterns retain TYPED nodes, explicit unqualified Int/Boolean
+type syntax and any outer BIND. A source `n: Int` maps to a typed Bind around a
+synthetic `Typed(_, Int)`; validation authenticates the identifier-to-Bind and
+type-tree edges without inventing source mappings for synthetic nodes. Explicit
+`n @ (_: Int)` has its own genuine inner mappings. Boolean forms follow the same
+rules. These patterns are irrefutable only without a guard and must then be the
+final case. Typed alternatives, reference tests and numeric selectors beyond
+Int/Boolean remain unsupported.
+
 Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long/Float/Double
 methods. RETURN references the exact current method declaration. A bounded
 read-only flow validator separates normal completion from a proven local exit;

@@ -70,6 +70,26 @@ fn complete_typed_pattern_fixture_is_deterministic_and_preserves_pattern_nodes()
     assert_eq!(first.tasty_bytes(), second.tasty_bytes());
     let file = TastyFile::parse_and_validate_scala_3_9(first.tasty_bytes()).unwrap();
     let index = file.ast_address_index().unwrap();
+    fn pattern_wrappers(pattern: RawTree<'_>) -> usize {
+        match pattern {
+            RawTree::LengthNode(node) if node.tag == TYPED_TAG => 1,
+            RawTree::LengthNode(node) if node.tag == BIND_TAG => {
+                let BindBody::Pattern(child) = node.decode_bind().unwrap().body else {
+                    panic!()
+                };
+                pattern_wrappers(child)
+            }
+            _ => 0,
+        }
+    }
+    assert_eq!(
+        index
+            .iter()
+            .filter(|n| n.tag == CASEDEF_TAG)
+            .map(|n| pattern_wrappers(n.decode_case_def().unwrap().pattern))
+            .sum::<usize>(),
+        56
+    );
     for (tag, count) in [
         (TYPED_TAG, 58),
         (BIND_TAG, 37),

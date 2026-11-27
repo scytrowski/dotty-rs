@@ -76,3 +76,33 @@ COURSIER_MAVEN_ROOT=/path/to/cached/maven \
 DOTTY_CLASSFILE_REQUIRE_JDK=1 DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
 cargo test --test jvm_tasty_guarded_matches --locked -- --nocapture --test-threads=1
 ```
+
+## Implemented verification
+
+The existing guarded-match target now runs 22 tests, including 11 typed-pattern
+regressions. With mandatory pinned Scala/JDK consumers and serial libtest
+execution it measured 12.31 seconds locally. The strict inventory remains at 38
+targets with unchanged assignments; shard 3 includes the measured increase.
+
+JVM tests pin the selector's single store and lack of runtime test instructions,
+reject malformed canonical types, type trees, wildcard shapes and cycles, and
+charge every pattern child against depth/node limits. A separate direct
+source-to-JVM test passes all 576 Java checks without TASTy production.
+
+Paired tests preserve 56 pattern TYPED nodes plus two expression ascriptions,
+37 distinct BIND declarations, 47 MATCH nodes and four RETURN nodes. They check
+fresh-session determinism, exact source edges (including implicit binders),
+source spans/syntax, read-only failures, validation/projection limits and
+unsupported shapes. Existing scope/evidence regressions now run against both
+plain and typed binders. Guarded Boolean typed binders with Long/Float/Double
+results have exact descriptors, instructions, physical slots and full stack-map
+frames, plus JDK execution with extrema and signed zeros.
+
+Independent Java and Scala clients each pass 576 checks on original Rust output
+and separately rebuilt from-TASTy classes. The original class/TASTy hashes are
+unchanged. This evidence is separate from the Scala-generated reference.
+
+The complete local workspace check passed 8649 tests (57 existing ignored) and
+44 all-feature doctests. Formatting, frontend boundaries, Clippy/rustdoc with
+warnings denied, the standalone compiler client, strict inventory/timing tests,
+workflow lint and diff checks also passed.

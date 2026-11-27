@@ -1,5 +1,8 @@
 # Guarded Int matches and case-local bindings
 
+Same-type Int/Boolean typed wildcard and binder patterns in both output paths
+are covered by [the typed primitive pattern contract](jvm-tasty-typed-primitive-patterns.md).
+
 Target Scala 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`,
 TASTy 28.9.0, class-file major 65. Branch base is main `ff15e257ae604b467a887c72c9c0f27c1efe7725`.
 

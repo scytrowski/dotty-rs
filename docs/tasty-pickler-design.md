@@ -1,5 +1,8 @@
 # Source semantic TASTy pickler: minimal Scala 3.9 contract
 
+Same-type Int/Boolean typed wildcard and binder patterns in both output paths
+are covered by [the typed primitive pattern contract](jvm-tasty-typed-primitive-patterns.md).
+
 Exhaustive Boolean matches may omit the final wildcard under the bounded coverage
 proof described in [the exhaustive Boolean-match contract](jvm-tasty-boolean-exhaustive-matches.md).
 
