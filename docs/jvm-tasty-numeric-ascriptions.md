@@ -38,7 +38,10 @@ Long/Double occupy two physical slots but remain distinct verifier kinds; Float
 occupies one slot and must not be treated as Int. Validate the wrapper, TypeTree
 and actual operand kinds, including same-width mismatches.
 
-TASTy retains every original TYPED and explicit primitive type tree. Numeric
+TASTy retains every original TYPED and explicit primitive type tree. The fixture
+has 83 explicit wrappers; Scala additionally inserts widening wrappers on some
+local reads. Semantic/runtime compatibility does not require copying these
+synthetic Scala nodes into the canonical Rust trees. Numeric
 validation must dispatch before inserting the wrapper into the visited set, then
 reuse the existing authenticated source/typed ascription validator. Merely
 extending its target-name list is insufficient because numeric values have a

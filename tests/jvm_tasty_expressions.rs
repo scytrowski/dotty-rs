@@ -380,3 +380,6 @@ fn composed_expressions_and_effectful_operands_execute_on_jdk21() {
     }"#,
     );
 }
+
+#[path = "support/numeric_ascriptions.rs"]
+mod numeric_ascriptions;

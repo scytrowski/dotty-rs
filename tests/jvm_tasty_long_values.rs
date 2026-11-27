@@ -564,8 +564,6 @@ fn unsupported_long_and_other_category_two_shapes_publish_no_pair() {
         "def f(x: Long): Int = x match { case 0L => 1; case _ => 2 }",
         "def f(a: Long, b: Long): Long = { a; b }",
         "def f(): Long = 1",
-        "def f(x: Double): Double = (x: Double)",
-        "def f(x: Float): Float = (x: Float)",
         "def f(x: Long): Long = { val saved: Long = x; saved = x; saved }",
         "def f(x: Long): Long = { val saved: Long = return x; saved }",
         "def f(using x: Long): Long = x",

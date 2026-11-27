@@ -44,7 +44,7 @@ shapes independently. This crate performs no filesystem publication.
 
 ## Bounded primitive expressions
 
-Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
+Complete plans can preserve Int/Boolean/Unit/Long/Float/Double ascriptions as TYPED nodes and
 Int/Boolean-selector matches as MATCH with ordered CASEDEF nodes. Matches support
 Int/Boolean/Unit/Long/Float/Double results and require a final unguarded irrefutable
 case unless unguarded Boolean cases cover both values with an unguarded final case;
@@ -115,8 +115,9 @@ validation bounds the spelling before conversion and checks the same finite f64
 bits produced by the typer. Suffixed literals retain their exact Constant bits.
 
 Fields, constructor parameters, calls taking/returning floating values, arithmetic,
-comparison, widening, boxing, discarded floating statements and expression
-ascriptions remain unsupported in this paired producer slice. Independent JVM
+comparison, widening, boxing and discarded floating statements remain unsupported
+in this paired producer slice. Same-type Long/Float/Double expression ascriptions
+preserve the original TYPED nodes without runtime conversion. Independent JVM
 support does not expand this contract. Runtime NaN checks establish classification;
 raw codec bit preservation does not promise payload fidelity through arbitrary
 JVM execution. Failed validation is read-only and emits no partial complete file.

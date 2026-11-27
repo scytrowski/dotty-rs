@@ -1240,7 +1240,18 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
             line.contains(&format!("def {method_name}"))
                 && (line.contains("): Unit") || line.contains(": Unit ="))
         });
-        let expected_result = if is_boolean_result {
+        let SymbolInfo::Complete(declared_type) = typer.store().symbols.get(method).info else {
+            panic!("completed method")
+        };
+        let result = match typer.store().types.get(declared_type) {
+            Type::Method(signature) => signature.result,
+            _ => declared_type,
+        };
+        let numeric_result =
+            [definitions.long, definitions.float, definitions.double].contains(&result);
+        let expected_result = if numeric_result {
+            result
+        } else if is_boolean_result {
             definitions.boolean
         } else if is_unit_result {
             definitions.unit
@@ -1395,6 +1406,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::Closure(_)
                 | TreeKind::Return(_)
                 | TreeKind::Match(_)
+                | TreeKind::Typed(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1407,7 +1419,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::Block(_)
         | TreeKind::Closure(_)
         | TreeKind::Return(_)
-        | TreeKind::Match(_) => None,
+        | TreeKind::Match(_)
+        | TreeKind::Typed(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -1458,6 +1471,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                     | dotty_tasty::tasty::BLOCK_TAG
                     | dotty_tasty::tasty::RETURN_TAG
                     | dotty_tasty::tasty::MATCH_TAG
+                    | dotty_tasty::tasty::TYPED_TAG
             ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
@@ -5391,5 +5405,30 @@ fn guarded_or_partial_boolean_patterns_do_not_prove_coverage() {
                 symbol: Some(_)
             }
         ));
+    }
+}
+
+#[test]
+fn numeric_ascriptions_preserve_nested_typed_nodes_in_method_only_plans() {
+    use dotty_tasty::tasty::*;
+    for ty in ["Long", "Float", "Double"] {
+        let source = format!(
+            "package example; class Numeric {{ def f(x: {ty}): {ty} = ((x: {ty}): {ty}) }}"
+        );
+        let (_, first) = source_outputs_named(&source, "Numeric.scala", |_| {}).unwrap();
+        let (_, second) = source_outputs_named(&source, "Numeric.scala", |_| {}).unwrap();
+        assert_eq!(first.bytes(), second.bytes());
+        let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let wrappers: Vec<_> = index.iter().filter(|n| n.tag == TYPED_TAG).collect();
+        assert_eq!(wrappers.len(), 2);
+        for wrapper in wrappers {
+            let RawTree::NatAst { tag, value, .. } = wrapper.decode_typed().unwrap().type_tree
+            else {
+                panic!("type syntax")
+            };
+            assert_eq!(tag, IDENTTPT_TAG);
+            assert_eq!(file.render_name(value).unwrap(), ty);
+        }
     }
 }
