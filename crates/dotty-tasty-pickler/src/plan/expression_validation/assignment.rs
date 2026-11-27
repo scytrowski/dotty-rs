@@ -279,7 +279,8 @@ impl Validator<'_, '_> {
                 });
             if !self.visible_locals.contains(&target)
                 || self.symbol(target)?.flags != SymbolFlags::MUTABLE
-                || (complete_type != self.plan.definitions.int
+                || (complete_type != self.plan.definitions.boolean
+                    && complete_type != self.plan.definitions.int
                     && complete_type != self.plan.definitions.long
                     && complete_type != self.plan.definitions.float
                     && complete_type != self.plan.definitions.double

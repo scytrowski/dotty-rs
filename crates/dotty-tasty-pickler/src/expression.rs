@@ -232,19 +232,19 @@ fn lower_expression_inner(
             .ok_or(PickleError::InvalidTypedTree {
                 tree: while_expr.cond,
             })?;
-        let boolean_parameter = matches!(
+        let boolean_binding = matches!(
             store.types.try_get(condition.ty),
             Some(Type::TermRef {
                 prefix,
                 target: TermRefTarget::Symbol(symbol),
             }) if *prefix == context.definitions().no_prefix
-                && parameters.contains(symbol)
+                && (parameters.contains(symbol) || context.declaration_label(*symbol).is_some())
                 && store.symbols.contains(*symbol)
                 && {
-                    let parameter = store.symbols.get(*symbol);
-                    parameter.kind == dotty_core::SymbolKind::Parameter
-                        && parameter.owner == Some(method)
-                        && parameter.info == SymbolInfo::Complete(context.definitions().boolean)
+                    let binding = store.symbols.get(*symbol);
+                    matches!(binding.kind, dotty_core::SymbolKind::Parameter | dotty_core::SymbolKind::Local)
+                        && binding.owner == Some(method)
+                        && binding.info == SymbolInfo::Complete(context.definitions().boolean)
                 }
         );
         if condition.ty != context.definitions().boolean
@@ -252,7 +252,7 @@ fn lower_expression_inner(
                 store.types.try_get(condition.ty),
                 Some(Type::Constant(Constant::Boolean(_)))
             )
-            && !boolean_parameter
+            && !boolean_binding
         {
             return Err(PickleError::BodyType {
                 tree: while_expr.cond,
@@ -383,7 +383,7 @@ fn lower_expression_inner(
                     && symbol.flags == dotty_core::SymbolFlags::MUTABLE
                     && symbol.name == ident.name
                     && *prefix == context.definitions().no_prefix
-                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long || ty == context.definitions().float || ty == context.definitions().double) =>
+                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().boolean || ty == context.definitions().int || ty == context.definitions().long || ty == context.definitions().float || ty == context.definitions().double) =>
             {
                 context.local_reference(target, None)?
             }

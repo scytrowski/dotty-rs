@@ -5162,3 +5162,39 @@ fn boolean_local_missing_proof_and_forged_type_are_rejected_read_only() {
     let (tree, ty) = changed.unwrap();
     assert_eq!(wrong_type, PickleError::BodyType { tree, ty });
 }
+
+#[test]
+fn mutable_boolean_local_has_mutable_tail_and_exact_assignment_reference() {
+    use dotty_tasty::tasty::*;
+    let source = "package example\nclass BooleanLocals:\n  def flip(x: Boolean): Boolean = { var flag = x; flag = !flag; flag }\n";
+    let (_, output) = source_outputs_named(source, "BooleanLocals.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let local = index.iter_nodes_with_tag(VALDEF_TAG).next().unwrap();
+    let address = local.offset as u32;
+    let DefinitionBody::ValDef { tail, .. } = index
+        .get(address)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(tail, [DefinitionTail::Modifier(MUTABLE_TAG)]);
+    let assignment = index.iter_nodes_with_tag(ASSIGN_TAG).next().unwrap();
+    let assignment = index
+        .get(assignment.offset as u32)
+        .unwrap()
+        .decode_assign()
+        .unwrap();
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFDIRECT_TAG,
+        value: TermValue::AstRef(target),
+        ..
+    }) = assignment.left
+    else {
+        panic!()
+    };
+    assert_eq!(target, address);
+    assert_eq!(index.iter_nodes_with_tag(ASSIGN_TAG).count(), 1);
+}

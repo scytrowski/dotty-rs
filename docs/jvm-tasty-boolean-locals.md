@@ -25,7 +25,7 @@ JVM lowering retains semantic Boolean kinds and exact Z descriptors despite the
 shared Integer verifier category. A recursively proven return may leave a Block
 with a TermRef-typed unreachable tail; authenticate its exact planned Boolean
 parameter/local (including singleton case bindings) rather than inventing Nothing.
-All unreachable source/typed expressions still undergo validation.
+The pickler also validates unreachable source/typed expressions.
 
 General Boolean-returning calls, new fields/constructor/getter shapes, closures,
 local methods, non-local returns, try/finally and new numeric operations are

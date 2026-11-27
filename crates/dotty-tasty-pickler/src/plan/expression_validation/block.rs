@@ -1293,7 +1293,26 @@ impl Validator<'_, '_> {
                 self.validate_assignment_statement(source_id, typed_id, method, depth, visited)
             }
             (TreeKind::Block(_), TreeKind::Block(_)) => {
-                self.validate_unit_block(source_id, typed_id, method, depth, visited)
+                let visible = self.visible_locals.clone();
+                let result = self.validate_unit_block(source_id, typed_id, method, depth, visited);
+                self.visible_locals = visible;
+                result
+            }
+            (TreeKind::If(_), TreeKind::If(_)) | (TreeKind::While(_), TreeKind::While(_)) => {
+                if self.contains_local_return(source_id, typed_id) {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                self.validate_return_flow(
+                    source_id,
+                    typed_id,
+                    method,
+                    self.plan.definitions.unit,
+                    depth,
+                    visited,
+                )
+                .map(|_| ())
             }
             (TreeKind::Literal(_), TreeKind::Literal(_)) => self.validate_method_expression_inner(
                 Some(source_id),
@@ -1360,6 +1379,30 @@ impl Validator<'_, '_> {
                 .typed_ast
                 .try_get(typed_stat)
                 .ok_or(PickleError::InvalidTypedTree { tree: typed_stat })?;
+            if matches!(
+                (&source_stat_node.kind, &stat.kind),
+                (TreeKind::ValDef(_), TreeKind::ValDef(_))
+            ) {
+                self.validate_local_value_statement(
+                    source_stat,
+                    typed_stat,
+                    method,
+                    super::local::LocalValueValidation {
+                        reference_type: None,
+                        depth: depth + 1,
+                        visited,
+                        fragment: false,
+                    },
+                )?;
+                continue;
+            }
+            if matches!(
+                (&source_stat_node.kind, &stat.kind),
+                (TreeKind::If(_), TreeKind::If(_)) | (TreeKind::While(_), TreeKind::While(_))
+            ) {
+                self.validate_unit_expression(source_stat, typed_stat, method, depth + 1, visited)?;
+                continue;
+            }
             if !matches!(source_stat_node.kind, TreeKind::Assign(_))
                 || !matches!(stat.kind, TreeKind::Assign(_))
             {
