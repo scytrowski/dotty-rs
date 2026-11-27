@@ -5432,3 +5432,102 @@ fn numeric_ascriptions_preserve_nested_typed_nodes_in_method_only_plans() {
         }
     }
 }
+
+#[test]
+fn numeric_ascriptions_authenticate_type_syntax_spans_bindings_bits_and_cycles() {
+    for (ty, literal, corrupt_value) in [
+        ("Long", "1L", Constant::Long(0x1_0000_0001)),
+        ("Float", "1.0f", Constant::FloatBits(0xbf80_0000)),
+        (
+            "Double",
+            "1.0d",
+            Constant::DoubleBits(0x3ff0_0001_0000_0000),
+        ),
+    ] {
+        for mode in 0..5 {
+            let source =
+                format!("package example; class Numeric {{ def f(): {ty} = ({literal}: {ty}) }}");
+            let mut culprit = None;
+            let error = source_outputs_named_with_tree_edits(
+                &source,
+                "Numeric.scala",
+                ValidationLimits::default(),
+                |source_ast, typed_ast, bindings, _| {
+                    let (source_id, wrapper) = source_ast
+                        .iter()
+                        .find_map(|(id, n)| {
+                            if let TreeKind::Typed(w) = n.kind {
+                                Some((id, w))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+                    let root = bindings.get(SourceId::from_index(7), source_id).unwrap();
+                    let TreeKind::Typed(typed) = typed_ast.get(root).kind else {
+                        panic!()
+                    };
+                    match mode {
+                        0 => {
+                            source_ast.get_mut(wrapper.tpt).kind =
+                                source_ast.get(wrapper.expr).kind.clone()
+                        }
+                        1 => {
+                            typed_ast.get_mut(typed.tpt).position =
+                                typed_ast.get(typed.expr).position;
+                            culprit = Some(typed.tpt);
+                        }
+                        2 => {
+                            bindings.remove(SourceId::from_index(7), wrapper.tpt);
+                        }
+                        3 => {
+                            typed_ast.get_mut(typed.expr).kind = TreeKind::Literal(Literal {
+                                value: corrupt_value.clone(),
+                            });
+                            culprit = Some(typed.expr);
+                        }
+                        4 => {
+                            let TreeKind::Typed(w) = &mut source_ast.get_mut(source_id).kind else {
+                                panic!()
+                            };
+                            w.expr = source_id;
+                            let TreeKind::Typed(w) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            w.expr = root;
+                            culprit = Some(root);
+                        }
+                        _ => unreachable!(),
+                    }
+                },
+                |_| {},
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{ty} mode {mode}: malformed input accepted"));
+            match mode {
+                0 => assert!(matches!(error, PickleError::BodyType { .. }), "{error:?}"),
+                1 => assert_eq!(
+                    error,
+                    PickleError::BodySpan {
+                        tree: culprit.unwrap()
+                    }
+                ),
+                2 => assert!(
+                    matches!(error, PickleError::BodyBinding { actual: None, .. }),
+                    "{error:?}"
+                ),
+                3 => assert!(
+                    matches!(error, PickleError::BodyType { tree, .. } if tree == culprit.unwrap()),
+                    "{error:?}"
+                ),
+                4 => assert_eq!(
+                    error,
+                    PickleError::RepeatedExpression {
+                        tree: culprit.unwrap()
+                    }
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
