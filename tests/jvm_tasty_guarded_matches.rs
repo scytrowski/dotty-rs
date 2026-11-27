@@ -473,3 +473,6 @@ fn unsupported_patterns_and_case_binding_escape_never_publish_a_pair() {
         );
     }
 }
+
+#[path = "support/typed_primitive_patterns.rs"]
+mod typed_primitive_patterns;
