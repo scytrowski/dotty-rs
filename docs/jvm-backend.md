@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Exhaustive Boolean matches may omit the final wildcard under the bounded coverage
+proof described in [the exhaustive Boolean-match contract](jvm-tasty-boolean-exhaustive-matches.md).
+
 Ordinary Boolean locals, mutable flags and bounded Boolean value flow in both
 outputs are described in [the Boolean-local contract](jvm-tasty-boolean-locals.md).
 

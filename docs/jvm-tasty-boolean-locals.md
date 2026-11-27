@@ -19,7 +19,8 @@ short-circuit operators, ascriptions, If, Block and bounded Int/Boolean Match.
 Locals can feed existing primitive method results, conditions, selectors and guards.
 Assignments require a visible mutable Boolean local and a Boolean RHS. Boolean
 value blocks preserve source evaluation order, branch visibility and short-circuit
-effects. Existing final irrefutable match cases remain required.
+effects. The later [exhaustive Boolean-match increment](jvm-tasty-boolean-exhaustive-matches.md)
+allows complete unguarded Boolean coverage to replace the final irrefutable case.
 
 JVM lowering retains semantic Boolean kinds and exact Z descriptors despite the
 shared Integer verifier category. A recursively proven return may leave a Block

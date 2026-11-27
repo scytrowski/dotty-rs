@@ -45,8 +45,9 @@ shapes independently. This crate performs no filesystem publication.
 ## Bounded primitive expressions
 
 Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
-Int/Boolean-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
-final unguarded irrefutable case and support Int/Boolean/Unit/Long/Float/Double results;
+Int/Boolean-selector matches as MATCH with ordered CASEDEF nodes. Matches support
+Int/Boolean/Unit/Long/Float/Double results and require a final unguarded irrefutable
+case unless unguarded Boolean cases cover both values with an unguarded final case;
 guards and canonical Int/Boolean binders follow the contract below. Extractors remain
 unsupported. Int `&` and equality/inequality between Int
 operands use Scala 3.9 signed primitive selections. Source Any equality symbols
@@ -61,7 +62,8 @@ symbol and case-scope tuple from the frontend. The producer emits BIND labels
 and direct symbol references, validates visibility independently per case, and
 rejects missing, duplicate, stale or cross-case binding evidence without store
 mutation. The subset includes variable roots and explicit bindings over Int/Boolean
-literals or wildcards, with a final unguarded irrefutable case.
+literals or wildcards, with a final unguarded irrefutable case or complete
+unguarded Boolean coverage as described below.
 
 Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long/Float/Double
 methods. RETURN references the exact current method declaration. A bounded
@@ -127,10 +129,14 @@ Selectors may be literals, formals, visible canonical pattern bindings or the
 already supported Boolean condition expressions. Case bindings are visible only
 within their guard/body, including inner matches; repeated spelling never merges
 symbols or scopes. Constant-selector binder types retain their exact Boolean
-singleton payload. Exactly one final unguarded irrefutable case is required,
-even after exhaustive literal alternatives. Arbitrary Boolean-returning calls,
-typed/extractor patterns and matches without this fallback remain unsupported. Complete paired
-output checks declaration/symbol/case/scope agreement with the JVM local plan.
+singleton payload. A final unguarded irrefutable case may be omitted when validated
+unguarded cases cover both Boolean values and the last case has no guard. Coverage
+is collected during the same bounded source/typed pattern validation; guard-bearing
+cases contribute no guaranteed values. Original cases, alternatives and BIND targets
+are retained in TASTy, with no synthetic fallback. Partial matches, singleton-only
+coverage, arbitrary Boolean-returning calls and typed/extractor patterns remain
+unsupported. Complete paired output checks declaration/symbol/case/scope agreement
+with the JVM local plan.
 
 ## Ordinary Boolean locals and values
 

@@ -465,7 +465,7 @@ fn unsupported_boolean_flag_shapes_do_not_publish_artifact_pairs() {
         "def f(x: Boolean): Boolean = x && { return false; true }",
         "def f(x: Boolean): Int = if { return 1; x } then 2 else 3",
         "def f(x: Boolean): Int = x match { case true if { return 1; x } => 2; case _ => 3 }",
-        "def f(x: Boolean): Int = x match { case true => 1; case false => 2 }",
+        "def f(x: Boolean): Int = x match { case true => 1 }",
     ] {
         let result = emit_paired_jvm_tasty_class(
             &format!("package example; class BooleanLocals {{ {methods} }}"),

@@ -35,12 +35,14 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
-Int operands. Int/Boolean-selector matches accept literals of the selector type, literal alternatives and exactly one
-final unguarded irrefutable case, with Int/Boolean/Unit/Long/Float/Double results. A Nothing-typed
+Int operands. Int/Boolean-selector matches accept literals of the selector type and
+literal alternatives, with Int/Boolean/Unit/Long/Float/Double results. Int matches
+require a final unguarded irrefutable case; Boolean matches may instead prove full
+unguarded coverage of both values with an unguarded final case. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
-Guards and immutable Int/Boolean binders are supported; extractors, type tests and missing unconditional fallback cases return typed errors.
+Guards and immutable Int/Boolean binders are supported; extractors, type tests and incomplete coverage without a fallback return typed errors.
 The semantic TASTy producer retains these source constructs separately; a
 successful JVM emission alone does not certify a paired artifact.
 
@@ -95,9 +97,12 @@ selector family separately from its Integer JVM verification category. `true`
 and `false` patterns use exact Boolean singleton types; wildcard and immutable
 case bindings retain canonical Boolean types and case scopes. Nested Boolean/Int
 matches, short-circuit selectors/guards and all existing primitive results are
-supported. Exactly one final unconditional wildcard or variable case is required,
-even after `true | false`; this is not general exhaustiveness or MatchError
-lowering. Paired TASTy production also supports ordinary Boolean locals and
+supported. A final unconditional wildcard or variable case is optional when
+validated unguarded cases cover both Boolean values and the last case has no guard.
+Guards guarantee no coverage; duplicate alternatives add no values. The JVM closes
+the final mismatch edge using this proof while retaining binder initialization and
+case order. Partial matches and general MatchError lowering remain unsupported.
+Paired TASTy production also supports ordinary Boolean locals and
 bounded Boolean value blocks; arbitrary Boolean-returning calls remain outside
 that paired subset.
 

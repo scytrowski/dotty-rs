@@ -5487,6 +5487,126 @@ mod tests {
         );
     }
 
+    fn exhaustive_boolean_match_fixture(values: &[bool]) -> (Fixture, TreeId<Typed>) {
+        let mut f = Fixture::new(&[]);
+        let selector_ty = f.store.types.alloc(Type::Constant(Constant::Boolean(true)));
+        let selector = f.literal(Constant::Boolean(true), selector_ty);
+        let mut cases = Vec::new();
+        for (ordinal, &value) in values.iter().enumerate() {
+            let ty = f
+                .store
+                .types
+                .alloc(Type::Constant(Constant::Boolean(value)));
+            let pattern = f.literal(Constant::Boolean(value), ty);
+            let body = f.literal(Constant::Int(10 + ordinal as i32), f.definitions.int);
+            cases.push(f.ast.alloc(Tree {
+                kind: TreeKind::CaseDef(dotty_core::ast::CaseDef {
+                    pattern,
+                    guard: None,
+                    body,
+                }),
+                position: None,
+                ty: f.definitions.int,
+            }));
+        }
+        let root = f.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match { selector, cases }),
+            position: None,
+            ty: f.definitions.int,
+        });
+        (f, root)
+    }
+
+    #[test]
+    fn exhaustive_boolean_match_closes_last_failure_edge_with_one_selector_store() {
+        let (f, root) = exhaustive_boolean_match_fixture(&[true, false]);
+        let layout = JvmLocalLayout {
+            method: f.method.symbol(),
+            locals: Vec::new(),
+            by_symbol: Default::default(),
+            max_locals: 1,
+        };
+        let before = format!("{:?}{:?}", f.store, f.ast);
+        let mut context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+        context.local_layout = Some(&layout);
+        let mut code = CodeBuilder::new();
+        assert_eq!(
+            emit_expression(&mut context, root, &mut code, 0).unwrap(),
+            Flow::Value(JvmType::Int)
+        );
+        code.ireturn().unwrap();
+        assert_eq!(
+            method_body_bytes(&f, code),
+            [
+                0x04, 0x3c, // selector once, temporary slot one
+                0x1b, 0x04, 0xa0, 0, 8, // only first case needs a mismatch edge
+                0x10, 10, 0xa7, 0, 5, 0x10, 11,
+                0xac, // residual Boolean case, then one result return
+            ]
+        );
+        assert_eq!(format!("{:?}{:?}", f.store, f.ast), before);
+    }
+
+    #[test]
+    fn partial_guarded_or_forged_boolean_coverage_rejects_before_lowering() {
+        for mode in 0..6 {
+            let values: &[bool] = if mode == 0 {
+                &[true]
+            } else if mode == 1 {
+                &[true, true]
+            } else {
+                &[true, false]
+            };
+            let (mut f, root) = exhaustive_boolean_match_fixture(values);
+            let TreeKind::Match(m) = f.ast.get(root).kind.clone() else {
+                panic!()
+            };
+            let TreeKind::CaseDef(first) = f.ast.get(m.cases[0]).kind else {
+                panic!()
+            };
+            let TreeKind::CaseDef(last) = f.ast.get(*m.cases.last().unwrap()).kind else {
+                panic!()
+            };
+            let mut expected_tree = last.pattern;
+            let mut expected_node = "match requires exactly one final wildcard";
+            if mode == 2 || mode == 3 {
+                let ty = f.store.types.alloc(Type::Constant(Constant::Boolean(true)));
+                let guard = f.literal(Constant::Boolean(true), ty);
+                let id = if mode == 2 {
+                    m.cases[0]
+                } else {
+                    *m.cases.last().unwrap()
+                };
+                let TreeKind::CaseDef(c) = &mut f.ast.get_mut(id).kind else {
+                    panic!()
+                };
+                c.guard = Some(guard);
+            } else if mode == 4 {
+                f.ast.get_mut(first.pattern).ty = f.definitions.boolean;
+                expected_tree = first.pattern;
+                expected_node = "inconsistent Boolean match literal";
+            } else if mode == 5 {
+                let int = f.store.types.alloc(Type::Constant(Constant::Int(1)));
+                f.ast.get_mut(first.pattern).ty = int;
+                f.ast.get_mut(first.pattern).kind = TreeKind::Literal(dotty_core::ast::Literal {
+                    value: Constant::Int(1),
+                });
+                expected_tree = first.pattern;
+                expected_node = "non-Boolean match pattern type";
+            }
+            let before = format!("{:?}{:?}", f.store, f.ast);
+            assert_eq!(
+                lower_expression(&f.store, &f.ast, &f.definitions, &f.method, root).unwrap_err(),
+                JvmCodegenError::UnsupportedTypedExpression {
+                    tree: expected_tree,
+                    node: expected_node
+                },
+                "mode {mode}"
+            );
+            assert_eq!(format!("{:?}{:?}", f.store, f.ast), before);
+        }
+    }
+
     fn alternative_match_fixture() -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
         let mut fixture = Fixture::new(&[]);
         let int = fixture.definitions.int;

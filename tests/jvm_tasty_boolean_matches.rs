@@ -870,8 +870,8 @@ fn boolean_artifacts_are_deterministic_in_fresh_sessions() {
 #[test]
 fn out_of_scope_boolean_shapes_do_not_publish_artifacts() {
     for method in [
-        "def f(x: Boolean): Int = x match { case true => 1; case false => 2 }",
-        "def f(x: Boolean): Int = x match { case true | false => 1 }",
+        "def f(x: Boolean): Int = x match { case true => 1 }",
+        "def f(x: Boolean): Int = x match { case true | true => 1 }",
         "def f(x: Boolean): Int = x match { case _ if x => 1 }",
         "def f(x: Boolean): Int = x match { case _ => 1; case true => 2 }",
         "def f(x: Boolean): Boolean = x match { case n @ (true | false) => n; case _ => x }",

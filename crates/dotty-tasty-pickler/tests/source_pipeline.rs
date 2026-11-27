@@ -5301,3 +5301,95 @@ fn cyclic_boolean_value_block_is_rejected_without_mutation() {
         }
     );
 }
+
+#[test]
+fn exhaustive_boolean_cases_preserve_order_without_synthetic_wildcards() {
+    use dotty_tasty::tasty::*;
+    for values in [[true, false], [false, true]] {
+        let source = format!(
+            "package example; class BoolCases {{ def f(x: Boolean): Int = x match {{ case {} => 1; case {} => 2 }} }}",
+            values[0], values[1]
+        );
+        let (_, output) = source_outputs_named(&source, "BoolCases.scala", |_| {}).unwrap();
+        let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let patterns: Vec<_> = index
+            .iter_nodes_with_tag(CASEDEF_TAG)
+            .map(|node| {
+                let RawTree::Leaf(pattern) = index
+                    .get(node.offset as u32)
+                    .unwrap()
+                    .decode_case_def()
+                    .unwrap()
+                    .pattern
+                else {
+                    panic!()
+                };
+                pattern.constant_value().unwrap().unwrap()
+            })
+            .collect();
+        assert_eq!(patterns, values.map(ConstantValue::Boolean));
+        assert_eq!(index.iter_nodes_with_tag(MATCH_TAG).count(), 1);
+        assert_eq!(index.iter_nodes_with_tag(BIND_TAG).count(), 0);
+    }
+}
+
+#[test]
+fn exhaustive_boolean_alternatives_keep_duplicate_literals_and_one_case() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class BoolCases { def f(x: Boolean): Int = x match { case (true | true) | false => 1 } }";
+    let (_, output) = source_outputs_named(source, "BoolCases.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    assert_eq!(index.iter_nodes_with_tag(CASEDEF_TAG).count(), 1);
+    assert_eq!(index.iter_nodes_with_tag(ALTERNATIVE_TAG).count(), 2);
+    let mut patterns = Vec::new();
+    for node in index.iter_nodes_with_tag(ALTERNATIVE_TAG) {
+        for pattern in index
+            .get(node.offset as u32)
+            .unwrap()
+            .decode_alternative()
+            .unwrap()
+            .alternatives
+        {
+            if let RawTree::Leaf(value) = pattern {
+                patterns.push(value.constant_value().unwrap().unwrap());
+            }
+        }
+    }
+    assert_eq!(
+        patterns
+            .iter()
+            .filter(|v| **v == ConstantValue::Boolean(true))
+            .count(),
+        2
+    );
+    assert_eq!(
+        patterns
+            .iter()
+            .filter(|v| **v == ConstantValue::Boolean(false))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn guarded_or_partial_boolean_patterns_do_not_prove_coverage() {
+    for cases in [
+        "case true => 1",
+        "case true | true => 1",
+        "case true if true => 1; case false => 2",
+        "case true => 1; case false if true => 2",
+    ] {
+        let source = format!(
+            "package example; class BoolCases {{ def f(x: Boolean): Int = x match {{ {cases} }} }}"
+        );
+        assert!(matches!(
+            source_outputs_named(&source, "BoolCases.scala", |_| {}).unwrap_err(),
+            PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(_)
+            }
+        ));
+    }
+}
