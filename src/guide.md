@@ -31,6 +31,10 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Read/write class files or load classpaths | [`classfile`], [`classloader`] |
 | Validate/emit the audited paired JVM/TASTy subset | [`jvm_tasty_plan`], [`jvm_tasty_artifacts`] |
 
+Paired output supports same-type Int/Boolean/Unit/Long/Float/Double expression
+ascriptions within the bounded value/control-flow subset. It preserves original
+TASTy TYPED nodes and exact JVM primitive kinds without runtime conversion.
+
 Semantic TASTy pickling is available directly from the separate
 [`dotty_tasty_pickler`] crate. Structural validation, semantic completion, JVM
 emission, and Scala interoperability are distinct guarantees. A successful

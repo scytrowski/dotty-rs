@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Canonical Long/Float/Double expression ascriptions in both output paths are
+described in [the numeric-ascription contract](jvm-tasty-numeric-ascriptions.md).
+
 Exhaustive Boolean matches may omit the final wildcard under the bounded coverage
 proof described in [the exhaustive Boolean-match contract](jvm-tasty-boolean-exhaustive-matches.md).
 

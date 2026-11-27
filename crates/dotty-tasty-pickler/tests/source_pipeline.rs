@@ -1240,7 +1240,18 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
             line.contains(&format!("def {method_name}"))
                 && (line.contains("): Unit") || line.contains(": Unit ="))
         });
-        let expected_result = if is_boolean_result {
+        let SymbolInfo::Complete(declared_type) = typer.store().symbols.get(method).info else {
+            panic!("completed method")
+        };
+        let result = match typer.store().types.get(declared_type) {
+            Type::Method(signature) => signature.result,
+            _ => declared_type,
+        };
+        let numeric_result =
+            [definitions.long, definitions.float, definitions.double].contains(&result);
+        let expected_result = if numeric_result {
+            result
+        } else if is_boolean_result {
             definitions.boolean
         } else if is_unit_result {
             definitions.unit
@@ -1395,6 +1406,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::Closure(_)
                 | TreeKind::Return(_)
                 | TreeKind::Match(_)
+                | TreeKind::Typed(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1407,7 +1419,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::Block(_)
         | TreeKind::Closure(_)
         | TreeKind::Return(_)
-        | TreeKind::Match(_) => None,
+        | TreeKind::Match(_)
+        | TreeKind::Typed(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -1458,6 +1471,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                     | dotty_tasty::tasty::BLOCK_TAG
                     | dotty_tasty::tasty::RETURN_TAG
                     | dotty_tasty::tasty::MATCH_TAG
+                    | dotty_tasty::tasty::TYPED_TAG
             ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
@@ -5391,5 +5405,129 @@ fn guarded_or_partial_boolean_patterns_do_not_prove_coverage() {
                 symbol: Some(_)
             }
         ));
+    }
+}
+
+#[test]
+fn numeric_ascriptions_preserve_nested_typed_nodes_in_method_only_plans() {
+    use dotty_tasty::tasty::*;
+    for ty in ["Long", "Float", "Double"] {
+        let source = format!(
+            "package example; class Numeric {{ def f(x: {ty}): {ty} = ((x: {ty}): {ty}) }}"
+        );
+        let (_, first) = source_outputs_named(&source, "Numeric.scala", |_| {}).unwrap();
+        let (_, second) = source_outputs_named(&source, "Numeric.scala", |_| {}).unwrap();
+        assert_eq!(first.bytes(), second.bytes());
+        let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let wrappers: Vec<_> = index.iter().filter(|n| n.tag == TYPED_TAG).collect();
+        assert_eq!(wrappers.len(), 2);
+        for wrapper in wrappers {
+            let RawTree::NatAst { tag, value, .. } = wrapper.decode_typed().unwrap().type_tree
+            else {
+                panic!("type syntax")
+            };
+            assert_eq!(tag, IDENTTPT_TAG);
+            assert_eq!(file.render_name(value).unwrap(), ty);
+        }
+    }
+}
+
+#[test]
+fn numeric_ascriptions_authenticate_type_syntax_spans_bindings_bits_and_cycles() {
+    for (ty, literal, corrupt_value) in [
+        ("Long", "1L", Constant::Long(0x1_0000_0001)),
+        ("Float", "1.0f", Constant::FloatBits(0xbf80_0000)),
+        (
+            "Double",
+            "1.0d",
+            Constant::DoubleBits(0x3ff0_0001_0000_0000),
+        ),
+    ] {
+        for mode in 0..5 {
+            let source =
+                format!("package example; class Numeric {{ def f(): {ty} = ({literal}: {ty}) }}");
+            let mut culprit = None;
+            let error = source_outputs_named_with_tree_edits(
+                &source,
+                "Numeric.scala",
+                ValidationLimits::default(),
+                |source_ast, typed_ast, bindings, _| {
+                    let (source_id, wrapper) = source_ast
+                        .iter()
+                        .find_map(|(id, n)| {
+                            if let TreeKind::Typed(w) = n.kind {
+                                Some((id, w))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+                    let root = bindings.get(SourceId::from_index(7), source_id).unwrap();
+                    let TreeKind::Typed(typed) = typed_ast.get(root).kind else {
+                        panic!()
+                    };
+                    match mode {
+                        0 => {
+                            source_ast.get_mut(wrapper.tpt).kind =
+                                source_ast.get(wrapper.expr).kind.clone()
+                        }
+                        1 => {
+                            typed_ast.get_mut(typed.tpt).position =
+                                typed_ast.get(typed.expr).position;
+                            culprit = Some(typed.tpt);
+                        }
+                        2 => {
+                            bindings.remove(SourceId::from_index(7), wrapper.tpt);
+                        }
+                        3 => {
+                            typed_ast.get_mut(typed.expr).kind = TreeKind::Literal(Literal {
+                                value: corrupt_value.clone(),
+                            });
+                            culprit = Some(typed.expr);
+                        }
+                        4 => {
+                            let TreeKind::Typed(w) = &mut source_ast.get_mut(source_id).kind else {
+                                panic!()
+                            };
+                            w.expr = source_id;
+                            let TreeKind::Typed(w) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            w.expr = root;
+                            culprit = Some(root);
+                        }
+                        _ => unreachable!(),
+                    }
+                },
+                |_| {},
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{ty} mode {mode}: malformed input accepted"));
+            match mode {
+                0 => assert!(matches!(error, PickleError::BodyType { .. }), "{error:?}"),
+                1 => assert_eq!(
+                    error,
+                    PickleError::BodySpan {
+                        tree: culprit.unwrap()
+                    }
+                ),
+                2 => assert!(
+                    matches!(error, PickleError::BodyBinding { actual: None, .. }),
+                    "{error:?}"
+                ),
+                3 => assert!(
+                    matches!(error, PickleError::BodyType { tree, .. } if tree == culprit.unwrap()),
+                    "{error:?}"
+                ),
+                4 => assert_eq!(
+                    error,
+                    PickleError::RepeatedExpression {
+                        tree: culprit.unwrap()
+                    }
+                ),
+                _ => unreachable!(),
+            }
+        }
     }
 }

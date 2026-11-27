@@ -44,6 +44,12 @@ impl Validator<'_, '_> {
             "Boolean"
         } else if result_type == self.plan.definitions.unit {
             "Unit"
+        } else if result_type == self.plan.definitions.long {
+            "Long"
+        } else if result_type == self.plan.definitions.float {
+            "Float"
+        } else if result_type == self.plan.definitions.double {
+            "Double"
         } else {
             return Err(PickleError::BodyType {
                 tree: typed_id,

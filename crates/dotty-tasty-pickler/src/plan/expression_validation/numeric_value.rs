@@ -36,6 +36,19 @@ impl Validator<'_, '_> {
             );
         }
         if matches!(
+            (&source.kind, &typed.kind),
+            (TreeKind::Typed(_), TreeKind::Typed(_))
+        ) {
+            return self.validate_primitive_ascription(
+                source_id,
+                typed_id,
+                method,
+                result_type,
+                depth + 1,
+                visited,
+            );
+        }
+        if matches!(
             typed.kind,
             TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Match(_)
         ) {

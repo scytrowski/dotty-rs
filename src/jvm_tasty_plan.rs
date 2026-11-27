@@ -493,7 +493,10 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 /// including inferred declarations. Boolean pattern bindings retain their exact case
 /// scopes. Bounded Boolean values and mutable flags compose with existing control
 /// flow and local returns; returns inside operands remain unsupported.
-/// Primitive ascriptions, operators and bounded Int/Boolean-selector matches are accepted only when both producers validate the same roots.
+/// Same-type Int/Boolean/Unit/Long/Float/Double ascriptions preserve explicit
+/// type syntax and evaluate their operand once without runtime conversion.
+/// Primitive operators and bounded Int/Boolean-selector matches are accepted
+/// only when both producers validate the same roots.
 /// Boolean matches may omit a final fallback only when authenticated unguarded cases cover both values and the final case has no guard; guarded cases guarantee no coverage.
 /// The callback keeps the borrowed session alive
 /// for the entire planning receipt lifetime.

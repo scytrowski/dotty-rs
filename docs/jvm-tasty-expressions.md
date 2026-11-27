@@ -1,6 +1,8 @@
 # Bounded JVM/TASTy expression parity
 
-This records the #2470 increment. The subsequent
+This records the #2470 increment. The
+[numeric-ascription contract](jvm-tasty-numeric-ascriptions.md) extends its
+ascriptions to canonical Long/Float/Double values. The subsequent
 [guarded-match contract](jvm-tasty-guarded-matches.md) extends its match subset
 with guards and immutable Int pattern bindings.
 
