@@ -646,3 +646,143 @@ fn exhaustive_numeric_joins_have_exact_descriptors_instructions_and_frames() {
         );
     }
 }
+
+#[test]
+fn exhaustive_artifacts_are_deterministic_in_fresh_sessions() {
+    let source = include_str!(
+        "fixtures/jvm_tasty_boolean_exhaustive_matches/BooleanExhaustiveMatches.scala"
+    );
+    let a = emit_paired_jvm_tasty_class(
+        source,
+        "BooleanExhaustiveMatches.scala",
+        SourceId::from_index(2478),
+    )
+    .unwrap();
+    let b = emit_paired_jvm_tasty_class(
+        source,
+        "BooleanExhaustiveMatches.scala",
+        SourceId::from_index(2479),
+    )
+    .unwrap();
+    assert_eq!(a.classfile_bytes(), b.classfile_bytes());
+    assert_eq!(a.tasty_bytes(), b.tasty_bytes());
+}
+
+#[test]
+fn legacy_exhaustive_boolean_plans_obey_validation_and_encoding_limits_read_only() {
+    use dotty::core::ast::TreeKind;
+    use dotty_tasty_pickler::{
+        ClassMemberPicklePlan, DefaultConstructorPlan, LimitKind, MethodPicklePlan, PickleError,
+        PickleLimits, PicklePlan, ProjectionLimits, ValidationLimits,
+    };
+    let source = "package example; class BooleanExhaustiveMatches { def f(x: Boolean): Int = x match { case (true | true) | false => 1 } }";
+    dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
+        source,
+        "BooleanExhaustiveMatches.scala",
+        SourceId::from_index(2478),
+        |paired| {
+            let raw = paired.tasty_plan.plan();
+            let [
+                ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree,
+                },
+            ] = raw.members
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &raw.source_ast.get(*source_tree).kind else {
+                panic!()
+            };
+            let methods = [MethodPicklePlan {
+                symbol: *symbol,
+                source_tree: *source_tree,
+                parameter_clauses: vec![paired.jvm_unit.classes[0].methods[0].parameters.clone()],
+                body: Some(
+                    raw.typed_bindings
+                        .typed_at(raw.source.id, def.rhs.unwrap())
+                        .unwrap(),
+                ),
+            }];
+            let input = PicklePlan {
+                store: raw.store,
+                definitions: raw.definitions,
+                source_ast: raw.source_ast,
+                typed_ast: raw.typed_ast,
+                source_index: raw.source_index,
+                typed_bindings: raw.typed_bindings,
+                source: raw.source.clone(),
+                source_root: raw
+                    .source_ast
+                    .iter()
+                    .find_map(|(id, n)| matches!(n.kind, TreeKind::PackageDef(_)).then_some(id))
+                    .unwrap(),
+                class: raw.class,
+                class_tree: raw.class_tree,
+                methods: &methods,
+                local_values: &[],
+                constructor: DefaultConstructorPlan {
+                    symbol: raw.constructor.symbol,
+                    source_tree: raw.constructor.source_tree,
+                    parameter_clauses: raw.constructor.parameter_clauses.clone(),
+                },
+            };
+            let before = format!("{:?}{:?}{:?}", raw.store, raw.source_ast, raw.typed_ast);
+            let checkpoint = raw.store.checkpoint();
+            let valid = input.validate().unwrap();
+            let a = valid.pickle().unwrap();
+            let b = valid.pickle().unwrap();
+            assert_eq!(a.bytes(), b.bytes());
+            let validation_depth = input
+                .validate_with_limits(ValidationLimits {
+                    max_expression_depth: 0,
+                    ..Default::default()
+                })
+                .err()
+                .unwrap();
+            assert_eq!(
+                validation_depth,
+                PickleError::LimitExceeded {
+                    kind: LimitKind::ExpressionDepth,
+                    limit: 0
+                }
+            );
+            let encoding_depth = valid
+                .pickle_with_limits(PickleLimits {
+                    projection: ProjectionLimits {
+                        max_expression_depth: 0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap_err();
+            assert_eq!(
+                encoding_depth,
+                PickleError::LimitExceeded {
+                    kind: LimitKind::ExpressionDepth,
+                    limit: 0
+                }
+            );
+            let items = input
+                .validate_with_limits(ValidationLimits {
+                    max_items: 5,
+                    ..Default::default()
+                })
+                .err()
+                .unwrap();
+            assert_eq!(
+                items,
+                PickleError::LimitExceeded {
+                    kind: LimitKind::Items,
+                    limit: 5
+                }
+            );
+            assert_eq!(raw.store.checkpoint(), checkpoint);
+            assert_eq!(
+                format!("{:?}{:?}{:?}", raw.store, raw.source_ast, raw.typed_ast),
+                before
+            );
+        },
+    )
+    .unwrap();
+}

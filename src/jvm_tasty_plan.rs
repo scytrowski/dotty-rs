@@ -494,6 +494,7 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 /// scopes. Bounded Boolean values and mutable flags compose with existing control
 /// flow and local returns; returns inside operands remain unsupported.
 /// Primitive ascriptions, operators and bounded Int/Boolean-selector matches are accepted only when both producers validate the same roots.
+/// Boolean matches may omit a final fallback only when authenticated unguarded cases cover both values and the final case has no guard; guarded cases guarantee no coverage.
 /// The callback keeps the borrowed session alive
 /// for the entire planning receipt lifetime.
 pub fn with_paired_jvm_tasty_class_plan<R>(

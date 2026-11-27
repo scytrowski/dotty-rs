@@ -13,6 +13,10 @@ TASTy 28.9.0, class-file major 65. Base main: `c1fdabb6b9908b61addbc609e5fcc71b0
 5. Require independent Java/Scala consumers, original and from-TASTy execution,
    malformed-plan, limit and determinism coverage and CI gates.
 
+The later [exhaustive Boolean-match increment](jvm-tasty-boolean-exhaustive-matches.md)
+relaxes this increment's final-fallback requirement when authenticated unguarded
+patterns cover both Boolean values and the last case has no guard.
+
 This extends the existing Int matcher with Boolean selectors. Selectors include
 Boolean literals, formals, visible case binders and the existing supported
 Boolean condition expressions. Cases accept `true`, `false`, wildcards, plain

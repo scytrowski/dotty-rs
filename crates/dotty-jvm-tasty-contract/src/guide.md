@@ -46,3 +46,9 @@ Ordinary Int/Boolean locals and pattern bindings retain exact declaration and
 symbol identities across both plans. Ordinary bindings must also agree on
 mutability; pattern proofs include their original case and scope. A shared
 Integer verifier category does not make an Int local a valid Boolean binding.
+
+Exhaustive Boolean matches retain their original typed cases in both plans.
+Both producers authenticate full unguarded Boolean coverage before accepting a
+missing final fallback; the JVM may close the residual failure edge without
+changing the TASTy patterns. Guards alone and Int verification tags do not prove
+Boolean coverage. Supported results and canonical case binding proofs are unchanged.

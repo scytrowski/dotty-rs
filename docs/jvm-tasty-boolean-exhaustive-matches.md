@@ -53,7 +53,7 @@ actual Rust artifacts, compile independent Java/Scala clients, rebuild Rust TAST
 with `-from-tasty`, execute both outputs with JDK 21 verification and check original
 bytes unchanged. Semantic/runtime compatibility is required, not byte equality.
 Pinned Scala retains a defensive MatchError branch even for these Boolean matches;
-the proposed JVM proof closes unreachable failure on the canonical Boolean domain
+the JVM proof closes unreachable failure on the canonical Boolean domain
 without adding general exception emission.
 
 ```sh
@@ -64,3 +64,54 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 cargo test --
 Set `SCALA39_ROOT`, `COURSIER_MAVEN_ROOT` and `JAVA_HOME` as documented by the shared
 oracle; put the JDK bin directory on PATH. Final acceptance includes all repository
 checks, mandatory JDK execution, strict TASTy shards/follow-ups and their aggregate.
+
+## Implemented behavior and regression evidence
+
+JVM validation collects finite Boolean coverage only after validating canonical
+selector/pattern types and literal payloads. Its private case plan clears the
+final literal tests only when complete unguarded coverage is proven, making that
+case the residual default while retaining any binder. Existing temporary slots,
+guards, initialization joins and return-flow validation remain in use.
+
+The pickler computes irrefutability and finite Boolean coverage in one existing
+budgeted source/typed pattern walk. Literal alternatives retain their original
+children and duplicate values. Only unguarded cases contribute guaranteed coverage.
+The existing encoder emits the unchanged case vector and exact BIND/reference
+identities; no frontend, public API or wire representation change is required.
+
+The 30-method fixture checks both literal orders, alternatives/duplicates, binders,
+guarded prefixes, one selector/guard evaluation, ordered side effects, short-circuit
+skips, mutable assignments and loops, nested Boolean/Int matches, normal/mixed/all
+returning paths and primitive values including signed zeros, subnormals and Long
+bounds. Independent Java and Scala clients consume original Rust artifacts and
+Scala's separately rebuilt from-TASTy classes with verification enabled. Original
+artifact hashes remain unchanged.
+
+The dedicated target has 12 tests, including exact Z/I/J/F/D descriptors, load/store
+and return instructions and complete stack-map frame offsets/locals/stacks; fresh
+session byte determinism; read-only malformed literal/type/guard/join/case-edge and
+foreign-binder rejection; cyclic/oversized alternatives; explicit method-only
+validation and encoding budgets; and partial/guard-only/Int/singleton exclusions.
+Lowest-layer pickler tests preserve literal order, nested duplicate alternatives
+and reject partial or guarded-only coverage. A direct source-to-JVM fixture runs
+independently of TASTy production.
+
+The final serial Scala/JDK target measured 6.85 seconds locally. CI requires the
+new target in the JDK job and strict TASTy shard 2; the independent inventory now
+contains 38 targets. Historical target measurements and existing shard assignments
+are preserved.
+
+Local repository checks passed 8,618 workspace tests (57 existing ignored tests)
+and 44 all-feature doctests using Rust 1.98.1 and Temurin 21.0.13. Formatting,
+frontend dependency boundaries, Clippy/rustdoc with warnings denied, the standalone
+compiler client, strict inventory/timing tests, workflow lint and diff checks
+passed. Local workspace checks used a 65,536-file process limit for the existing
+parallel JMOD tests; no classloader behavior or expectations changed.
+
+All 38 strict TASTy targets passed across four local shards, with the constructor
+alias, loader rejection, dual-reference reader and mandatory JVM verifier/execution
+follow-ups passing as well. The strict aggregate passed. Initial shard runs exposed
+two additional historical tests classifying these exhaustive Boolean shapes as
+unsupported; those entries now exercise genuinely partial coverage, while the
+supported shapes are independently covered by the new positive target. The affected
+shards passed in full after that intentional expectation update.
