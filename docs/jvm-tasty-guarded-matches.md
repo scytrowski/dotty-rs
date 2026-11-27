@@ -103,3 +103,6 @@ cargo test --test jvm_tasty_guarded_matches --locked -- --nocapture --test-threa
 With the external gates required, all 11 tests pass. The target is included in
 the mandatory JDK workflow and in strict Scala shard 3; all four shards and the
 aggregate/follow-up gates remain required. No full hosted Scala corpus is added.
+
+The later [Boolean-match contract](jvm-tasty-boolean-matches.md) extends the
+selector/pattern family while preserving ordered cases and the final fallback.

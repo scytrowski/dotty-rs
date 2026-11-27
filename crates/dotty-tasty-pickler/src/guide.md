@@ -45,29 +45,29 @@ shapes independently. This crate performs no filesystem publication.
 ## Bounded primitive expressions
 
 Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
-Int-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
+Int/Boolean-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
 final unguarded irrefutable case and support Int/Boolean/Unit/Long/Float/Double results;
-guards and canonical Int binders follow the contract below. Extractors remain
+guards and canonical Int/Boolean binders follow the contract below. Extractors remain
 unsupported. Int `&` and equality/inequality between Int
 operands use Scala 3.9 signed primitive selections. Source Any equality symbols
 remain canonical; only their validated Int application is specialized to the
 Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
 bindings, including declarations whose Int type was inferred by the typer.
 
-Guarded Int matches preserve optional guards as the final CASEDEF child, after
+Guarded Int/Boolean matches preserve optional guards as the final CASEDEF child, after
 pattern and body. Pattern bindings arrive through
 `SourceTypedBindings::pattern_value_bindings`, using the exact source/typed,
 symbol and case-scope tuple from the frontend. The producer emits BIND labels
 and direct symbol references, validates visibility independently per case, and
 rejects missing, duplicate, stale or cross-case binding evidence without store
-mutation. The subset includes variable roots and explicit bindings over Int
+mutation. The subset includes variable roots and explicit bindings over Int/Boolean
 literals or wildcards, with a final unguarded irrefutable case.
 
 Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long/Float/Double
 methods. RETURN references the exact current method declaration. A bounded
 read-only flow validator separates normal completion from a proven local exit;
 it does not interpret arbitrary Nothing-typed expressions as supported returns.
-Blocks, If, While and Int matches retain their source/typed bindings, including
+Blocks, If, While and Int/Boolean matches retain their source/typed bindings, including
 the typer's checked Unit adaptation for an If without else. Bare return uses the
 actual synthetic Unit value already supplied by the typer. Non-local targets,
 returns in lambdas/local definitions and reference results remain
@@ -92,13 +92,13 @@ Scala numeric raw printer is not used as the value oracle.
 
 ## Literal alternative patterns
 
-Int matches also preserve literal alternatives as nested ALTERNATIVE nodes.
+Int/Boolean matches also preserve literal alternatives as nested ALTERNATIVE nodes.
 Validation checks every original source/typed child edge, literal payload,
 constant type, source order and span, with the existing expression budgets.
 Parentheses retain their real source bindings. Guards remain the final CASEDEF
 child after its one pattern and body. Nested alternatives and duplicates are
 supported; wildcards or bindings inside alternatives, bindings around them and
-non-Int selectors are rejected. No semantic-store mutation or partial complete
+selectors other than Int/Boolean are rejected. No semantic-store mutation or partial complete
 artifact escapes validation failure.
 
 ## Bounded floating method values
@@ -118,3 +118,17 @@ ascriptions remain unsupported in this paired producer slice. Independent JVM
 support does not expand this contract. Runtime NaN checks establish classification;
 raw codec bit preservation does not promise payload fidelity through arbitrary
 JVM execution. Failed validation is read-only and emits no partial complete file.
+
+## Boolean-selector matches
+
+Boolean selectors reuse the existing MATCH/CASEDEF structure with literal
+TRUEconst/FALSEconst patterns, BIND declarations and nested ALTERNATIVE nodes.
+Selectors may be literals, formals, visible canonical pattern bindings or the
+already supported Boolean condition expressions. Case bindings are visible only
+within their guard/body, including inner matches; repeated spelling never merges
+symbols or scopes. Constant-selector binder types retain their exact Boolean
+singleton payload. Exactly one final unguarded irrefutable case is required,
+even after exhaustive literal alternatives. Ordinary Boolean ValDef locals,
+arbitrary Boolean-returning calls, general Boolean blocks, typed/extractor
+patterns and matches without this fallback remain unsupported. Complete paired
+output checks declaration/symbol/case/scope agreement with the JVM local plan.

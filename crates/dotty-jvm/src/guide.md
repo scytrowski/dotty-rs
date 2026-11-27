@@ -35,12 +35,12 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
-Int operands. Int-selector matches accept ordered Int literals, literal alternatives and exactly one
+Int operands. Int/Boolean-selector matches accept literals of the selector type, literal alternatives and exactly one
 final unguarded irrefutable case, with Int/Boolean/Unit/Long/Float/Double results. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
-Guards and immutable Int binders are supported; extractors, type tests and missing unconditional fallback cases return typed errors.
+Guards and immutable Int/Boolean binders are supported; extractors, type tests and missing unconditional fallback cases return typed errors.
 The semantic TASTy producer retains these source constructs separately; a
 successful JVM emission alone does not certify a paired artifact.
 
@@ -52,7 +52,7 @@ and removes case-local initialization facts before the next case and match join.
 ## Local primitive method returns
 
 Ordinary planned methods with Int, Boolean, Unit, Long, Float or Double results can return directly
-or from blocks, If branches, While bodies and supported Int matches. A local
+or from blocks, If branches, While bodies and supported Int/Boolean matches. A local
 return emits the method's exact primitive return instruction. All-returning
 branches contribute no join value or trailing epilogue. A block may retain
 the primitive type of an unreachable tail; lowering still validates that tail
@@ -71,8 +71,8 @@ arithmetic, conversions or category-two discard operations.
 Literal alternatives such as `case 0 | 1` can be nested or parenthesized and
 retain source case order. Each case has one shared guard/body: even duplicate
 matching alternatives evaluate the guard once, and a false guard skips the case.
-Alternative leaves must be Int literals; bindings over/inside alternatives,
-wildcards inside alternatives, and non-Int selectors remain unsupported.
+Alternative leaves must be literals of the selector type; bindings over/inside alternatives,
+wildcards inside alternatives, and selectors other than Int/Boolean remain unsupported.
 The existing expression depth/node budgets apply to every alternative descendant.
 
 ## Floating method values
@@ -87,3 +87,15 @@ verifier tag 3 entry. These are distinct from Integer/tag 1 and Long/tag 4.
 Floating arithmetic, conversions, selectors and category-two discard remain
 outside this increment. Paired TASTy support covers method values and control
 flow, with narrower field/call support than this independent JVM backend.
+
+## Boolean-selector matches
+
+Boolean matches reuse the ordered Int matcher, while validating the semantic
+selector family separately from its Integer JVM verification category. `true`
+and `false` patterns use exact Boolean singleton types; wildcard and immutable
+case bindings retain canonical Boolean types and case scopes. Nested Boolean/Int
+matches, short-circuit selectors/guards and all existing primitive results are
+supported. Exactly one final unconditional wildcard or variable case is required,
+even after `true | false`; this is not general exhaustiveness or MatchError
+lowering. Paired TASTy production still excludes ordinary Boolean ValDef locals,
+general Boolean blocks and arbitrary Boolean-returning calls.
