@@ -1319,6 +1319,27 @@ impl Validator<'_, '_> {
                         reason: crate::ReferenceError::Owner,
                     });
                 }
+                // Boolean pattern locals have already been authenticated by the
+                // exact case proof. Ordinary Boolean declarations remain unsupported.
+                if self.registered_local_symbols.contains(symbol) {
+                    self.kind(*symbol, SymbolKind::Local)?;
+                    self.owner(*symbol, Some(method.symbol))?;
+                    let value_type = self.complete(*symbol)?;
+                    if !self.visible_locals.contains(symbol)
+                        || self.symbol(*symbol)?.name != source.name
+                        || (value_type != self.plan.definitions.boolean
+                            && !matches!(
+                                self.ty(value_type)?,
+                                Type::Constant(Constant::Boolean(_))
+                            ))
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: *symbol,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
+                    return Ok(());
+                }
                 self.kind(*symbol, SymbolKind::Parameter)?;
                 self.owner(*symbol, Some(method.symbol))?;
                 if !method
@@ -1909,6 +1930,12 @@ impl Validator<'_, '_> {
                     let type_matches = (result_type == p.definitions.int
                         && (local_type == p.definitions.int
                             || matches!(self.ty(local_type)?, Type::Constant(Constant::Int(_)))))
+                        || (result_type == p.definitions.boolean
+                            && (local_type == p.definitions.boolean
+                                || matches!(
+                                    self.ty(local_type)?,
+                                    Type::Constant(Constant::Boolean(_))
+                                )))
                         || self.same_planned_sibling_class_type(local_type, result_type);
                     if !type_matches
                         || self.symbol(*target)?.name != source_ident.name

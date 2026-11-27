@@ -330,7 +330,7 @@ fn unsupported_alternative_shapes_never_publish_an_artifact_pair() {
         "def f(x: Int): Int = x match { case 0 | 1 => 1 }",
         "def f(x: Int, flag: Boolean): Int = x match { case 0 | 1 if flag => 1 }",
         "def f(x: Long): Int = x match { case 0L | 1L => 1; case _ => 2 }",
-        "def f(x: Boolean): Int = x match { case true | false => 1; case _ => 2 }",
+        "def f(x: Boolean): Int = x match { case true | false => 1 }",
     ] {
         let source = format!("package example; class AlternativeMatches {{ {method} }}");
         let error = emit_paired_jvm_tasty_class(
@@ -447,7 +447,7 @@ fn forged_alternative_edges_values_and_types_are_rejected_read_only() {
                         "{mode}: {error:?}"
                     ),
                     3 => assert!(
-                        matches!(error, PickleError::Unsupported { .. }),
+                        matches!(error, PickleError::BodyType { .. }),
                         "{mode}: {error:?}"
                     ),
                     5 | 6 => assert!(

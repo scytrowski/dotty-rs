@@ -118,13 +118,36 @@ impl Validator<'_, '_> {
         if source_match.cases.is_empty() || source_match.cases.len() != typed_match.cases.len() {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
-        self.validate_int_expression(
-            source_match.selector,
-            typed_match.selector,
-            method,
-            depth + 1,
-            visited,
-        )?;
+        let selector =
+            p.typed_ast
+                .try_get(typed_match.selector)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_match.selector,
+                })?;
+        let selector_type = self
+            .primitive_flow_type(selector.ty)?
+            .filter(|ty| *ty == p.definitions.int || *ty == p.definitions.boolean)
+            .ok_or(PickleError::BodyType {
+                tree: typed_match.selector,
+                ty: selector.ty,
+            })?;
+        if selector_type == p.definitions.int {
+            self.validate_int_expression(
+                source_match.selector,
+                typed_match.selector,
+                method,
+                depth + 1,
+                visited,
+            )?;
+        } else {
+            self.validate_if_condition(
+                source_match.selector,
+                typed_match.selector,
+                method,
+                depth + 1,
+                visited,
+            )?;
+        }
         let mut all_exit = returning;
         let mut semantic_join = None;
         for (ordinal, (&source_case, &typed_case)) in source_match
@@ -164,9 +187,10 @@ impl Validator<'_, '_> {
                 );
             }
             let visible = self.visible_locals.clone();
-            let wildcard = self.validate_int_case_pattern(
+            let wildcard = self.validate_case_pattern(
                 source_case.pattern,
                 case.pattern,
+                selector_type,
                 method,
                 depth + 2,
                 visited,
@@ -228,10 +252,12 @@ impl Validator<'_, '_> {
         Ok(all_exit)
     }
 
-    fn validate_int_case_pattern(
+    #[allow(clippy::too_many_arguments)]
+    fn validate_case_pattern(
         &mut self,
         source_id: TreeId<Untyped>,
         typed_id: TreeId<Typed>,
+        selector_type: TypeId,
         method: &MethodPicklePlan,
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
@@ -254,7 +280,7 @@ impl Validator<'_, '_> {
                 &typed.kind,
                 TreeKind::Alternative(_)
                     | TreeKind::Literal(dotty_core::ast::Literal {
-                        value: Constant::Int(_)
+                        value: Constant::Int(_) | Constant::Boolean(_)
                     })
             )
         {
@@ -264,9 +290,10 @@ impl Validator<'_, '_> {
             self.source_typed_binding(source_id, typed_id)?;
             self.span(source.position)?;
             self.charge(1)?;
-            return self.validate_int_case_pattern(
+            return self.validate_case_pattern(
                 parens.inner,
                 typed_id,
+                selector_type,
                 method,
                 depth + 1,
                 visited,
@@ -286,7 +313,7 @@ impl Validator<'_, '_> {
                     expected: SourceRole::Body,
                 });
             };
-            if typed.ty != p.definitions.int {
+            if typed.ty != selector_type {
                 return Err(PickleError::BodyType {
                     tree: typed_id,
                     ty: typed.ty,
@@ -317,7 +344,15 @@ impl Validator<'_, '_> {
                 .zip(alternative.alternatives.iter().copied())
                 .collect();
             for (source, typed) in children {
-                self.validate_int_case_pattern(source, typed, method, depth + 1, visited, true)?;
+                self.validate_case_pattern(
+                    source,
+                    typed,
+                    selector_type,
+                    method,
+                    depth + 1,
+                    visited,
+                    true,
+                )?;
             }
             return Ok(false);
         }
@@ -346,8 +381,7 @@ impl Validator<'_, '_> {
                 || !symbol.flags.is_empty()
                 || !symbol.annotations.is_empty()
                 || symbol.visibility != Visibility::Public
-                || (value_type != p.definitions.int
-                    && !matches!(self.ty(value_type)?, Type::Constant(Constant::Int(_))))
+                || !self.match_pattern_type(value_type, selector_type)?
                 || !matches!(self.ty(typed.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(target) } if *target == binding.symbol && *prefix == p.definitions.no_prefix)
                 || !p.store.scopes.contains(binding.scope)
                 || p.store.scopes.get(binding.scope).owner != Some(method.symbol)
@@ -402,9 +436,10 @@ impl Validator<'_, '_> {
                         return Err(self
                             .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
                     }
-                    self.validate_int_case_pattern(
+                    self.validate_case_pattern(
                         source_bind.body,
                         bind.body,
+                        selector_type,
                         method,
                         depth + 1,
                         visited,
@@ -426,8 +461,7 @@ impl Validator<'_, '_> {
             self.source_typed_binding(source_id, typed_id)?;
             self.paired_source_typed_span(source.position, typed.position, typed_id)?;
             if !matches!((&source.kind, &typed.kind), (TreeKind::Ident(a), TreeKind::Ident(b)) if a.name == b.name && !a.backquoted)
-                || (typed.ty != p.definitions.int
-                    && !matches!(self.ty(typed.ty)?, Type::Constant(Constant::Int(_))))
+                || !self.match_pattern_type(typed.ty, selector_type)?
             {
                 return Err(PickleError::BodyType {
                     tree: typed_id,
@@ -439,12 +473,33 @@ impl Validator<'_, '_> {
             }
             return Ok(true);
         }
-        if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)))
+        if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_) | Constant::Boolean(_)))
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
-        self.validate_int_expression(source_id, typed_id, method, depth, visited)?;
+        if !self.match_pattern_type(typed.ty, selector_type)? {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed.ty,
+            });
+        }
+        if selector_type == p.definitions.int {
+            self.validate_int_expression(source_id, typed_id, method, depth, visited)?;
+        } else {
+            self.validate_if_condition(source_id, typed_id, method, depth, visited)?;
+        }
         Ok(false)
+    }
+
+    fn match_pattern_type(&self, ty: TypeId, selector_type: TypeId) -> Result<bool, PickleError> {
+        Ok(ty == selector_type
+            || match self.ty(ty)? {
+                Type::Constant(Constant::Int(_)) => selector_type == self.plan.definitions.int,
+                Type::Constant(Constant::Boolean(_)) => {
+                    selector_type == self.plan.definitions.boolean
+                }
+                _ => false,
+            })
     }
 
     fn validate_match_body(
