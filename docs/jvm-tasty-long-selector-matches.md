@@ -60,3 +60,27 @@ and confirms the original class/TASTy hashes remain unchanged.
 Scala-produced reference evidence is separate from acceptance of Rust output.
 Extend the existing mandatory `jvm_tasty_long_values` target and independent
 `jvm_source_compilation` JVM target rather than create a new strict shard target.
+
+## Implemented verification
+
+The real source pipeline passes the independent 1122-check Java client without
+producing TASTy. Paired Rust output passes the four original/from-TASTy Java and
+Scala consumer runs, with original artifact hashes unchanged. Fresh sessions
+produce identical class and TASTy bytes. Rust preserves 55 MATCH, 93 CASEDEF,
+38 BIND, 23 pattern TYPED plus two expression ascriptions, and 15 RETURN nodes.
+
+Focused tests pin LCmp opcode 0x94, physical stack depth four, signed comparison
+results, exact descriptors/instructions/frames and two-slot selector/binder
+layouts. They reject mismatched full-width constants, partial matches, forged
+source edges, malformed type trees and cross-case binding evidence without
+mutating canonical stores. Expression budgets and atomic local-slot exhaustion
+remain explicit. Singleton binder types and references retain all 64 bits.
+
+The existing mandatory Long target now runs 23 tests. With JDK 21, pinned Scala
+3.9 and serial libtest execution it measured 11.88 seconds locally. The strict
+inventory remains 38 targets with unchanged assignments; shard 3's estimate
+includes the increase. LCmp follows the Java 21 [instruction contract](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lcmp).
+
+The full workspace check passes 8670 tests (57 existing ignored) and 44
+all-feature doctests. Formatting, frontend dependency boundaries, Clippy and
+rustdoc with warnings denied also pass.

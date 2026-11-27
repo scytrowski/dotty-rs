@@ -1,5 +1,8 @@
 # Source semantic TASTy pickler: minimal Scala 3.9 contract
 
+Long selectors, full-width literal comparisons and canonical Long case binders
+in both outputs follow [the Long-selector contract](jvm-tasty-long-selector-matches.md).
+
 Same-type Int/Boolean typed wildcard and binder patterns in both output paths
 are covered by [the typed primitive pattern contract](jvm-tasty-typed-primitive-patterns.md).
 

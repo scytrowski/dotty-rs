@@ -3599,10 +3599,10 @@ impl CfgCodeAnalyzer {
     /// width, retained class evidence, and hierarchy depth. An incompatible
     /// stack state fails explicitly instead of growing a cycle.
     ///
-    /// This compatibility entry point supports integer constants, integer
-    /// local loads/stores, `dup`, integer arithmetic/comparisons, gotos, and
-    /// `return`/`ireturn`. Reference, category-two, floating-point, exception,
-    /// and switch flows are not supported. Use
+    /// This compatibility entry point supports primitive constants, primitive
+    /// local loads/stores and returns, `dup`/`pop` for category-one values,
+    /// integer arithmetic/comparisons, signed Long `lcmp`, and gotos.
+    /// Reference, exception and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
     /// receiver moves, primitive field accesses, and exact `invokevirtual`
     /// calls with supported object, int-like, or Long descriptors. Null is preserved as

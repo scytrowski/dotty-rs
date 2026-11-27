@@ -699,7 +699,7 @@ fn malformed_long_patterns_preserve_full_value_and_source_identity_read_only() {
                 assert!(
                     match mode {
                         0 | 4 | 5 => matches!(error, PickleError::BodyType { .. }),
-                        1 | 2 | 3 => matches!(error, PickleError::SourceShape { .. }),
+                        1..=3 => matches!(error, PickleError::SourceShape { .. }),
 
                         _ => false,
                     },
