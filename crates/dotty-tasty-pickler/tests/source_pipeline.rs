@@ -5052,3 +5052,113 @@ fn boolean_selector_matches_emit_exact_literal_patterns_in_method_plans() {
         [ConstantValue::Boolean(true), ConstantValue::Boolean(false)]
     );
 }
+
+#[test]
+fn boolean_locals_preserve_valdef_order_and_exact_direct_reference() {
+    use dotty_tasty::tasty::*;
+    let source = "package example\nclass BooleanLocals:\n  def copy(x: Boolean): Boolean = { val first: Boolean = x; val second = !first; second }\n";
+    let (_, output) = source_outputs_named(source, "BooleanLocals.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let RawTree::LengthNode(body) = index
+        .get(output.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap()
+        .rhs
+        .unwrap()
+    else {
+        panic!()
+    };
+    let body = body.decode_block().unwrap();
+    assert_eq!(body.stats.len(), 2);
+    let mut declaration_addresses = Vec::new();
+    for (stat, expected_name) in body.stats.iter().zip(["first", "second"]) {
+        let RawTree::LengthNode(node) = stat else {
+            panic!()
+        };
+        let DefinitionBody::ValDef { name, .. } = node.decode_definition_body().unwrap() else {
+            panic!()
+        };
+        assert_eq!(file.names().get_utf8(name).unwrap(), expected_name);
+        declaration_addresses.push(
+            index
+                .iter_nodes_with_tag(VALDEF_TAG)
+                .find(|n| {
+                    let DefinitionBody::ValDef { name, .. } = index
+                        .get(n.offset as u32)
+                        .unwrap()
+                        .decode_definition_body()
+                        .unwrap()
+                    else {
+                        panic!()
+                    };
+                    file.names().get_utf8(name).unwrap() == expected_name
+                })
+                .unwrap()
+                .offset as u32,
+        );
+    }
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFDIRECT_TAG,
+        value: TermValue::AstRef(target),
+        ..
+    }) = body.expression
+    else {
+        panic!()
+    };
+    assert_eq!(target, declaration_addresses[1]);
+    assert_ne!(declaration_addresses[0], declaration_addresses[1]);
+}
+
+#[test]
+fn boolean_local_missing_proof_and_forged_type_are_rejected_read_only() {
+    let source = "package example\nclass BooleanLocals:\n  def copy(x: Boolean): Boolean = { val flag: Boolean = x; flag }\n";
+    let missing = source_outputs_named(source, "BooleanLocals.scala", |plan| {
+        plan.local_values = &[];
+    })
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+    let mut changed = None;
+    let wrong_type = source_outputs_named_with_tree_edits(
+        source,
+        "BooleanLocals.scala",
+        ValidationLimits::default(),
+        |_, typed, _, store| {
+            let id = typed
+                .iter()
+                .find_map(|(id, n)| matches!(n.kind, TreeKind::ValDef(_)).then_some(id))
+                .unwrap();
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(formal),
+                ..
+            } = store.types.get(
+                typed
+                    .iter()
+                    .find_map(|(_, n)| matches!(n.kind, TreeKind::Ident(_)).then_some(n.ty))
+                    .unwrap(),
+            )
+            else {
+                panic!()
+            };
+            assert_eq!(store.symbols.get(*formal).kind, SymbolKind::Parameter);
+            // A read's TermRef cannot replace the declaration's canonical value type.
+            let wrong = typed
+                .iter()
+                .find_map(|(_, n)| matches!(n.kind, TreeKind::Ident(_)).then_some(n.ty))
+                .unwrap();
+            typed.get_mut(id).ty = wrong;
+            changed = Some((id, wrong));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    let (tree, ty) = changed.unwrap();
+    assert_eq!(wrong_type, PickleError::BodyType { tree, ty });
+}

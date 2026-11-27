@@ -1211,6 +1211,28 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if matches!(
+            (&source.kind, &typed.kind),
+            (TreeKind::If(_), TreeKind::If(_)) | (TreeKind::Block(_), TreeKind::Block(_))
+        ) {
+            // A Boolean value/condition may contain ordinary control flow, but
+            // cannot return through an enclosing initializer, operator or guard.
+            if self.contains_local_return(source_id, typed_id) {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return self
+                .validate_return_flow(
+                    source_id,
+                    typed_id,
+                    method,
+                    self.plan.definitions.boolean,
+                    depth,
+                    visited,
+                )
+                .map(|_| ());
+        }
         if matches!(source.kind, TreeKind::Match(_)) && matches!(typed.kind, TreeKind::Match(_)) {
             return self.validate_primitive_match(
                 source_id,
@@ -1319,8 +1341,8 @@ impl Validator<'_, '_> {
                         reason: crate::ReferenceError::Owner,
                     });
                 }
-                // Boolean pattern locals have already been authenticated by the
-                // exact case proof. Ordinary Boolean declarations remain unsupported.
+                // Ordinary and pattern locals are authenticated by their exact
+                // declaration proof before they become visible here.
                 if self.registered_local_symbols.contains(symbol) {
                     self.kind(*symbol, SymbolKind::Local)?;
                     self.owner(*symbol, Some(method.symbol))?;
@@ -1752,6 +1774,16 @@ impl Validator<'_, '_> {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
             return self.validate_numeric_value(rhs, body, method, result_type, depth, seen);
+        }
+        if result_type == p.definitions.boolean
+            && matches!(
+                (&source_rhs.kind, &node.kind),
+                (TreeKind::If(_), TreeKind::If(_)) | (TreeKind::Block(_), TreeKind::Block(_))
+            )
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_if_condition(rhs, body, method, depth, seen);
         }
         if matches!(source_rhs.kind, TreeKind::Match(_)) && matches!(node.kind, TreeKind::Match(_))
         {
