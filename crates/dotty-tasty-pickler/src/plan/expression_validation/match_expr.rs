@@ -150,6 +150,7 @@ impl Validator<'_, '_> {
         }
         let mut all_exit = returning;
         let mut semantic_join = None;
+        let mut boolean_coverage = 0u8;
         for (ordinal, (&source_case, &typed_case)) in source_match
             .cases
             .iter()
@@ -187,7 +188,7 @@ impl Validator<'_, '_> {
                 );
             }
             let visible = self.visible_locals.clone();
-            let wildcard = self.validate_case_pattern(
+            let (wildcard, coverage) = self.validate_case_pattern(
                 source_case.pattern,
                 case.pattern,
                 selector_type,
@@ -197,7 +198,14 @@ impl Validator<'_, '_> {
                 false,
             )?;
             let last = ordinal + 1 == source_match.cases.len();
-            if (wildcard && case.guard.is_none()) != last {
+            if case.guard.is_none() {
+                boolean_coverage |= coverage;
+            }
+            let fallback = wildcard && case.guard.is_none();
+            let exhaustive_boolean = selector_type == p.definitions.boolean
+                && case.guard.is_none()
+                && boolean_coverage == 3;
+            if (fallback && !last) || (last && !fallback && !exhaustive_boolean) {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
@@ -261,6 +269,8 @@ impl Validator<'_, '_> {
         Ok(all_exit)
     }
 
+    // Return irrefutability and a two-bit Boolean coverage summary obtained
+    // during the same authenticated, budgeted traversal (false=1, true=2).
     #[allow(clippy::too_many_arguments)]
     fn validate_case_pattern(
         &mut self,
@@ -271,7 +281,7 @@ impl Validator<'_, '_> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
         literal_only: bool,
-    ) -> Result<bool, PickleError> {
+    ) -> Result<(bool, u8), PickleError> {
         if depth > self.limits.expression_depth_limit() {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::ExpressionDepth,
@@ -352,8 +362,9 @@ impl Validator<'_, '_> {
                 .copied()
                 .zip(alternative.alternatives.iter().copied())
                 .collect();
+            let mut coverage = 0;
             for (source, typed) in children {
-                self.validate_case_pattern(
+                let (_, child_coverage) = self.validate_case_pattern(
                     source,
                     typed,
                     selector_type,
@@ -362,8 +373,9 @@ impl Validator<'_, '_> {
                     visited,
                     true,
                 )?;
+                coverage |= child_coverage;
             }
-            return Ok(false);
+            return Ok((false, coverage));
         }
         if let TreeKind::Bind(bind) = typed.kind {
             self.charge(1)?;
@@ -408,7 +420,7 @@ impl Validator<'_, '_> {
                     symbol: binding.symbol,
                 });
             }
-            let wildcard = match &source.kind {
+            let coverage = match &source.kind {
                 TreeKind::Ident(ident)
                     if !ident.backquoted
                         && ident.name == bind.name
@@ -433,7 +445,7 @@ impl Validator<'_, '_> {
                             ty: child.ty,
                         });
                     }
-                    true
+                    (true, 3)
                 }
                 TreeKind::Bind(source_bind)
                     if !source_bind.given && source_bind.name == bind.name =>
@@ -462,7 +474,7 @@ impl Validator<'_, '_> {
                 }
             };
             self.visible_locals.insert(binding.symbol);
-            return Ok(wildcard);
+            return Ok(coverage);
         }
         if matches!(&typed.kind, TreeKind::Ident(ident) if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
         {
@@ -480,7 +492,7 @@ impl Validator<'_, '_> {
             if !visited.insert(typed_id) {
                 return Err(PickleError::RepeatedExpression { tree: typed_id });
             }
-            return Ok(true);
+            return Ok((true, 3));
         }
         if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_) | Constant::Boolean(_)))
         {
@@ -497,7 +509,19 @@ impl Validator<'_, '_> {
         } else {
             self.validate_if_condition(source_id, typed_id, method, depth, visited)?;
         }
-        Ok(false)
+        let coverage = match &typed.kind {
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Boolean(value),
+            }) => {
+                if *value {
+                    2
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        };
+        Ok((false, coverage))
     }
 
     fn match_pattern_type(&self, ty: TypeId, selector_type: TypeId) -> Result<bool, PickleError> {
