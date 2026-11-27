@@ -5774,6 +5774,105 @@ mod tests {
         }
     }
 
+    fn long_alternative_match_fixture() -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
+        let (mut f, root, pattern) = alternative_match_fixture();
+        let TreeKind::Match(matched) = f.ast.get(root).kind.clone() else {
+            panic!()
+        };
+        let singleton = f.store.types.alloc(Type::Constant(Constant::Long(1)));
+        f.ast.get_mut(matched.selector).kind = TreeKind::Literal(dotty_core::ast::Literal {
+            value: Constant::Long(1),
+        });
+        f.ast.get_mut(matched.selector).ty = singleton;
+        f.ast.get_mut(pattern).ty = f.definitions.long;
+        let TreeKind::Alternative(alternative) = f.ast.get(pattern).kind.clone() else {
+            panic!()
+        };
+        for (value, leaf) in alternative.alternatives.into_iter().enumerate() {
+            f.ast.get_mut(leaf).kind = TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Long(value as i64),
+            });
+            f.ast.get_mut(leaf).ty = f
+                .store
+                .types
+                .alloc(Type::Constant(Constant::Long(value as i64)));
+        }
+        let TreeKind::CaseDef(last) = f.ast.get(*matched.cases.last().unwrap()).kind else {
+            panic!()
+        };
+        f.ast.get_mut(last.pattern).ty = f.definitions.long;
+        (f, root, pattern)
+    }
+
+    #[test]
+    fn long_alternatives_use_lcmp_and_one_two_slot_selector_temporary() {
+        let (f, root, _) = long_alternative_match_fixture();
+        let layout = JvmLocalLayout {
+            method: f.method.symbol(),
+            locals: vec![],
+            by_symbol: Default::default(),
+            max_locals: 1,
+        };
+        let mut context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+        context.local_layout = Some(&layout);
+        let mut code = CodeBuilder::new();
+        assert_eq!(
+            emit_expression(&mut context, root, &mut code, 0).unwrap(),
+            Flow::Value(JvmType::Int)
+        );
+        assert_eq!(context.temporary_local_slots, 0);
+        code.ireturn().unwrap();
+        assert_eq!(
+            method_body_bytes(&f, code),
+            [
+                0x0a, 0x40, 0x1f, 0x09, 0x94, 0x99, 0, 9, 0x1f, 0x0a, 0x94, 0x9a, 0, 8, 0x10, 10,
+                0xa7, 0, 5, 0x10, 20, 0xac
+            ]
+        );
+    }
+
+    #[test]
+    fn long_pattern_literal_authenticates_all_bits_read_only() {
+        let (mut f, root, pattern) = long_alternative_match_fixture();
+        let TreeKind::Alternative(alternative) = f.ast.get(pattern).kind.clone() else {
+            panic!()
+        };
+        let leaf = alternative.alternatives[1];
+        f.ast.get_mut(leaf).ty = f
+            .store
+            .types
+            .alloc(Type::Constant(Constant::Long(4_294_967_297)));
+        let before = format!("{:?}{:?}", f.store, f.ast);
+        assert_eq!(
+            lower_expression(&f.store, &f.ast, &f.definitions, &f.method, root).unwrap_err(),
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: leaf,
+                node: "inconsistent Long match literal"
+            }
+        );
+        assert_eq!(format!("{:?}{:?}", f.store, f.ast), before);
+    }
+
+    #[test]
+    fn long_selector_temporary_rejects_half_available_slot_atomically() {
+        let (f, root, _) = long_alternative_match_fixture();
+        let layout = JvmLocalLayout {
+            method: f.method.symbol(),
+            locals: vec![],
+            by_symbol: Default::default(),
+            max_locals: u16::MAX - 1,
+        };
+        let mut context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+        context.local_layout = Some(&layout);
+        assert_eq!(
+            emit_expression(&mut context, root, &mut CodeBuilder::new(), 0).unwrap_err(),
+            JvmCodegenError::TooManyLocalSlots {
+                method: f.method.symbol()
+            }
+        );
+        assert_eq!(context.temporary_local_slots, 0);
+    }
+
     #[test]
     fn oversized_match_case_vectors_reject_before_following_case_ids() {
         let mut fixture = Fixture::new(&[]);
@@ -5805,17 +5904,13 @@ mod tests {
         );
     }
 
-    fn typed_pattern_fixture(boolean: bool) -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
+    fn typed_pattern_fixture(kind: JvmType) -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
         let mut fixture = Fixture::new(&[]);
-        let ty = if boolean {
-            fixture.definitions.boolean
-        } else {
-            fixture.definitions.int
-        };
-        let constant = if boolean {
-            Constant::Boolean(true)
-        } else {
-            Constant::Int(1)
+        let (ty, constant) = match kind {
+            JvmType::Int => (fixture.definitions.int, Constant::Int(1)),
+            JvmType::Boolean => (fixture.definitions.boolean, Constant::Boolean(true)),
+            JvmType::Long => (fixture.definitions.long, Constant::Long(1)),
+            _ => unreachable!(),
         };
         let singleton = fixture.store.types.alloc(Type::Constant(constant.clone()));
         let selector = fixture.literal(constant, singleton);
@@ -5861,8 +5956,8 @@ mod tests {
 
     #[test]
     fn same_type_primitive_patterns_lower_to_one_selector_store_without_runtime_test() {
-        for boolean in [false, true] {
-            let (fixture, root, _) = typed_pattern_fixture(boolean);
+        for kind in [JvmType::Int, JvmType::Boolean, JvmType::Long] {
+            let (fixture, root, _) = typed_pattern_fixture(kind);
             let layout = JvmLocalLayout {
                 method: fixture.method.symbol(),
                 locals: vec![],
@@ -5884,20 +5979,24 @@ mod tests {
             code.ireturn().unwrap();
             assert_eq!(
                 method_body_bytes(&fixture, code),
-                [0x04, 0x3c, 0x10, 7, 0xac]
+                if kind == JvmType::Long {
+                    [0x0a, 0x40, 0x10, 7, 0xac]
+                } else {
+                    [0x04, 0x3c, 0x10, 7, 0xac]
+                }
             );
         }
     }
 
     #[test]
     fn malformed_typed_primitive_patterns_reject_read_only() {
-        for boolean in [false, true] {
+        for kind in [JvmType::Int, JvmType::Boolean, JvmType::Long] {
             for mode in 0..8 {
-                let (mut fixture, root, pattern) = typed_pattern_fixture(boolean);
+                let (mut fixture, root, pattern) = typed_pattern_fixture(kind);
                 let TreeKind::Typed(value) = fixture.ast.get(pattern).kind else {
                     panic!()
                 };
-                let wrong = if boolean {
+                let wrong = if kind == JvmType::Boolean {
                     fixture.definitions.int
                 } else {
                     fixture.definitions.boolean
@@ -5931,11 +6030,14 @@ mod tests {
                     }
                     7 => {
                         fixture.ast.get_mut(value.expr).ty =
-                            fixture.store.types.alloc(Type::Constant(if boolean {
-                                Constant::Boolean(true)
-                            } else {
-                                Constant::Int(1)
-                            }))
+                            fixture
+                                .store
+                                .types
+                                .alloc(Type::Constant(if kind == JvmType::Boolean {
+                                    Constant::Boolean(true)
+                                } else {
+                                    Constant::Int(1)
+                                }))
                     }
                     _ => unreachable!(),
                 }
@@ -5961,7 +6063,7 @@ mod tests {
 
     #[test]
     fn typed_pattern_children_consume_depth_and_node_budgets() {
-        let (fixture, root, pattern) = typed_pattern_fixture(false);
+        let (fixture, root, pattern) = typed_pattern_fixture(JvmType::Int);
         let TreeKind::Typed(wrapper) = fixture.ast.get(pattern).kind else {
             panic!()
         };
