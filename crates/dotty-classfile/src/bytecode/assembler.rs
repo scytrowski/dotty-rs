@@ -458,6 +458,7 @@ fn write_instruction(
         Instruction::IAnd => writer.write_u1(0x7e),
         Instruction::IOr => writer.write_u1(0x80),
         Instruction::IXor => writer.write_u1(0x82),
+        Instruction::LCmp => writer.write_u1(0x94),
         Instruction::Dup => writer.write_u1(0x59),
         Instruction::Pop => writer.write_u1(0x57),
         Instruction::GetField(reference) => {
@@ -1150,6 +1151,22 @@ mod tests {
             [0x03, 0x99, 0x00, 0x06, 0x7e, 0x80, 0x82, 0xb1]
         );
         assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn lcmp_has_exact_opcode_and_labeled_layout() {
+        let pool = ConstantPool::default();
+        assert_eq!(assemble(&[Instruction::LCmp], &pool).unwrap(), [0x94]);
+        let mut sequence = super::super::CodeSequence::new();
+        let end = sequence.new_label().unwrap();
+        sequence.instruction(Instruction::LCmp);
+        sequence.branch(super::super::BranchInstruction::IfEq(end.clone()));
+        sequence.instruction(Instruction::LCmp);
+        sequence.bind(end).unwrap();
+        sequence.instruction(Instruction::IReturn);
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        assert_eq!(assembled.bytes, [0x94, 0x99, 0, 4, 0x94, 0xac]);
+        assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5]);
     }
 
     #[test]

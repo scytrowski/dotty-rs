@@ -573,6 +573,13 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Compares two signed longs, consuming four stack slots and pushing Int -1, 0 or 1.
+    /// The result describes the first operand relative to the second; comparison never overflows.
+    pub fn lcmp(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::LCmp);
+        Ok(self)
+    }
+
     /// Duplicates the top category-one value.
     pub fn dup(&mut self) -> Result<&mut Self, CodeBuilderError> {
         self.push(Instruction::Dup);

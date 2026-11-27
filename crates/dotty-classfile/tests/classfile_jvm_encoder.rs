@@ -3227,3 +3227,93 @@ fn tasty_linked_class_is_accepted_by_javap_and_jdk_verifier() {
     );
     assert!(String::from_utf8_lossy(&execution.stdout).contains("linked class verified"));
 }
+
+#[test]
+fn lcmp_preserves_signed_64_bit_comparisons_and_cfg_frames() {
+    let mut class = ClassFileBuilder::new(
+        "LongCompare",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    class
+        .add_static_method("compare", "(JJ)I", |code| {
+            code.lload(0)?.lload(2)?.lcmp()?.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_static_method("equal", "(JJ)Z", |code| {
+            let different = code.new_label()?;
+            code.lload(0)?.lload(2)?.lcmp()?.ifne(different.clone())?;
+            code.iconst(1)?.ireturn()?;
+            code.mark(different)?.iconst(0)?.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = class.encode().unwrap();
+    let decoded = decode_and_validate(&bytes);
+    let compare = code(&decoded.methods[0]);
+    assert_eq!(compare.code, [0x1e, 0x20, 0x94, 0xac]);
+    assert_eq!((compare.max_stack, compare.max_locals), (4, 4));
+    let equal = code(&decoded.methods[1]);
+    assert_eq!(
+        equal.code,
+        [0x1e, 0x20, 0x94, 0x9a, 0, 5, 0x04, 0xac, 0x03, 0xac]
+    );
+    assert_eq!((equal.max_stack, equal.max_locals), (4, 4));
+    assert!(equal.attributes.iter().any(|a| matches!(a, Attribute::Other(raw) if decoded.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))));
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    fs::write(directory.path().join("LongCompare.class"), bytes).unwrap();
+    let client = directory.path().join("LongCompareHarness.java");
+    fs::write(&client, r#"public class LongCompareHarness {
+      public static void main(String[] args) {
+        long[] values = {Long.MIN_VALUE, -4294967295L, -1L, 0L, 1L, 2147483648L, 4294967297L, Long.MAX_VALUE};
+        for (long a : values) for (long b : values) {
+          int expected = Long.compare(a, b);
+          if (LongCompare.compare(a, b) != expected) throw new AssertionError(a + " vs " + b);
+          if (LongCompare.equal(a, b) != (a == b)) throw new AssertionError("branch");
+        }
+        System.out.println("long comparison ok");
+      }
+    }"#).unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    let compiled = run(
+        "javac",
+        &[
+            "--release",
+            "21",
+            "-cp",
+            &path,
+            "-d",
+            &path,
+            client.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let output = run(
+        "java",
+        &["-Xverify:all", "-ea", "-cp", &path, "LongCompareHarness"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "long comparison ok"
+    );
+}

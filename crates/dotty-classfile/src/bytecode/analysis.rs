@@ -1988,6 +1988,11 @@ impl Frame {
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.push(instruction_index, ValueKind::Int)?;
             }
+            Instruction::LCmp => {
+                self.pop_expected(instruction_index, ValueKind::Long)?;
+                self.pop_expected(instruction_index, ValueKind::Long)?;
+                self.push(instruction_index, ValueKind::Int)?;
+            }
             Instruction::Dup => {
                 let top = *self.stack.last().ok_or(AnalysisError::StackUnderflow {
                     instruction: instruction_index,
@@ -4086,6 +4091,7 @@ fn validate_flow_instruction_with_context(
             | Instruction::IAnd
             | Instruction::IOr
             | Instruction::IXor
+            | Instruction::LCmp
             | Instruction::Dup
             | Instruction::Pop
             | Instruction::Return
@@ -9003,6 +9009,92 @@ mod tests {
                 available: 0,
             })
         );
+    }
+
+    #[test]
+    fn lcmp_obeys_physical_stack_slot_limit() {
+        let mut instructions = vec![Instruction::LConst(SmallLongConstant::Zero); 32_766];
+        instructions.extend([Instruction::LCmp, Instruction::IReturn]);
+        // The comparison reduces four physical slots to one; it does not mask
+        // overflow while loading its operands before the instruction is reached.
+        instructions.insert(0, Instruction::LConst(SmallLongConstant::Zero));
+        instructions.insert(0, Instruction::LConst(SmallLongConstant::Zero));
+        assert_eq!(
+            analyze("()I", true, &instructions, &ConstantPool::default()),
+            Err(AnalysisError::StackLimitExceeded {
+                instruction: 32_767,
+                slots: 65_536
+            })
+        );
+    }
+
+    #[test]
+    fn lcmp_consumes_two_longs_and_produces_one_int() {
+        let pool = ConstantPool::default();
+        let instructions = [
+            Instruction::LLoad(LocalIndex::new(0)),
+            Instruction::LLoad(LocalIndex::new(2)),
+            Instruction::LCmp,
+            Instruction::IReturn,
+        ];
+        let result = analyze("(JJ)I", true, &instructions, &pool).unwrap();
+        assert_eq!((result.max_stack, result.max_locals), (4, 4));
+        for (prefix, expected) in [
+            (
+                vec![],
+                AnalysisError::StackUnderflow {
+                    instruction: 0,
+                    needed: 1,
+                    available: 0,
+                },
+            ),
+            (
+                vec![Instruction::LConst(SmallLongConstant::Zero)],
+                AnalysisError::StackUnderflow {
+                    instruction: 1,
+                    needed: 1,
+                    available: 0,
+                },
+            ),
+            (
+                vec![
+                    Instruction::LConst(SmallLongConstant::Zero),
+                    Instruction::IConst(SmallIntConstant::One),
+                ],
+                AnalysisError::StackTypeMismatch {
+                    instruction: 2,
+                    expected: ValueKind::Long,
+                    actual: ValueKind::Int,
+                },
+            ),
+            (
+                vec![
+                    Instruction::IConst(SmallIntConstant::One),
+                    Instruction::LConst(SmallLongConstant::Zero),
+                ],
+                AnalysisError::StackTypeMismatch {
+                    instruction: 2,
+                    expected: ValueKind::Long,
+                    actual: ValueKind::Int,
+                },
+            ),
+        ] {
+            let mut sequence = CodeSequence::new();
+            for &instruction in &prefix {
+                sequence.instruction(instruction);
+            }
+            sequence
+                .instruction(Instruction::LCmp)
+                .instruction(Instruction::IReturn);
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            assert_eq!(
+                CfgCodeAnalyzer::analyze(&graph, "()I", true, &pool),
+                Err(expected.clone())
+            );
+            let mut instructions = prefix;
+            instructions.extend([Instruction::LCmp, Instruction::IReturn]);
+            assert_eq!(analyze("()I", true, &instructions, &pool), Err(expected));
+        }
     }
 
     #[test]
