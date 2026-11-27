@@ -1061,6 +1061,12 @@ fn emit_ascription(
         Flow::Value(JvmType::Boolean)
     } else if ty == defs.unit {
         Flow::Unit
+    } else if ty == defs.long {
+        Flow::Value(JvmType::Long)
+    } else if ty == defs.float {
+        Flow::Value(JvmType::Float)
+    } else if ty == defs.double {
+        Flow::Value(JvmType::Double)
     } else {
         return Err(JvmCodegenError::UnsupportedTypedExpression {
             tree,
@@ -5797,6 +5803,117 @@ mod tests {
                 limit: JVM_EXPRESSION_NODE_BUDGET
             }
         );
+    }
+
+    #[test]
+    fn numeric_ascriptions_preserve_exact_value_kind_and_instructions() {
+        for (kind, expected_bytes) in [
+            (JvmType::Long, &[0x0a, 0xad][..]),
+            (JvmType::Float, &[0x0c, 0xae][..]),
+            (JvmType::Double, &[0x0f, 0xaf][..]),
+        ] {
+            let mut fixture = Fixture::new(&[]);
+            let (ty, value) = match kind {
+                JvmType::Long => (fixture.definitions.long, Constant::Long(1)),
+                JvmType::Float => (
+                    fixture.definitions.float,
+                    Constant::FloatBits(1f32.to_bits()),
+                ),
+                JvmType::Double => (
+                    fixture.definitions.double,
+                    Constant::DoubleBits(1f64.to_bits()),
+                ),
+                _ => unreachable!(),
+            };
+            let expr = fixture.literal(value, ty);
+            let tpt = fixture.ast.alloc(Tree {
+                kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+                position: None,
+                ty,
+            });
+            let root = fixture.ast.alloc(Tree {
+                kind: TreeKind::Typed(dotty_core::ast::TypedExpr { expr, tpt }),
+                position: None,
+                ty,
+            });
+            fixture.set_result(JvmReturnType::Value(kind));
+            let mut context = JvmLoweringContext::new(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+            );
+            let mut code = CodeBuilder::new();
+            assert_eq!(
+                emit_expression(&mut context, root, &mut code, 0).unwrap(),
+                Flow::Value(kind)
+            );
+            match kind {
+                JvmType::Long => code.lreturn(),
+                JvmType::Float => code.freturn(),
+                JvmType::Double => code.dreturn(),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            assert_eq!(method_body_bytes(&fixture, code), expected_bytes);
+        }
+    }
+
+    #[test]
+    fn numeric_ascriptions_reject_inconsistent_type_trees_and_equal_width_operands() {
+        for (kind, wrong_kind) in [
+            (JvmType::Long, JvmType::Double),
+            (JvmType::Double, JvmType::Long),
+            (JvmType::Float, JvmType::Int),
+        ] {
+            for corrupt_tpt in [true, false] {
+                let mut fixture = Fixture::new(&[]);
+                let ty = match kind {
+                    JvmType::Long => fixture.definitions.long,
+                    JvmType::Double => fixture.definitions.double,
+                    _ => fixture.definitions.float,
+                };
+                let (wrong, value) = match wrong_kind {
+                    JvmType::Long => (fixture.definitions.long, Constant::Long(1)),
+                    JvmType::Double => (
+                        fixture.definitions.double,
+                        Constant::DoubleBits(1f64.to_bits()),
+                    ),
+                    _ => (fixture.definitions.int, Constant::Int(1)),
+                };
+                let expr = fixture.literal(value, wrong);
+                let tpt = fixture.ast.alloc(Tree {
+                    kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+                    position: None,
+                    ty: if corrupt_tpt { wrong } else { ty },
+                });
+                let root = fixture.ast.alloc(Tree {
+                    kind: TreeKind::Typed(dotty_core::ast::TypedExpr { expr, tpt }),
+                    position: None,
+                    ty,
+                });
+                let before = fixture.store.checkpoint();
+                assert_eq!(
+                    lower_expression(
+                        &fixture.store,
+                        &fixture.ast,
+                        &fixture.definitions,
+                        &fixture.method,
+                        root
+                    )
+                    .unwrap_err(),
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: root,
+                        node: if corrupt_tpt {
+                            "inconsistent ascription type tree"
+                        } else {
+                            "ascription operand type mismatch"
+                        },
+                    }
+                );
+                assert_eq!(before, fixture.store.checkpoint());
+            }
+        }
     }
 
     #[test]

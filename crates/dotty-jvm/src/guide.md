@@ -33,7 +33,7 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 
 ## Bounded primitive expression parity
 
-Planned methods also lower Int/Boolean/Unit ascriptions without runtime
+Planned methods also lower Int/Boolean/Unit/Long/Float/Double ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
 Int operands. Int/Boolean-selector matches accept literals of the selector type and
 literal alternatives, with Int/Boolean/Unit/Long/Float/Double results. Int matches

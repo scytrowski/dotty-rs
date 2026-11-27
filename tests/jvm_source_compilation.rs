@@ -32841,3 +32841,52 @@ fn exhaustive_boolean_matches_and_guard_effects_execute_on_jdk21() {
         "exhaustive boolean match oracle ok"
     );
 }
+
+#[test]
+fn numeric_ascriptions_preserve_values_and_effects_on_jdk21() {
+    let output = TestOutputDirectory::new("numeric-ascriptions");
+    let artifacts = compile_source_classes(
+        include_str!("fixtures/jvm_tasty_numeric_ascriptions/NumericAscriptions.scala"),
+        "NumericAscriptions.scala",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(artifacts.len(), 1);
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let client = output.path().join("JavaConsumer.java");
+    fs::write(
+        &client,
+        include_str!("fixtures/jvm_tasty_numeric_ascriptions/JavaConsumer.java"),
+    )
+    .unwrap();
+    let compile = Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(output.path())
+        .arg("JavaConsumer")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK 2888 checks"
+    );
+}
