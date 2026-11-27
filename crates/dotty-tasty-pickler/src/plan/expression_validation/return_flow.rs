@@ -100,6 +100,8 @@ impl Validator<'_, '_> {
                 p.definitions.boolean,
                 p.definitions.unit,
                 p.definitions.long,
+                p.definitions.float,
+                p.definitions.double,
             ]
             .contains(&ty)
             {
@@ -108,6 +110,8 @@ impl Validator<'_, '_> {
             match self.ty(ty)? {
                 Type::Constant(Constant::Int(_)) => return Ok(Some(p.definitions.int)),
                 Type::Constant(Constant::Long(_)) => return Ok(Some(p.definitions.long)),
+                Type::Constant(Constant::FloatBits(_)) => return Ok(Some(p.definitions.float)),
+                Type::Constant(Constant::DoubleBits(_)) => return Ok(Some(p.definitions.double)),
                 Type::Constant(Constant::Boolean(_)) => return Ok(Some(p.definitions.boolean)),
                 Type::Constant(Constant::Unit) => return Ok(Some(p.definitions.unit)),
                 Type::TermRef {
@@ -333,7 +337,14 @@ impl Validator<'_, '_> {
                             depth + 1,
                             visited,
                         )?;
-                        if expected_stat == p.definitions.long && !stat_exits {
+                        if [
+                            p.definitions.long,
+                            p.definitions.float,
+                            p.definitions.double,
+                        ]
+                        .contains(&expected_stat)
+                            && !stat_exits
+                        {
                             return Err(self.unsupported(
                                 UnsupportedFeature::BodyExpression,
                                 Some(method.symbol),

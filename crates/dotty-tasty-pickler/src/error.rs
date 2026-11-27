@@ -32,6 +32,10 @@ pub enum ReferenceError {
 /// A bounded builtin identity required by the minimal contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
+    /// The session’s Scala Float builtin identity (raw IEEE-754 binary32 values).
+    Float,
+    /// The session’s Scala Double builtin identity (raw IEEE-754 binary64 values).
+    Double,
     /// The session’s Scala Long builtin identity (signed 64-bit values).
     Long,
     /// The session’s Scala Int builtin identity.

@@ -927,3 +927,48 @@ fn a_replaced_long_builtin_is_rejected_without_semantic_mutation() {
     );
     assert_eq!(checkpoint, f.store.checkpoint());
 }
+
+#[test]
+fn canonical_floating_types_project_without_class_info() {
+    let f = Fixture::new();
+    for (ty, name) in [
+        (f.definitions.float, "Float"),
+        (f.definitions.double, "Double"),
+    ] {
+        let mut c = context(&f);
+        let root = c.lower_type(ty).unwrap();
+        let fragment = c.finish(&[root]).unwrap();
+        assert_eq!(
+            external_meaning(at(&fragment, root), &fragment.names),
+            ("scala".to_owned(), name.to_owned())
+        );
+    }
+}
+
+#[test]
+fn floating_builtin_metadata_is_authenticated_on_use_without_store_mutation() {
+    for double in [false, true] {
+        let mut f = Fixture::new();
+        let (ty, builtin) = if double {
+            (f.definitions.double, Builtin::Double)
+        } else {
+            (f.definitions.float, Builtin::Float)
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = *f.store.types.get(ty)
+        else {
+            panic!()
+        };
+        f.store.symbols.get_mut(symbol).name =
+            Name::new(f.store.names.intern("Forged"), Namespace::Type);
+        let checkpoint = f.store.checkpoint();
+        let mut c = context(&f); // unused floating metadata does not affect construction
+        assert_eq!(
+            c.lower_type(ty),
+            Err(PickleError::BuiltinIdentity { builtin, ty })
+        );
+        assert_eq!(f.store.checkpoint(), checkpoint);
+    }
+}

@@ -95,12 +95,16 @@ impl Validator<'_, '_> {
             p.definitions.boolean,
             p.definitions.unit,
             p.definitions.long,
+            p.definitions.float,
+            p.definitions.double,
         ]
         .contains(&result_type);
         let bottom = typed.ty == p.definitions.nothing_type;
         let type_matches = (returning && bottom)
             || typed.ty == result_type
             || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::Long(_)), ty) if ty == p.definitions.long)
+            || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::FloatBits(_)), ty) if ty == p.definitions.float)
+            || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::DoubleBits(_)), ty) if ty == p.definitions.double)
             || matches!((self.ty(typed.ty)?, result_type),
             (Type::Constant(Constant::Int(_)), ty) if ty == p.definitions.int)
             || matches!((self.ty(typed.ty)?, result_type), (Type::Constant(Constant::Boolean(_)), ty) if ty == p.definitions.boolean)

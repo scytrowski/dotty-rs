@@ -6988,6 +6988,8 @@ fn primitive_descriptor(definitions: &Definitions, ty: dotty_core::TypeId) -> Op
     match ty {
         ty if ty == definitions.int => Some("I"),
         ty if ty == definitions.long => Some("J"),
+        ty if ty == definitions.float => Some("F"),
+        ty if ty == definitions.double => Some("D"),
         ty if ty == definitions.boolean => Some("Z"),
         _ => None,
     }

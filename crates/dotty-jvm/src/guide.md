@@ -36,7 +36,7 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 Planned methods also lower Int/Boolean/Unit ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
 Int operands. Int-selector matches accept ordered Int literals, literal alternatives and exactly one
-final unguarded irrefutable case, with Int/Boolean/Unit or Long results. A Nothing-typed
+final unguarded irrefutable case, with Int/Boolean/Unit/Long/Float/Double results. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
@@ -51,7 +51,7 @@ and removes case-local initialization facts before the next case and match join.
 
 ## Local primitive method returns
 
-Ordinary planned methods with Int, Boolean, Unit or Long results can return directly
+Ordinary planned methods with Int, Boolean, Unit, Long, Float or Double results can return directly
 or from blocks, If branches, While bodies and supported Int matches. A local
 return emits the method's exact primitive return instruction. All-returning
 branches contribute no join value or trailing epilogue. A block may retain
@@ -74,3 +74,16 @@ matching alternatives evaluate the guard once, and a false guard skips the case.
 Alternative leaves must be Int literals; bindings over/inside alternatives,
 wildcards inside alternatives, and non-Int selectors remain unsupported.
 The existing expression depth/node budgets apply to every alternative descendant.
+
+## Floating method values
+
+Float/Double-valued Int matches support the existing literal alternatives,
+guards, case binders and fallback. Normal joins retain exact Float/Double stack
+kinds; all-returning branches have no placeholder or epilogue. Returning Block,
+If and Match nodes may retain a floating constant/type/formal/local tail type
+only after lowering proves the exit and authenticates planned binding kinds.
+Float uses one physical slot and verifier tag 2; Double uses two slots and one
+verifier tag 3 entry. These are distinct from Integer/tag 1 and Long/tag 4.
+Floating arithmetic, conversions, selectors and category-two discard remain
+outside this increment. Paired TASTy support covers method values and control
+flow, with narrower field/call support than this independent JVM backend.

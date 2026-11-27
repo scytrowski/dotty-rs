@@ -11,6 +11,9 @@ Local primitive returns, including all-returning matches and preserved
 unreachable tails, are covered by
 [`jvm-tasty-local-returns.md`](jvm-tasty-local-returns.md).
 
+Float/Double method values, Int-match results and proved returning tails in paired
+output are covered by [`jvm-tasty-floating-values.md`](jvm-tasty-floating-values.md).
+
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
 bounded JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output

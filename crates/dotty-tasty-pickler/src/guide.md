@@ -1,7 +1,7 @@
 ## Project canonical builtin references
 
 Projection can be used separately from full class emission. This example
-produces a structural type fragment for the current session's Int and Long types.
+produces a structural type fragment for the current session's Int, Long, Float and Double types.
 
 ```rust
 use dotty_core::{Definitions, SemanticStore, SourceId, SourceSemanticIndex};
@@ -15,7 +15,11 @@ let mut context = EncodingContext::new(
 )?;
 let int = context.lower_type(definitions.int)?;
 let long = context.lower_type(definitions.long)?;
-let fragment = context.finish(&[int, long])?;
+let float = context.lower_type(definitions.float)?;
+let double = context.lower_type(definitions.double)?;
+let fragment = context.finish(&[int, long, float, double])?;
+assert!(fragment.ast.address(float).is_some());
+assert!(fragment.ast.address(double).is_some());
 assert!(fragment.ast.address(long).is_some());
 assert!(fragment.ast.address(int).is_some());
 assert!(!fragment.ast.bytes().is_empty());
@@ -42,7 +46,7 @@ shapes independently. This crate performs no filesystem publication.
 
 Complete plans can preserve Int/Boolean/Unit ascriptions as TYPED nodes and
 Int-selector matches as MATCH with ordered CASEDEF nodes. Matches require a
-final unguarded irrefutable case and support Int/Boolean/Unit/Long results;
+final unguarded irrefutable case and support Int/Boolean/Unit/Long/Float/Double results;
 guards and canonical Int binders follow the contract below. Extractors remain
 unsupported. Int `&` and equality/inequality between Int
 operands use Scala 3.9 signed primitive selections. Source Any equality symbols
@@ -59,14 +63,14 @@ rejects missing, duplicate, stale or cross-case binding evidence without store
 mutation. The subset includes variable roots and explicit bindings over Int
 literals or wildcards, with a final unguarded irrefutable case.
 
-Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long
+Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long/Float/Double
 methods. RETURN references the exact current method declaration. A bounded
 read-only flow validator separates normal completion from a proven local exit;
 it does not interpret arbitrary Nothing-typed expressions as supported returns.
 Blocks, If, While and Int matches retain their source/typed bindings, including
 the typer's checked Unit adaptation for an If without else. Bare return uses the
 actual synthetic Unit value already supplied by the typer. Non-local targets,
-returns in lambdas/local definitions and reference/Float/Double results remain
+returns in lambdas/local definitions and reference results remain
 outside this producer subset.
 
 
@@ -81,7 +85,7 @@ DEFDEF as other local primitive returns. No scalar value is supplied for a
 proven returning path.
 
 Calls with Long arguments or results, Long fields/constructor parameters, arithmetic,
-conversions, discarded Long expressions and Float/Double parity remain outside
+conversions and discarded Long expressions remain outside
 this producer slice. Interoperability requires consuming original Rust artifacts
 with Scala 3.9 and executing both original JVM output and from-tasty output; the
 Scala numeric raw printer is not used as the value oracle.
@@ -96,3 +100,21 @@ child after its one pattern and body. Nested alternatives and duplicates are
 supported; wildcards or bindings inside alternatives, bindings around them and
 non-Int selectors are rejected. No semantic-store mutation or partial complete
 artifact escapes validation failure.
+
+## Bounded floating method values
+
+Single-clause ordinary methods support canonical Float/Double formals/results,
+mixed Int/Boolean/Long/Float/Double parameter order, explicit or inferred locals,
+assignment and existing If/While/Int-match/local-return flow. Builtins are
+validated on use without imposing unused floating identities on older plans.
+FLOATconst/DOUBLEconst payloads use exact raw bits, including signed zero.
+Unsuffixed decimal/exponent source nodes retain their original Number binding;
+validation bounds the spelling before conversion and checks the same finite f64
+bits produced by the typer. Suffixed literals retain their exact Constant bits.
+
+Fields, constructor parameters, calls taking/returning floating values, arithmetic,
+comparison, widening, boxing, discarded floating statements and expression
+ascriptions remain unsupported in this paired producer slice. Independent JVM
+support does not expand this contract. Runtime NaN checks establish classification;
+raw codec bit preservation does not promise payload fidelity through arbitrary
+JVM execution. Failed validation is read-only and emits no partial complete file.

@@ -4,8 +4,8 @@ mod ascription;
 mod assignment;
 mod block;
 mod local;
-mod long_value;
 mod match_expr;
+mod numeric_value;
 mod return_flow;
 mod while_loop;
 
@@ -1664,7 +1664,12 @@ impl Validator<'_, '_> {
         result_type: TypeId,
     ) -> Result<(), PickleError> {
         if let (Some(source), Some(typed)) = (rhs, body)
-            && result_type == self.plan.definitions.long
+            && [
+                self.plan.definitions.long,
+                self.plan.definitions.float,
+                self.plan.definitions.double,
+            ]
+            .contains(&result_type)
         {
             return self
                 .validate_return_flow(source, typed, method, result_type, 0, &mut HashSet::new())
@@ -1716,10 +1721,16 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
-        if result_type == p.definitions.long {
+        if [
+            p.definitions.long,
+            p.definitions.float,
+            p.definitions.double,
+        ]
+        .contains(&result_type)
+        {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
-            return self.validate_long_value(rhs, body, method, depth, seen);
+            return self.validate_numeric_value(rhs, body, method, result_type, depth, seen);
         }
         if matches!(source_rhs.kind, TreeKind::Match(_)) && matches!(node.kind, TreeKind::Match(_))
         {

@@ -1016,3 +1016,15 @@ and typed child edge is validated in order; parentheses preserve their mappings.
 CASEDEF still contains one pattern, one body and an optional final guard, so
 matching duplicates cannot repeat a guard. Existing Int/Boolean/Unit/Long results,
 local return flow, case scopes and expression limits compose with this slice.
+
+
+## Floating method value parity
+
+The [floating value contract](jvm-tasty-floating-values.md) adds canonical Float
+and Double method signatures, raw-bit FLOATconst/DOUBLEconst leaves, locals and
+existing primitive control flow. The paired ABI retains F/D descriptors and mixed
+one/two-slot formals. Both class-state and legacy method-only output use explicit
+primitive type syntax for supported numeric values. Original Rust artifacts pass
+independent Java/Scala clients before and after pinned Scala from-tasty; raw numeric
+printer output is not used as the oracle. Floating fields/calls, arithmetic and
+numeric conversions remain outside this slice.

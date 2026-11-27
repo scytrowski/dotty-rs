@@ -4518,16 +4518,20 @@ fn validate_branch(
             // Recursive lowering proves the exit. A block can retain the type
             // of its unreachable tail without producing a value on that path.
             let kind = &context.tree(tree)?.kind;
-            // The typer can retain a Long parameter/local singleton as the
-            // unreachable tail's type. Use the exact planned binding rather
-            // than treating that TermRef as a reference-valued JVM result.
-            let long_binding_type = matches!(context.store.types.try_get(tree_ty),
+            // The typer can retain a numeric parameter/local singleton as the
+            // unreachable tail's type. Authenticate the exact planned binding
+            // and JVM kind, keeping Float/Double distinct from Int/Long.
+            let numeric_binding_type = matches!(context.store.types.try_get(tree_ty),
                 Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) })
                     if *prefix == context.definitions.no_prefix
                         && context.store.symbols.contains(*symbol)
-                        && context.store.symbols.get(*symbol).info == SymbolInfo::Complete(context.definitions.long)
-                        && (context.method.parameters().iter().any(|p| p.symbol() == *symbol && p.ty() == JvmType::Long)
-                            || context.local_layout.is_some_and(|l| l.local(*symbol).is_ok_and(|slot| slot.ty() == JvmType::Long))));
+                        && [(context.definitions.long, JvmType::Long),
+                            (context.definitions.float, JvmType::Float),
+                            (context.definitions.double, JvmType::Double)]
+                            .into_iter().any(|(ty, kind)|
+                                context.store.symbols.get(*symbol).info == SymbolInfo::Complete(ty)
+                                    && (context.method.parameters().iter().any(|p| p.symbol() == *symbol && p.ty() == kind)
+                                        || context.local_layout.is_some_and(|l| l.local(*symbol).is_ok_and(|slot| slot.ty() == kind)))));
             let diverges_with_supported_type =
                 is_nothing_type(context.store, tree_ty, context.definitions)
                     || (is_unit_type(context.store, tree_ty, context.definitions)
@@ -4538,10 +4542,16 @@ fn validate_branch(
                                 | TreeKind::Block(_)
                                 | TreeKind::Match(_)
                         ))
-                    || ((long_binding_type
+                    || ((numeric_binding_type
                         || matches!(
                             primitive_type(context.store, tree_ty, context.definitions),
-                            Some(JvmType::Int | JvmType::Boolean | JvmType::Long)
+                            Some(
+                                JvmType::Int
+                                    | JvmType::Boolean
+                                    | JvmType::Long
+                                    | JvmType::Float
+                                    | JvmType::Double
+                            )
                         ))
                         && matches!(
                             kind,
@@ -6183,6 +6193,46 @@ mod tests {
             ),
             vec![0x07, 0xac]
         );
+    }
+
+    #[test]
+    fn proved_floating_return_tails_keep_exact_planned_kinds_and_emit_no_suffix() {
+        for (kind, value, expected) in [
+            (JvmType::Float, Constant::float(1.0), vec![0x0c, 0xae]),
+            (JvmType::Double, Constant::double(1.0), vec![0x0f, 0xaf]),
+        ] {
+            let mut f = Fixture::new(std::slice::from_ref(&kind));
+            f.set_result(JvmReturnType::Value(kind));
+            let primitive = if kind == JvmType::Float {
+                f.definitions.float
+            } else {
+                f.definitions.double
+            };
+            let value = f.literal(value, primitive);
+            let returned = f.return_expr(Some(value), None);
+            let reference = f.store.types.alloc(Type::TermRef {
+                prefix: f.definitions.no_prefix,
+                target: TermRefTarget::Symbol(f.parameters[0]),
+            });
+            let tail = f.ident(reference);
+            let inner = f.block(vec![returned], tail, reference);
+            let outer = f.block(Vec::new(), inner, reference);
+            let code =
+                lower_method_body(&f.store, &f.ast, &f.definitions, &f.method, outer).unwrap();
+            assert_eq!(method_body_bytes(&f, code), expected);
+            // A numeric-looking singleton with an inconsistent physical kind
+            // cannot authenticate the branch even though its symbol is planned.
+            f.method.parameters[0].ty = if kind == JvmType::Float {
+                JvmType::Int
+            } else {
+                JvmType::Long
+            };
+            let context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+            assert_eq!(
+                validate_branch(&context, inner, Flow::Diverges),
+                Err(JvmCodegenError::UnsupportedBottomFlow { tree: inner })
+            );
+        }
     }
 
     #[test]

@@ -383,7 +383,7 @@ fn lower_expression_inner(
                     && symbol.flags == dotty_core::SymbolFlags::MUTABLE
                     && symbol.name == ident.name
                     && *prefix == context.definitions().no_prefix
-                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long) =>
+                    && matches!(symbol.info, SymbolInfo::Complete(ty) if ty == context.definitions().int || ty == context.definitions().long || ty == context.definitions().float || ty == context.definitions().double) =>
             {
                 context.local_reference(target, None)?
             }
@@ -1274,6 +1274,22 @@ fn lower_expression_inner(
             if value == type_value =>
         {
             (LONGCONST_TAG, TermValue::LongInt(*value))
+        }
+        (Constant::FloatBits(value), Some(Type::Constant(Constant::FloatBits(type_value))))
+            if value == type_value =>
+        {
+            (
+                dotty_tasty::tasty::FLOATCONST_TAG,
+                TermValue::Int(i32::from_ne_bytes(value.to_ne_bytes())),
+            )
+        }
+        (Constant::DoubleBits(value), Some(Type::Constant(Constant::DoubleBits(type_value))))
+            if value == type_value =>
+        {
+            (
+                dotty_tasty::tasty::DOUBLECONST_TAG,
+                TermValue::LongInt(i64::from_ne_bytes(value.to_ne_bytes())),
+            )
         }
         (Constant::Boolean(value), Some(Type::Constant(Constant::Boolean(type_value))))
             if value == type_value =>
