@@ -126,7 +126,9 @@ impl Validator<'_, '_> {
                 })?;
         let selector_type = self
             .primitive_flow_type(selector.ty)?
-            .filter(|ty| *ty == p.definitions.int || *ty == p.definitions.boolean)
+            .filter(|ty| {
+                [p.definitions.int, p.definitions.boolean, p.definitions.long].contains(ty)
+            })
             .ok_or(PickleError::BodyType {
                 tree: typed_match.selector,
                 ty: selector.ty,
@@ -136,6 +138,15 @@ impl Validator<'_, '_> {
                 source_match.selector,
                 typed_match.selector,
                 method,
+                depth + 1,
+                visited,
+            )?;
+        } else if selector_type == p.definitions.long {
+            self.validate_numeric_value(
+                source_match.selector,
+                typed_match.selector,
+                method,
+                selector_type,
                 depth + 1,
                 visited,
             )?;
@@ -150,6 +161,11 @@ impl Validator<'_, '_> {
         }
         let mut all_exit = returning;
         let mut semantic_join = None;
+        let long_singleton = match self.ty(typed.ty)? {
+            Type::Constant(Constant::Long(value)) => Some(*value),
+            _ => None,
+        };
+        let mut exact_long_singleton_join = true;
         let mut boolean_coverage = 0u8;
         for (ordinal, (&source_case, &typed_case)) in source_match
             .cases
@@ -228,6 +244,18 @@ impl Validator<'_, '_> {
                         });
                     }
                     semantic_join = Some(ty);
+                    if let Some(value) = long_singleton {
+                        let mut body_type = body.ty;
+                        if let Type::TermRef {
+                            prefix,
+                            target: TermRefTarget::Symbol(symbol),
+                        } = self.ty(body_type)?
+                            && *prefix == p.definitions.no_prefix
+                        {
+                            body_type = self.complete(*symbol)?;
+                        }
+                        exact_long_singleton_join &= matches!(self.ty(body_type)?, Type::Constant(Constant::Long(actual)) if *actual == value);
+                    }
                 }
                 all_exit &= self.validate_return_flow(
                     source_case.body,
@@ -256,10 +284,17 @@ impl Validator<'_, '_> {
             && result_type == p.definitions.boolean
             && semantic_join == Some(p.definitions.boolean)
             && matches!(self.ty(typed.ty)?, Type::Constant(Constant::Boolean(_)));
+        // Canonical Long singleton selectors can retain a singleton match
+        // result while their authenticated binder reads flow as Long values.
+        let long_singleton_join = result_type == p.definitions.long
+            && semantic_join == Some(p.definitions.long)
+            && exact_long_singleton_join
+            && matches!(self.ty(typed.ty)?, Type::Constant(Constant::Long(_)));
         if (bottom && !all_exit)
             || (returning
                 && typed.ty != semantic_join.unwrap_or(p.definitions.nothing_type)
-                && !boolean_exit_singleton)
+                && !boolean_exit_singleton
+                && !long_singleton_join)
         {
             return Err(PickleError::BodyType {
                 tree: typed_id,
@@ -299,7 +334,7 @@ impl Validator<'_, '_> {
                 &typed.kind,
                 TreeKind::Alternative(_)
                     | TreeKind::Literal(dotty_core::ast::Literal {
-                        value: Constant::Int(_) | Constant::Boolean(_)
+                        value: Constant::Int(_) | Constant::Boolean(_) | Constant::Long(_)
                     })
             )
         {
@@ -514,7 +549,7 @@ impl Validator<'_, '_> {
             }
             return Ok((true, 3));
         }
-        if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_) | Constant::Boolean(_)))
+        if !matches!(&typed.kind, TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_) | Constant::Boolean(_) | Constant::Long(_)))
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
@@ -526,6 +561,15 @@ impl Validator<'_, '_> {
         }
         if selector_type == p.definitions.int {
             self.validate_int_expression(source_id, typed_id, method, depth, visited)?;
+        } else if selector_type == p.definitions.long {
+            self.validate_numeric_value(
+                source_id,
+                typed_id,
+                method,
+                selector_type,
+                depth,
+                visited,
+            )?;
         } else {
             self.validate_if_condition(source_id, typed_id, method, depth, visited)?;
         }
@@ -594,6 +638,8 @@ impl Validator<'_, '_> {
         }
         let expected_name = if selector_type == self.plan.definitions.int {
             "Int"
+        } else if selector_type == self.plan.definitions.long {
+            "Long"
         } else {
             "Boolean"
         };
@@ -662,6 +708,7 @@ impl Validator<'_, '_> {
         Ok(ty == selector_type
             || match self.ty(ty)? {
                 Type::Constant(Constant::Int(_)) => selector_type == self.plan.definitions.int,
+                Type::Constant(Constant::Long(_)) => selector_type == self.plan.definitions.long,
                 Type::Constant(Constant::Boolean(_)) => {
                     selector_type == self.plan.definitions.boolean
                 }

@@ -103,7 +103,7 @@ pub enum JvmTastyContractError {
         actual: Option<TreeId<Typed>>,
     },
     /// The JVM local plan and TASTy bindings disagree on the exact canonical
-    /// Int/Boolean local symbols, typed declarations, mutability or pattern case/scope in this method.
+    /// Int/Boolean/Long local symbols, typed declarations, mutability or pattern case/scope in this method.
     LocalBindingMismatch {
         /// Canonical method whose local evidence differs between producers.
         method: SymbolId,
@@ -6870,7 +6870,7 @@ fn validate_methods(
                 member: symbol,
                 side: "JVM method metadata",
             })?;
-        let is_checked_local = |local| matches!(store.symbols.info(local), SymbolInfo::Complete(ty) if *ty == tasty.definitions.int || *ty == tasty.definitions.boolean || matches!(store.types.try_get(*ty), Some(Type::Constant(dotty_core::Constant::Int(_) | dotty_core::Constant::Boolean(_)))));
+        let is_checked_local = |local| matches!(store.symbols.info(local), SymbolInfo::Complete(ty) if *ty == tasty.definitions.int || *ty == tasty.definitions.boolean || *ty == tasty.definitions.long || matches!(store.types.try_get(*ty), Some(Type::Constant(dotty_core::Constant::Int(_) | dotty_core::Constant::Boolean(_) | dotty_core::Constant::Long(_)))));
         let mut expected_locals = tasty
             .typed_bindings
             .local_value_bindings(tasty.source.id, symbol);

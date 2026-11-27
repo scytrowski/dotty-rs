@@ -1,0 +1,339 @@
+/** Decompiled from <oracle>/reference/example/LongSelectorMatches.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("LongSelectorMatches.scala") class LongSelectorMatches() {
+    def literal(x: scala.Long, b: scala.Boolean, a: scala.Long, z: scala.Long): scala.Long = x match {
+      case 1L =>
+        a
+      case _ =>
+        z
+    }
+    def high_literal(`x₂`: scala.Long, `b₂`: scala.Boolean, `a₂`: scala.Long, `z₂`: scala.Long): scala.Long = `x₂` match {
+      case 4294967297L =>
+        `a₂`
+      case _ =>
+        `z₂`
+    }
+    def extremes(`x₃`: scala.Long, `b₃`: scala.Boolean, `a₃`: scala.Long, `z₃`: scala.Long): scala.Long = `x₃` match {
+      case -9223372036854775808L =>
+        `a₃`
+      case 9223372036854775807L =>
+        `z₃`
+      case _ =>
+        `a₃`
+    }
+    def alternative(`x₄`: scala.Long, `b₄`: scala.Boolean, `a₄`: scala.Long, `z₄`: scala.Long): scala.Long = `x₄` match {
+      case (1L | 4294967297L) =>
+        `a₄`
+      case _ =>
+        `z₄`
+    }
+    def nested_alternative(`x₅`: scala.Long, `b₅`: scala.Boolean, `a₅`: scala.Long, `z₅`: scala.Long): scala.Long = `x₅` match {
+      case (1L | (4294967297L | -1L)) =>
+        `a₅`
+      case _ =>
+        `z₅`
+    }
+    def guard(`x₆`: scala.Long, `b₆`: scala.Boolean, `a₆`: scala.Long, `z₆`: scala.Long): scala.Long = `x₆` match {
+      case 1L if `b₆` =>
+        `a₆`
+      case _ =>
+        `z₆`
+    }
+    def alternative_guard(`x₇`: scala.Long, `b₇`: scala.Boolean, `a₇`: scala.Long, `z₇`: scala.Long): scala.Long = `x₇` match {
+      case (1L | 1L | 4294967297L) if `b₇` =>
+        `a₇`
+      case _ =>
+        `z₇`
+    }
+    def binder(`x₈`: scala.Long, `b₈`: scala.Boolean, `a₈`: scala.Long, `z₈`: scala.Long): scala.Long = `x₈` match {
+      case n =>
+        (n: scala.Long)
+    }
+    def bound_literal(`x₉`: scala.Long, `b₉`: scala.Boolean, `a₉`: scala.Long, `z₉`: scala.Long): scala.Long = `x₉` match {
+      case n @ 1L =>
+        (`n₂`: scala.Long)
+      case n =>
+        (`n₃`: scala.Long)
+    }
+    def typed_binder(`x₁₀`: scala.Long, `b₁₀`: scala.Boolean, `a₁₀`: scala.Long, `z₁₀`: scala.Long): scala.Long = `x₁₀` match {
+      case n: scala.Long =>
+        (`n₄`: scala.Long)
+    }
+    def typed_wildcard(`x₁₁`: scala.Long, `b₁₁`: scala.Boolean, `a₁₁`: scala.Long, `z₁₁`: scala.Long): scala.Long = `x₁₁` match {
+      case _: scala.Long =>
+        `a₁₁`
+    }
+    def explicit_typed_binder(`x₁₂`: scala.Long, `b₁₂`: scala.Boolean, `a₁₂`: scala.Long, `z₁₂`: scala.Long): scala.Long = `x₁₂` match {
+      case n: scala.Long =>
+        (`n₅`: scala.Long)
+    }
+    def guarded_binder(`x₁₃`: scala.Long, `b₁₃`: scala.Boolean, `a₁₃`: scala.Long, `z₁₃`: scala.Long): scala.Long = `x₁₃` match {
+      case n if `b₁₃` =>
+        (`n₆`: scala.Long)
+      case n =>
+        (`n₇`: scala.Long)
+    }
+    def guarded_typed(`x₁₄`: scala.Long, `b₁₄`: scala.Boolean, `a₁₄`: scala.Long, `z₁₄`: scala.Long): scala.Long = `x₁₄` match {
+      case n: scala.Long if `b₁₄` =>
+        (`n₈`: scala.Long)
+      case _: scala.Long =>
+        `a₁₄`
+    }
+    def nested(`x₁₅`: scala.Long, `b₁₅`: scala.Boolean, `a₁₅`: scala.Long, `z₁₅`: scala.Long): scala.Long = `x₁₅` match {
+      case n =>
+        `n₉` match {
+          case 4294967297L =>
+            `a₁₅`
+          case k =>
+            (k: scala.Long)
+        }
+    }
+    def typed_body(`x₁₆`: scala.Long, `b₁₆`: scala.Boolean, `a₁₆`: scala.Long, `z₁₆`: scala.Long): scala.Long = `x₁₆` match {
+      case n =>
+        (`n₁₀`: scala.Long)
+    }
+    def returns(`x₁₇`: scala.Long, `b₁₇`: scala.Boolean, `a₁₇`: scala.Long, `z₁₇`: scala.Long): scala.Long = `x₁₇` match {
+      case n if `b₁₇` =>
+        return `n₁₁`
+      case n =>
+        return `n₁₂`
+    }
+    def result_Int_normal(`x₁₈`: scala.Long, `b₁₈`: scala.Boolean, `a₁₈`: scala.Int): scala.Int = `x₁₈` match {
+      case 1L =>
+        `a₁₈`
+      case _ =>
+        0
+    }
+    def result_Int_guarded(`x₁₉`: scala.Long, `b₁₉`: scala.Boolean, `a₁₉`: scala.Int): scala.Int = `x₁₉` match {
+      case n: scala.Long if `b₁₉` =>
+        `a₁₉`
+      case _: scala.Long =>
+        0
+    }
+    def result_Int_returns(`x₂₀`: scala.Long, `b₂₀`: scala.Boolean, `a₂₀`: scala.Int): scala.Int = `x₂₀` match {
+      case 1L =>
+        return `a₂₀`
+      case _ =>
+        return 0
+    }
+    def result_Boolean_normal(`x₂₁`: scala.Long, `b₂₁`: scala.Boolean, `a₂₁`: scala.Boolean): scala.Boolean = `x₂₁` match {
+      case 1L =>
+        `a₂₁`
+      case _ =>
+        false
+    }
+    def result_Boolean_guarded(`x₂₂`: scala.Long, `b₂₂`: scala.Boolean, `a₂₂`: scala.Boolean): scala.Boolean = `x₂₂` match {
+      case n: scala.Long if `b₂₂` =>
+        `a₂₂`
+      case _: scala.Long =>
+        false
+    }
+    def result_Boolean_returns(`x₂₃`: scala.Long, `b₂₃`: scala.Boolean, `a₂₃`: scala.Boolean): scala.Boolean = `x₂₃` match {
+      case 1L =>
+        return `a₂₃`
+      case _ =>
+        return false
+    }
+    def result_Unit_normal(`x₂₄`: scala.Long, `b₂₄`: scala.Boolean): scala.Unit = `x₂₄` match {
+      case 1L =>
+        ()
+      case _ =>
+        ()
+    }
+    def result_Unit_guarded(`x₂₅`: scala.Long, `b₂₅`: scala.Boolean): scala.Unit = `x₂₅` match {
+      case n: scala.Long if `b₂₅` =>
+        ()
+      case _: scala.Long =>
+        ()
+    }
+    def result_Unit_returns(`x₂₆`: scala.Long, `b₂₆`: scala.Boolean): scala.Unit = `x₂₆` match {
+      case 1L =>
+        return ()
+      case _ =>
+        return ()
+    }
+    def result_Long_normal(`x₂₇`: scala.Long, `b₂₇`: scala.Boolean, `a₂₄`: scala.Long): scala.Long = `x₂₇` match {
+      case 1L =>
+        `a₂₄`
+      case _ =>
+        0L
+    }
+    def result_Long_guarded(`x₂₈`: scala.Long, `b₂₈`: scala.Boolean, `a₂₅`: scala.Long): scala.Long = `x₂₈` match {
+      case n: scala.Long if `b₂₈` =>
+        `a₂₅`
+      case _: scala.Long =>
+        0L
+    }
+    def result_Long_returns(`x₂₉`: scala.Long, `b₂₉`: scala.Boolean, `a₂₆`: scala.Long): scala.Long = `x₂₉` match {
+      case 1L =>
+        return `a₂₆`
+      case _ =>
+        return 0L
+    }
+    def result_Float_normal(`x₃₀`: scala.Long, `b₃₀`: scala.Boolean, `a₂₇`: scala.Float): scala.Float = `x₃₀` match {
+      case 1L =>
+        `a₂₇`
+      case _ =>
+        0.0f
+    }
+    def result_Float_guarded(`x₃₁`: scala.Long, `b₃₁`: scala.Boolean, `a₂₈`: scala.Float): scala.Float = `x₃₁` match {
+      case n: scala.Long if `b₃₁` =>
+        `a₂₈`
+      case _: scala.Long =>
+        0.0f
+    }
+    def result_Float_returns(`x₃₂`: scala.Long, `b₃₂`: scala.Boolean, `a₂₉`: scala.Float): scala.Float = `x₃₂` match {
+      case 1L =>
+        return `a₂₉`
+      case _ =>
+        return 0.0f
+    }
+    def result_Double_normal(`x₃₃`: scala.Long, `b₃₃`: scala.Boolean, `a₃₀`: scala.Double): scala.Double = `x₃₃` match {
+      case 1L =>
+        `a₃₀`
+      case _ =>
+        0.0
+    }
+    def result_Double_guarded(`x₃₄`: scala.Long, `b₃₄`: scala.Boolean, `a₃₁`: scala.Double): scala.Double = `x₃₄` match {
+      case n: scala.Long if `b₃₄` =>
+        `a₃₁`
+      case _: scala.Long =>
+        0.0
+    }
+    def result_Double_returns(`x₃₅`: scala.Long, `b₃₅`: scala.Boolean, `a₃₂`: scala.Double): scala.Double = `x₃₅` match {
+      case 1L =>
+        return `a₃₂`
+      case _ =>
+        return 0.0
+    }
+    def selector_local(`x₃₆`: scala.Long): scala.Long = {
+      val `a₃₃`: scala.Long = `x₃₆`
+      `a₃₃` match {
+        case n =>
+          (`n₁₃`: scala.Long)
+      }
+    }
+    def selector_mutable(`x₃₇`: scala.Long): scala.Long = {
+      var `a₃₄`: scala.Long = 1L
+      `a₃₄` = `x₃₇`
+      `a₃₄` match {
+        case n: scala.Long =>
+          (`n₁₄`: scala.Long)
+      }
+    }
+    def singleton(): scala.Long = 4294967297L match {
+      case n: scala.Long =>
+        (`n₁₅`: 4294967297L)
+    }
+    def singleton_literal(): scala.Long = 4294967297L match {
+      case 4294967297L =>
+        7L
+      case _ =>
+        8L
+    }
+    def ascribed_selector(`x₃₈`: scala.Long): scala.Long = (`x₃₈`: scala.Long) match {
+      case n =>
+        (`n₁₆`: scala.Long)
+    }
+    def local_result(`x₃₉`: scala.Long): scala.Long = {
+      val `a₃₅`: scala.Long = `x₃₉` match {
+        case n =>
+          (`n₁₇`: scala.Long)
+      }
+
+      (`a₃₅`: scala.Long)
+    }
+    def assignment_result(`x₄₀`: scala.Long): scala.Long = {
+      var `a₃₆`: scala.Long = 0L
+      `a₃₆` = `x₄₀` match {
+        case n =>
+          (`n₁₈`: scala.Long)
+      }
+
+      (`a₃₆`: scala.Long)
+    }
+    def effect(`x₄₁`: scala.Long, `b₃₆`: scala.Boolean): scala.Int = {
+      var trace: scala.Int = 0
+      val v: scala.Int = {
+        trace = trace.*(10).+(1)
+        `x₄₁`
+      } match {
+        case (1L | 1L | 4294967297L) if {
+          trace = trace.*(10).+(2)
+          `b₃₆`
+        } =>
+          trace = trace.*(10).+(3)
+          7
+        case n: scala.Long =>
+          trace = trace.*(10).+(4)
+          8
+      }
+      trace.*(100).+(v)
+    }
+    def shadow(`n₁₉`: scala.Long, `b₃₇`: scala.Boolean): scala.Long = `n₁₉` match {
+      case n: scala.Long if `b₃₇` =>
+        (`n₂₀`: scala.Long)
+      case n: scala.Long =>
+        (`n₂₁`: scala.Long)
+    }
+    def mixed_nested(`x₄₂`: scala.Long, `b₃₈`: scala.Boolean): scala.Long = `b₃₈` match {
+      case true =>
+        `x₄₂` match {
+          case n: scala.Long =>
+            (`n₂₂`: scala.Long)
+        }
+      case false =>
+        `x₄₂` match {
+          case 1L =>
+            7L
+          case n =>
+            (`n₂₃`: scala.Long)
+        }
+    }
+    def plain_singleton(): scala.Long = 1L match {
+      case n =>
+        (`n₂₄`: 1L)
+    }
+    def bound_singleton(): scala.Long = 1L match {
+      case n @ 1L =>
+        (`n₂₅`: 1L)
+      case n =>
+        (`n₂₆`: 1L)
+    }
+    def nested_singleton(): scala.Long = 1L match {
+      case n =>
+        `n₂₇` match {
+          case k =>
+            (`k₂`: scala.Long)
+        }
+    }
+    def inferred_local(`x₄₃`: scala.Long): scala.Long = {
+      val `a₃₇`: scala.Long = `x₄₃`
+      `a₃₇` match {
+        case n =>
+          (`n₂₈`: scala.Long)
+      }
+    }
+    def while_selector(`x₄₄`: scala.Long, `b₃₉`: scala.Boolean): scala.Long = {
+      var `a₃₈`: scala.Long = 0L
+      var run: scala.Boolean = `b₃₉`
+      while (run) {
+        `a₃₈` = `x₄₄`
+        run = false
+      }
+      `a₃₈` match {
+        case n =>
+          (`n₂₉`: scala.Long)
+      }
+    }
+    def non_tail_return(`x₄₅`: scala.Long, `b₄₀`: scala.Boolean): scala.Long = {
+      `x₄₅` match {
+        case n if `b₄₀` =>
+          return `n₃₀`
+        case _ =>
+          ()
+      }
+      0L
+    }
+  }
+}

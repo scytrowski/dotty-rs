@@ -42,7 +42,7 @@ JVM and semantic TASTy producers. Same-slot IDs from another compilation
 session cannot be authenticated, so the single-session requirement remains a
 caller obligation.
 
-Ordinary Int/Boolean locals and pattern bindings retain exact declaration and
+Ordinary Int/Boolean/Long locals and pattern bindings retain exact declaration and
 symbol identities across both plans. Ordinary bindings must also agree on
 mutability; pattern proofs include their original case and scope. A shared
 Integer verifier category does not make an Int local a valid Boolean binding.

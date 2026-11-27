@@ -35,15 +35,15 @@ TASTy emission and combined Scala ABI validation are separate output paths.
 
 Planned methods also lower Int/Boolean/Unit/Long/Float/Double ascriptions without runtime
 conversion, canonical Int `&`, and canonical Any `==`/`!=` specialized for two
-Int operands. Int/Boolean-selector matches accept literals of the selector type and
-literal alternatives, with Int/Boolean/Unit/Long/Float/Double results. Int matches
+Int operands. Int/Boolean/Long-selector matches accept literals of the selector type and
+literal alternatives, with Int/Boolean/Unit/Long/Float/Double results. Int and Long matches
 require a final unguarded irrefutable case; Boolean matches may instead prove full
 unguarded coverage of both values with an unguarded final case. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
-Guards and immutable Int/Boolean binders are supported. Same-type primitive
-patterns `_: Int`, `n: Int`, `n @ (_: Int)` and Boolean counterparts are proved
+Guards and immutable Int/Boolean/Long binders are supported. Same-type primitive
+patterns `_: Int`, `n: Int`, `n @ (_: Int)` and Boolean/Long counterparts are proved
 irrefutable using exact canonical wrapper, type-tree and wildcard types. An
 unguarded irrefutable case must be final; a guard still requires a fallback.
 This proof emits no runtime type test. Typed alternatives, reference type tests,
@@ -59,7 +59,7 @@ and removes case-local initialization facts before the next case and match join.
 ## Local primitive method returns
 
 Ordinary planned methods with Int, Boolean, Unit, Long, Float or Double results can return directly
-or from blocks, If branches, While bodies and supported Int/Boolean matches. A local
+or from blocks, If branches, While bodies and supported Int/Boolean/Long matches. A local
 return emits the method's exact primitive return instruction. All-returning
 branches contribute no join value or trailing epilogue. A block may retain
 the primitive type of an unreachable tail; lowering still validates that tail
@@ -72,14 +72,14 @@ Long-valued Int matches preserve two-slot stack values at joins and use one
 Long verification entry per value. Guarded cases and normal/returning paths
 share the existing selector-once and case-scope rules. A proven returning Block,
 If or Match can retain the canonical Long type of its unreachable tail, including
-a checked method parameter/local TermRef. This does not add Long selectors,
+a checked method parameter/local TermRef. Long selectors use two-slot temporaries and LCmp; this does not add
 arithmetic, conversions or category-two discard operations.
 
 Literal alternatives such as `case 0 | 1` can be nested or parenthesized and
 retain source case order. Each case has one shared guard/body: even duplicate
 matching alternatives evaluate the guard once, and a false guard skips the case.
 Alternative leaves must be literals of the selector type; bindings over/inside alternatives,
-wildcards inside alternatives, and selectors other than Int/Boolean remain unsupported.
+wildcards inside alternatives, and selectors other than Int/Boolean/Long remain unsupported.
 The existing expression depth/node budgets apply to every alternative descendant.
 
 ## Floating method values

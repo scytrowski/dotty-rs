@@ -158,12 +158,18 @@ impl Validator<'_, '_> {
                 let local = symbol.kind == SymbolKind::Local
                     && self.registered_local_symbols.contains(target)
                     && self.visible_locals.contains(target);
+                let complete = self.complete(*target)?;
+                // Only already authenticated, visible local declarations may
+                // retain a Long singleton type while yielding a Long value.
+                let singleton_local = local
+                    && result_type == p.definitions.long
+                    && matches!(self.ty(complete)?, Type::Constant(Constant::Long(_)));
                 if !formal && !local
                     || symbol.name != value.name
                     || symbol.owner != Some(method.symbol)
                     || *prefix != p.definitions.no_prefix
                     || !matches!(self.ty(*prefix)?, Type::NoPrefix)
-                    || self.complete(*target)? != result_type
+                    || (complete != result_type && !singleton_local)
                 {
                     return Err(PickleError::Reference {
                         symbol: *target,

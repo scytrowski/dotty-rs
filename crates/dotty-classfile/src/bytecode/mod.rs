@@ -50,6 +50,7 @@
 //! | `IRem` | [`irem`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.irem) `0x70` | 0 | `[int, int] -> [int]` |
 //! | `IAnd` | [`iand`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.iand) `0x7e` | 0 | `[int, int] -> [int]` |
 //! | `IOr` | [`ior`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ior) `0x80` | 0 | `[int, int] -> [int]` |
+//! | `LCmp` | [`lcmp`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lcmp) `0x94` | 0 | `[long, long] -> [int]` |
 //! | `IXor` | [`ixor`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ixor) `0x82` | 0 | `[int, int] -> [int]` |
 //! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
 //! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
@@ -451,6 +452,9 @@ pub enum Instruction {
     IOr,
     /// Computes the 32-bit bitwise XOR of two integers.
     IXor,
+    /// Compares signed longs: consumes two category-two values and pushes Int -1, 0 or 1.
+    /// The result describes the first operand relative to the second.
+    LCmp,
     /// Duplicates the top category-one stack value.
     Dup,
     /// Removes the top category-one stack value.
