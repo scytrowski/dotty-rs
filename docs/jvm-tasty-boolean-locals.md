@@ -14,7 +14,7 @@ TASTy 28.9.0, class-file major 65. Base main: `dd6c1d35a709f1c3f2c46b5f3bf578b97
 
 Ordinary initialized method-local `val` and `var Boolean` use exact source-typer
 bindings, explicit or inferred canonical types, and the existing primitive value
-subset: literals, formals, visible locals/case bindings, comparisons, negation,
+subset: literals, formals, visible locals/case bindings, existing Int comparisons, negation,
 short-circuit operators, ascriptions, If, Block and bounded Int/Boolean Match.
 Locals can feed existing primitive method results, conditions, selectors and guards.
 Assignments require a visible mutable Boolean local and a Boolean RHS. Boolean
@@ -55,3 +55,54 @@ local scopes, declaration order, mutability, canonical type and ABI agreement.
 Reject forged bindings, escaped locals, Boolean/Int confusion, malformed joins,
 cycles and exhausted budgets read-only, without publishing partial artifacts.
 Reuse existing stores, local proofs, wire nodes and dependency boundaries.
+
+## Implemented producer behavior
+
+The pickler reuses ordinary local proofs, VALDEF/MUTABLE/ASSIGN wire nodes and
+exact TERMREFdirect declaration targets. Its existing read-only primitive flow
+validator handles bounded Boolean If/Block values, and Unit blocks can contain
+supported primitive locals and flag control flow. Loop emission authenticates
+registered local conditions as well as formals, including singleton case locals.
+The existing paired contract already compares ordinary Int/Boolean local symbols,
+typed declarations and mutability; the increment adds focused mutation regressions.
+
+JVM validation now authenticates Boolean TermRef tails on proven returning paths,
+keeping semantic Boolean identity distinct from Int. A constant-selector match
+whose cases all return can retain its Boolean singleton join; this exception
+requires independently proven exits and does not accept a normal value path as
+Nothing. Neither producer changes frontend trees or canonical session stores.
+
+The 33-method fixture covers explicit/inferred locals, literal/If/Match/operator
+initializers, assignments and branches, flag loops, side effects on both evaluated
+and skipped short-circuit paths (flag toggles detect duplicate RHS execution), guards, primitive results including mixed-width
+values, case-local aliases, parameter shadowing, sibling scopes, local returns,
+unreachable Boolean tails and singleton loop conditions. Independent clients
+execute the original Rust classes and Scala's separately rebuilt from-TASTy
+classes with `-Xverify:all -ea`; Scala also compiles clients against both outputs.
+Original class/TASTy bytes are hashed and checked unchanged.
+
+The focused target has 12 tests. Lowest-layer source-pickler tests check VALDEF
+order, direct references and MUTABLE/ASSIGN targets, missing/forged declaration
+proofs, lexical escape and cyclic value blocks. JVM unit coverage distinguishes
+Boolean from the identical Integer verifier category and rejects foreign bindings
+and prefixes. Paired tests assert exact Z/J/D descriptors, load/store/return
+instructions, loop frame offsets/locals/stacks, fresh-session byte determinism,
+read-only rejection of malformed plans, validation/encoding limits and explicit
+unsupported source shapes.
+
+The final serial Scala/JDK target measured 7.74 seconds locally. Required CI
+registers it in the JDK job and strict TASTy shard 4, increasing the independently
+checked strict inventory to 37 targets; existing timing evidence is preserved.
+
+Final local workspace checks passed 8,600 tests (57 existing ignored) and 44
+all-feature doctests. Formatting, frontend boundary checks, Clippy/rustdoc with
+warnings denied, the standalone compiler client and workflow/inventory/timing
+checks passed. The initial workspace run hit the host's 1,024-file soft limit in
+existing parallel JMOD loader tests; the complete rerun passed after raising the
+local process limit to 65,536. No classloader implementation or expectation changed.
+
+All 37 strict TASTy targets passed across four local shards, followed by the
+constructor-alias, loader-rejection and dual-reference-reader follow-ups and the
+mandatory JDK verifier/execution gate. The strict aggregate passed as well. The
+final strengthened short-circuit fixture was consumed again by pinned Scala and
+by the mandatory JDK follow-up, including original and from-TASTy execution.

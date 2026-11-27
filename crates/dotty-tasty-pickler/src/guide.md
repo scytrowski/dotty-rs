@@ -128,7 +128,26 @@ already supported Boolean condition expressions. Case bindings are visible only
 within their guard/body, including inner matches; repeated spelling never merges
 symbols or scopes. Constant-selector binder types retain their exact Boolean
 singleton payload. Exactly one final unguarded irrefutable case is required,
-even after exhaustive literal alternatives. Ordinary Boolean ValDef locals,
-arbitrary Boolean-returning calls, general Boolean blocks, typed/extractor
-patterns and matches without this fallback remain unsupported. Complete paired
+even after exhaustive literal alternatives. Arbitrary Boolean-returning calls,
+typed/extractor patterns and matches without this fallback remain unsupported. Complete paired
 output checks declaration/symbol/case/scope agreement with the JVM local plan.
+
+## Ordinary Boolean locals and values
+
+Initialized method-local `val`/`var Boolean` use exact source-typer declaration,
+symbol and scope proofs with explicit or inferred canonical type syntax. Visible
+reads use TERMREFdirect targets; mutable declarations carry MUTABLE and their
+assignments retain ASSIGN with the exact local target. Boolean If/Block values,
+Int comparisons, negation, short-circuit effects and existing Int/Boolean matches
+compose with ordinary locals, loop conditions, guards and primitive method
+results. Lexical visibility is restored after blocks and branches. Repeated names
+in sibling scopes and parameter shadowing preserve distinct declaration identity;
+general nested same-name ordinary-local shadowing remains excluded.
+
+Local returns retain their existing supported statement/result positions.
+Proven all-returning Boolean matches can retain the typer's singleton type for an
+unreachable binder tail. Returns inside initializer/assignment operands,
+conditions, guards and short-circuit operands remain unsupported. Complete output
+requires read-only body validation and exact ordinary-local agreement with the
+JVM plan; failure exposes no partial artifact. The pinned Scala gate consumes
+original Rust TASTy and executes independently rebuilt from-TASTy classes.

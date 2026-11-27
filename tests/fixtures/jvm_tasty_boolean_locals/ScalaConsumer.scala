@@ -12,6 +12,7 @@ object ScalaConsumer {
   assert(p.effectsOr(false) && !p.effectsOr(true))
   assert(!p.tailSingleton(true) && p.tailSingleton(false))
   assert(!p.tailConstant())
+  assert(p.constantLoop() == 1 && p.falseLoop() == 2)
   assert(p.siblingScopes(true) == 1 && p.siblingScopes(false) == 4)
   assert(!p.parameterShadow(true))
   assert(p.bothReturn(true, false) && !p.bothReturn(false, true))

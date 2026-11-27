@@ -244,7 +244,10 @@ fn lower_expression_inner(
                     let binding = store.symbols.get(*symbol);
                     matches!(binding.kind, dotty_core::SymbolKind::Parameter | dotty_core::SymbolKind::Local)
                         && binding.owner == Some(method)
-                        && binding.info == SymbolInfo::Complete(context.definitions().boolean)
+                        && matches!(binding.info, SymbolInfo::Complete(ty)
+                            if ty == context.definitions().boolean
+                                || (binding.kind == dotty_core::SymbolKind::Local
+                                    && matches!(store.types.try_get(ty), Some(Type::Constant(Constant::Boolean(_))))))
                 }
         );
         if condition.ty != context.definitions().boolean

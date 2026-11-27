@@ -69,8 +69,13 @@ fn mutable_boolean_values_loops_short_circuit_effects_and_return_tails_compose()
         "def f(x: Boolean): Boolean = { var flag = x; flag = x match { case true => false; case _ => true }; flag }",
         "def f(x: Boolean): Int = { var flag = x; while flag do { flag = false; return 1 }; 0 }",
         "def f(x: Boolean): Unit = { var flag = x; flag = false; () }",
+        "def f(x: Boolean): Unit = { var flag = x; while flag do { flag = false }; () }",
+        "def f(x: Boolean): Unit = { var flag = x; if flag then flag = false else (); () }",
+        "def f(x: Boolean): Int = x match { case n @ true => { while n do { return 1 }; 2 }; case _ => 3 }",
+        "def f(x: Boolean): Int = x match { case n @ false => { while n do { return 1 }; 2 }; case _ => 3 }",
         "def f(x: Boolean): Boolean = x match { case n @ true => { return false; n }; case _ => true }",
         "def f(): Boolean = true match { case n => { return false; n } }",
+        "def f(): Int = true match { case n => { while n do { return 1 }; 2 } }",
         "def f(x: Boolean, y: Boolean): Boolean = { val flag = y; if x then { return true; flag } else { return false; flag } }",
     ] {
         emit(method);
@@ -434,4 +439,298 @@ fn original_rust_boolean_locals_execute_on_jdk21() {
         "JavaConsumer",
         include_str!("fixtures/jvm_tasty_boolean_locals/JavaConsumer.java"),
     );
+}
+
+#[test]
+fn boolean_local_artifacts_are_deterministic_in_fresh_sessions() {
+    let source = include_str!("fixtures/jvm_tasty_boolean_locals/BooleanLocals.scala");
+    let a = emit_paired_jvm_tasty_class(source, "BooleanLocals.scala", SourceId::from_index(2477))
+        .unwrap();
+    let b = emit_paired_jvm_tasty_class(source, "BooleanLocals.scala", SourceId::from_index(2478))
+        .unwrap();
+    assert_eq!(a.classfile_bytes(), b.classfile_bytes());
+    assert_eq!(a.tasty_bytes(), b.tasty_bytes());
+}
+
+#[test]
+fn unsupported_boolean_flag_shapes_do_not_publish_artifact_pairs() {
+    for methods in [
+        "def f(x: Boolean): Boolean = { val flag = x; flag = false; flag }",
+        "def f(x: Boolean): Boolean = { var flag = x; flag = 1; flag }",
+        "def f(x: Boolean): Boolean = { if x then { val flag = true; () } else (); flag }",
+        "def f(x: Boolean): Boolean = { val flag = x; if x then { val flag = false; flag } else flag }",
+        "def id(x: Boolean): Boolean = x; def f(x: Boolean): Boolean = { val flag = id(x); flag }",
+        "def f(x: Boolean): Boolean = { val flag: Boolean = { return x; false }; flag }",
+        "def f(x: Boolean): Boolean = { var flag = false; flag = { return x; false }; flag }",
+        "def f(x: Boolean): Boolean = x && { return false; true }",
+        "def f(x: Boolean): Int = if { return 1; x } then 2 else 3",
+        "def f(x: Boolean): Int = x match { case true if { return 1; x } => 2; case _ => 3 }",
+        "def f(x: Boolean): Int = x match { case true => 1; case false => 2 }",
+    ] {
+        let result = emit_paired_jvm_tasty_class(
+            &format!("package example; class BooleanLocals {{ {methods} }}"),
+            "BooleanLocals.scala",
+            SourceId::from_index(2477),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(dotty::jvm_tasty_artifacts::PairedArtifactError::Plan(_))
+            ),
+            "{methods}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn boolean_locals_keep_z_descriptors_integer_slots_and_return_opcodes() {
+    use dotty_classfile::{attribute::Attribute, class_file::ClassFile, reader::Reader};
+    let pair = emit(
+        "def copy(x: Boolean): Boolean = { val flag = x; flag }; def mixed(n: Long, d: Double, x: Boolean): Boolean = { var flag = x; flag = !flag; flag }; def returned(x: Boolean): Boolean = { return true; x }",
+    );
+    let file = ClassFile::decode(&mut Reader::new(pair.classfile_bytes())).unwrap();
+    for (name, descriptor, slots, bytes) in [
+        ("copy", "(Z)Z", 3, &[0x1b, 0x3d, 0x1c, 0xac][..]),
+        (
+            "mixed",
+            "(JDZ)Z",
+            7,
+            &[
+                0x15, 5, 0x36, 6, 0x15, 6, 0x04, 0x82, 0x36, 6, 0x15, 6, 0xac,
+            ][..],
+        ),
+        ("returned", "(Z)Z", 2, &[0x04, 0xac][..]),
+    ] {
+        let method = file
+            .methods
+            .iter()
+            .find(|m| file.constant_pool.utf8(m.name_index) == Ok(name))
+            .unwrap();
+        assert_eq!(
+            file.constant_pool.utf8(method.descriptor_index),
+            Ok(descriptor)
+        );
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!()
+        };
+        assert_eq!(code.max_locals, slots, "{name}");
+        assert_eq!(code.code, bytes, "{name}");
+    }
+}
+
+fn frames(
+    file: &dotty_classfile::class_file::ClassFile<'_>,
+    name: &str,
+) -> Vec<(u32, Vec<u8>, Vec<u8>)> {
+    use dotty_classfile::{attribute::Attribute, reader::Reader};
+    fn types(r: &mut Reader<'_>) -> Vec<u8> {
+        let count = r.read_u16().unwrap();
+        (0..count)
+            .map(|_| {
+                let tag = r.read_u8().unwrap();
+                assert!(tag <= 8);
+                if tag == 7 || tag == 8 {
+                    r.read_u16().unwrap();
+                }
+                tag
+            })
+            .collect()
+    }
+    let method = file
+        .methods
+        .iter()
+        .find(|m| file.constant_pool.utf8(m.name_index) == Ok(name))
+        .unwrap();
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!()
+    };
+    let data = code
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            Attribute::Other(raw)
+                if file.constant_pool.utf8(raw.name_index) == Ok("StackMapTable") =>
+            {
+                Some(raw.bytes)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut r = Reader::new(data);
+    let count = r.read_u16().unwrap();
+    let mut previous: i32 = -1;
+    (0..count)
+        .map(|_| {
+            assert_eq!(r.read_u8().unwrap(), 255);
+            let pc = previous + i32::from(r.read_u16().unwrap()) + 1;
+            previous = pc;
+            (pc as u32, types(&mut r), types(&mut r))
+        })
+        .collect()
+}
+
+#[test]
+fn boolean_flag_loop_has_exact_integer_verification_frames() {
+    use dotty_classfile::{class_file::ClassFile, reader::Reader};
+    let pair = emit(
+        "def f(x: Boolean): Int = { var flag = x; var count = 0; while flag do { count = count + 1; flag = false }; count }",
+    );
+    let file = ClassFile::decode(&mut Reader::new(pair.classfile_bytes())).unwrap();
+    assert_eq!(
+        frames(&file, "f"),
+        [
+            (7, vec![7, 1, 1, 1], vec![]),
+            (20, vec![7, 1, 1, 1], vec![])
+        ]
+    );
+}
+
+#[test]
+fn legacy_boolean_local_proofs_and_expression_limits_are_checked_read_only() {
+    use dotty::core::ast::TreeKind;
+    use dotty_tasty_pickler::{
+        ClassMemberPicklePlan, DefaultConstructorPlan, LimitKind, MethodPicklePlan, PickleError,
+        PickleLimits, PicklePlan, ProjectionLimits, ValidationLimits,
+    };
+    let source = "package example; class BooleanLocals { def f(x: Boolean): Boolean = if x then { val flag = true; flag } else { val flag = false; flag } }";
+    dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
+        source,
+        "BooleanLocals.scala",
+        SourceId::from_index(2477),
+        |paired| {
+            let raw = paired.tasty_plan.plan();
+            let [
+                ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree,
+                },
+            ] = raw.members
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &raw.source_ast.get(*source_tree).kind else {
+                panic!()
+            };
+            let methods = [MethodPicklePlan {
+                symbol: *symbol,
+                source_tree: *source_tree,
+                parameter_clauses: vec![paired.jvm_unit.classes[0].methods[0].parameters.clone()],
+                body: Some(
+                    raw.typed_bindings
+                        .typed_at(raw.source.id, def.rhs.unwrap())
+                        .unwrap(),
+                ),
+            }];
+            let original = raw
+                .typed_bindings
+                .local_value_bindings(raw.source.id, *symbol);
+            assert_eq!(original.len(), 2);
+            assert_ne!(original[0].scope, original[1].scope);
+            let mark = raw.store.checkpoint();
+            for mode in 0..7 {
+                let mut locals = original.clone();
+                match mode {
+                    0 => locals.clear(),
+                    1 => locals.push(locals[0]),
+                    2 => locals[0].scope = locals[1].scope,
+                    3 => locals[0].typed_declaration = locals[1].typed_declaration,
+                    _ => {}
+                }
+                let input = PicklePlan {
+                    store: raw.store,
+                    definitions: raw.definitions,
+                    source_ast: raw.source_ast,
+                    typed_ast: raw.typed_ast,
+                    source_index: raw.source_index,
+                    typed_bindings: raw.typed_bindings,
+                    source: raw.source.clone(),
+                    source_root: raw
+                        .source_ast
+                        .iter()
+                        .find_map(|(id, n)| matches!(n.kind, TreeKind::PackageDef(_)).then_some(id))
+                        .unwrap(),
+                    class: raw.class,
+                    class_tree: raw.class_tree,
+                    methods: &methods,
+                    local_values: &locals,
+                    constructor: DefaultConstructorPlan {
+                        symbol: raw.constructor.symbol,
+                        source_tree: raw.constructor.source_tree,
+                        parameter_clauses: raw.constructor.parameter_clauses.clone(),
+                    },
+                };
+                let error = if mode == 4 {
+                    input
+                        .validate()
+                        .unwrap()
+                        .pickle_with_limits(PickleLimits {
+                            projection: ProjectionLimits {
+                                max_expression_depth: 0,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .unwrap_err()
+                } else if mode == 5 {
+                    input
+                        .validate_with_limits(ValidationLimits {
+                            max_expression_depth: 0,
+                            ..Default::default()
+                        })
+                        .err()
+                        .unwrap()
+                } else if mode == 6 {
+                    input
+                        .validate_with_limits(ValidationLimits {
+                            max_items: 5,
+                            ..Default::default()
+                        })
+                        .err()
+                        .unwrap()
+                } else {
+                    input.validate().err().unwrap()
+                };
+                match mode {
+                    0 => assert!(
+                        matches!(
+                            error,
+                            PickleError::Unsupported {
+                                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                                ..
+                            }
+                        ),
+                        "{mode}: {error:?}"
+                    ),
+                    1 => assert!(
+                        matches!(error, PickleError::DuplicateDeclaration { .. }),
+                        "{mode}: {error:?}"
+                    ),
+                    2 => assert!(
+                        matches!(error, PickleError::ScopeMembers { .. }),
+                        "{mode}: {error:?}"
+                    ),
+                    3 => assert!(
+                        matches!(error, PickleError::BodyBinding { .. }),
+                        "{mode}: {error:?}"
+                    ),
+                    4 | 5 => assert_eq!(
+                        error,
+                        PickleError::LimitExceeded {
+                            kind: LimitKind::ExpressionDepth,
+                            limit: 0
+                        }
+                    ),
+                    _ => assert_eq!(
+                        error,
+                        PickleError::LimitExceeded {
+                            kind: LimitKind::Items,
+                            limit: 5
+                        }
+                    ),
+                }
+                assert_eq!(raw.store.checkpoint(), mark);
+            }
+        },
+    )
+    .unwrap();
 }

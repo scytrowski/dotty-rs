@@ -82,7 +82,7 @@ package example {
     def effects(`x₁₂`: scala.Boolean): scala.Boolean = {
       var `flag₁₃`: scala.Boolean = false
       val result: scala.Boolean = `x₁₂`.&&({
-        `flag₁₃` = true
+        `flag₁₃` = `flag₁₃`.unary_!
         false
       })
       `flag₁₃`.||(result)
@@ -147,7 +147,7 @@ package example {
     def effectsOr(`x₂₂`: scala.Boolean): scala.Boolean = {
       var `flag₂₁`: scala.Boolean = false
       val `result₂`: scala.Boolean = `x₂₂`.||({
-        `flag₂₁` = true
+        `flag₂₁` = `flag₂₁`.unary_!
         false
       })
       `flag₂₁`.&&(`result₂`.unary_!)
@@ -206,6 +206,16 @@ package example {
         return false
         `flag₂₉`
       }: scala.Boolean)
+    }
+    def constantLoop(): scala.Int = true match {
+      case n =>
+        while (`n₉`) return 1
+        2
+    }
+    def falseLoop(): scala.Int = false match {
+      case n =>
+        while (`n₁₀`) return 1
+        2
     }
   }
 }

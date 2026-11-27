@@ -28,8 +28,9 @@ canonical symbols/scopes even with repeated spelling or parameter shadowing.
 A constant selector can give a binder a Boolean singleton type; retain that
 information in TASTy rather than silently widening it.
 
-Ordinary Boolean ValDef locals, their assignments, arbitrary Boolean calls and
-general effectful Boolean blocks remain separate unsupported producer shapes.
+The later [Boolean-local increment](jvm-tasty-boolean-locals.md) adds ordinary
+Boolean ValDef locals, assignments and bounded effectful value blocks. Arbitrary
+Boolean calls remain unsupported.
 Existing Int-returning calls inside comparisons provide observable selector and
 guard effects without extending that scope. Exhaustiveness analysis without a
 final irrefutable case, MatchError lowering, non-Int/Boolean selectors, typed
@@ -72,7 +73,8 @@ semantic kinds while emitting int-like loads/stores/tests. Normal joins and
 local returns preserve existing numeric value widths and frame tags.
 
 The pickler authenticates Boolean binder reads only after their original case
-proof has been checked; ordinary Boolean declarations are still rejected.
+proof has been checked. The later Boolean-local increment extends that validation
+to ordinary declarations as well.
 Singleton pattern types use TRUEconst/FALSEconst rather than general type
 projection. The paired ABI contract now compares Boolean pattern proofs as
 well as the existing Int local evidence, including exact case/scope identity.

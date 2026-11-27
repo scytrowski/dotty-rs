@@ -42,5 +42,7 @@ public class JavaConsumer { public static void main(String[] args) {
     p.unit(x);
   }
   assert !p.tailConstant();
+  assert p.constantLoop() == 1;
+  assert p.falseLoop() == 2;
   System.out.println("boolean local oracle ok");
 }}

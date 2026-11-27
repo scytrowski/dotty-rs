@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Ordinary Boolean locals, mutable flags and bounded Boolean value flow in both
+outputs are described in [the Boolean-local contract](jvm-tasty-boolean-locals.md).
+
 Boolean-selector matches and canonical Boolean case bindings in both output paths
 are described in [the Boolean-match contract](jvm-tasty-boolean-matches.md).
 

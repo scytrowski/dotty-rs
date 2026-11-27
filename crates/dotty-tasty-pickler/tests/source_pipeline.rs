@@ -5198,3 +5198,106 @@ fn mutable_boolean_local_has_mutable_tail_and_exact_assignment_reference() {
     assert_eq!(target, address);
     assert_eq!(index.iter_nodes_with_tag(ASSIGN_TAG).count(), 1);
 }
+
+#[test]
+fn boolean_local_visibility_ends_with_its_value_block() {
+    let source = "package example\nclass LocalScope:\n  def run(): Boolean = { if true then { val saved = true; saved; false } else false; false }\n";
+    let escaped = source_outputs_named_with_tree_edits(
+        source,
+        "LocalScope.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let (outer_block, outer_typed_id, outer_typed_block) = source_ast
+                .iter()
+                .find_map(|(source_id, tree)| {
+                    let TreeKind::Block(block) = &tree.kind else {
+                        return None;
+                    };
+                    if block.stats.len() != 1 {
+                        return None;
+                    }
+                    let typed_id = bindings.get(SourceId::from_index(7), source_id)?;
+                    let TreeKind::Block(typed_block) = &typed_ast.try_get(typed_id)?.kind else {
+                        return None;
+                    };
+                    Some((block.clone(), typed_id, typed_block.clone()))
+                })
+                .expect("fixture has a one-statement outer block");
+            let source_result = outer_block.expr;
+            let typed_result = outer_typed_block.expr;
+            let (source_ident, typed_ident, typed_ty) = source_ast
+                .iter()
+                .find_map(|(source_id, tree)| {
+                    let TreeKind::Ident(ident) = &tree.kind else {
+                        return None;
+                    };
+                    if store.names.resolve(ident.name.text()) != "saved" {
+                        return None;
+                    }
+                    let typed_id = bindings.get(SourceId::from_index(7), source_id)?;
+                    let typed_tree = typed_ast.try_get(typed_id)?;
+                    let TreeKind::Ident(typed_ident) = &typed_tree.kind else {
+                        return None;
+                    };
+                    Some((*ident, *typed_ident, typed_tree.ty))
+                })
+                .expect("fixture has a typed reference to the branch local");
+            source_ast.get_mut(source_result).kind = TreeKind::Ident(source_ident);
+            let typed_result_binding = bindings
+                .get(SourceId::from_index(7), source_result)
+                .expect("outer result keeps its typed binding");
+            assert_eq!(typed_result_binding, typed_result);
+            let typed_node = typed_ast.get_mut(typed_result_binding);
+            typed_node.kind = TreeKind::Ident(typed_ident);
+            typed_node.ty = typed_ty;
+            typed_ast.get_mut(outer_typed_id).ty = typed_ty;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            escaped,
+            PickleError::Reference {
+                reason: ReferenceError::NotRegistered,
+                ..
+            }
+        ),
+        "unexpected out-of-scope local result: {escaped:?}"
+    );
+}
+
+#[test]
+fn cyclic_boolean_value_block_is_rejected_without_mutation() {
+    let source = "package example\nclass BooleanLocals:\n  def f(x: Boolean): Boolean = { val flag = x; flag }\n";
+    let mut repeated = None;
+    let error = source_outputs_named_with_tree_edits(
+        source,
+        "BooleanLocals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let root = source_ast
+                .iter()
+                .find_map(|(id, n)| matches!(n.kind, TreeKind::Block(_)).then_some(id))
+                .unwrap();
+            let typed = bindings.get(SourceId::from_index(7), root).unwrap();
+            let TreeKind::Block(block) = &mut source_ast.get_mut(root).kind else {
+                panic!()
+            };
+            block.expr = root;
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed).kind else {
+                panic!()
+            };
+            block.expr = typed;
+            repeated = Some(typed);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::RepeatedExpression {
+            tree: repeated.unwrap()
+        }
+    );
+}
