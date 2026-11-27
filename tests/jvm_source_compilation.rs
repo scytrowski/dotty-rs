@@ -32647,3 +32647,48 @@ fn floating_value_matches_and_returning_tails_execute_on_jdk21() {
         "floating value oracle ok"
     );
 }
+
+#[test]
+fn boolean_literal_matches_execute_with_primitive_results_on_jdk21() {
+    let output = TestOutputDirectory::new("boolean-literal-matches");
+    compile_source_classes(
+        "package example; class BooleanMatches { def f(x: Boolean, a: Double, b: Double): Double = x match { case true => return a; case _ => b } }",
+        "BooleanMatches.scala", output.path(),
+    ).unwrap();
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let client = output.path().join("BooleanClient.java");
+    fs::write(&client, "import example.BooleanMatches; public class BooleanClient { public static void main(String[] args) { BooleanMatches p = new BooleanMatches(); assert Double.doubleToRawLongBits(p.f(true, -0.0, Double.MIN_VALUE)) == Long.MIN_VALUE; assert Double.doubleToRawLongBits(p.f(false, -0.0, Double.MIN_VALUE)) == 1L; } }").unwrap();
+    for (program, arguments) in [
+        (
+            "javac",
+            vec![
+                "--release",
+                "21",
+                "-cp",
+                output.path().to_str().unwrap(),
+                "-d",
+                output.path().to_str().unwrap(),
+                client.to_str().unwrap(),
+            ],
+        ),
+        (
+            "java",
+            vec![
+                "-Xverify:all",
+                "-ea",
+                "-cp",
+                output.path().to_str().unwrap(),
+                "BooleanClient",
+            ],
+        ),
+    ] {
+        let result = Command::new(program).args(arguments).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

@@ -44,6 +44,21 @@ pub(super) fn emit_match(
     if matched.cases.is_empty() {
         return Err(unsupported(tree, "match requires a final wildcard"));
     }
+    let selector = context.tree(matched.selector)?;
+    let selector_type = match block_value_type(
+        context,
+        matched.selector,
+        selector.ty,
+        Some(matched.selector),
+    )? {
+        Some(kind @ (JvmType::Int | JvmType::Boolean)) => kind,
+        _ => {
+            return Err(unsupported(
+                matched.selector,
+                "unsupported match selector type",
+            ));
+        }
+    };
     let mut cases = Vec::with_capacity(matched.cases.len());
     for (index, &case_id) in matched.cases.iter().enumerate() {
         context.visit(case_id, depth + 1)?;
@@ -111,6 +126,19 @@ pub(super) fn emit_match(
                 }
                 vec![value]
             }
+            TreeKind::Literal(literal) if matches!(literal.value, Constant::Boolean(_)) => {
+                let Constant::Boolean(value) = literal.value else {
+                    unreachable!()
+                };
+                if !matches!(context.store.types.try_get(pattern.ty), Some(Type::Constant(Constant::Boolean(typed))) if *typed == value)
+                {
+                    return Err(unsupported(
+                        case.pattern,
+                        "inconsistent Boolean match literal",
+                    ));
+                }
+                vec![i32::from(value)]
+            }
             TreeKind::Ident(ident)
                 if !ident.backquoted
                     && ident.name.is_term()
@@ -131,8 +159,15 @@ pub(super) fn emit_match(
                 "match requires exactly one final wildcard",
             ));
         }
-        if primitive_type(context.store, pattern_type, context.definitions) != Some(JvmType::Int) {
-            return Err(unsupported(case.pattern, "non-Int match pattern type"));
+        if primitive_type(context.store, pattern_type, context.definitions) != Some(selector_type) {
+            return Err(unsupported(
+                case.pattern,
+                if selector_type == JvmType::Int {
+                    "non-Int match pattern type"
+                } else {
+                    "non-Boolean match pattern type"
+                },
+            ));
         }
         cases.push(MatchCase {
             body: case.body,
@@ -141,8 +176,11 @@ pub(super) fn emit_match(
             binder,
         });
     }
-    if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(JvmType::Int) {
-        return Err(unsupported(matched.selector, "non-Int match selector"));
+    if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(selector_type) {
+        return Err(unsupported(
+            matched.selector,
+            "match selector flow/type mismatch",
+        ));
     }
     let slot = context.reserve_temporary_local_slots(tree, 1)?;
     let result = emit_cases(context, tree, &cases, expected, slot, code, depth);
