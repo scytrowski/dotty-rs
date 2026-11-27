@@ -488,10 +488,11 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 
 /// Parse, name and type `source_text` once, construct both producer plans from
 /// the resulting canonical identities, validate them independently, and prove
-/// their class/member ABI agrees. Supported Int/Long/Float/Double locals retain
+/// their class/member ABI agrees. Supported Int/Boolean/Long/Float/Double locals retain
 /// the typer's exact source, typed-declaration, symbol and scope bindings,
 /// including inferred declarations. Boolean pattern bindings retain their exact case
-/// scopes; ordinary Boolean declarations remain unsupported by the pickler.
+/// scopes. Bounded Boolean values and mutable flags compose with existing control
+/// flow and local returns; returns inside operands remain unsupported.
 /// Primitive ascriptions, operators and bounded Int/Boolean-selector matches are accepted only when both producers validate the same roots.
 /// The callback keeps the borrowed session alive
 /// for the entire planning receipt lifetime.

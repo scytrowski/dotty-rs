@@ -1,0 +1,221 @@
+/** Decompiled from <oracle>/example/BooleanLocals.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("BooleanLocals.scala") class BooleanLocals() {
+    def declared(x: scala.Boolean): scala.Boolean = {
+      val flag: scala.Boolean = x
+
+      (flag: scala.Boolean)
+    }
+    def inferred(`x₂`: scala.Boolean): scala.Boolean = {
+      val `flag₂`: scala.Boolean = `x₂`
+
+      (`flag₂`: scala.Boolean)
+    }
+    def literal(): scala.Boolean = {
+      val `flag₃`: scala.Boolean = true
+
+      (`flag₃`: scala.Boolean)
+    }
+    def mutable(`x₃`: scala.Boolean): scala.Boolean = {
+      var `flag₄`: scala.Boolean = false
+      `flag₄` = `x₃`
+      `flag₄` = `flag₄`.unary_!
+
+      (`flag₄`: scala.Boolean)
+    }
+    def conditional(`x₄`: scala.Boolean): scala.Boolean = {
+      val `flag₅`: scala.Boolean = if (`x₄`) false else true
+
+      (`flag₅`: scala.Boolean)
+    }
+    def shortInit(`x₅`: scala.Boolean, y: scala.Boolean): scala.Boolean = {
+      val `flag₆`: scala.Boolean = `x₅`.&&(y)
+
+      (`flag₆`: scala.Boolean)
+    }
+    def comparison(`x₆`: scala.Int): scala.Boolean = {
+      val `flag₇`: scala.Boolean = `x₆`.>(0)
+
+      (`flag₇`: scala.Boolean)
+    }
+    def branchAssign(`x₇`: scala.Boolean, `y₂`: scala.Boolean): scala.Boolean = {
+      var `flag₈`: scala.Boolean = `x₇`
+      if (`y₂`) `flag₈` = false else `flag₈` = true
+
+      (`flag₈`: scala.Boolean)
+    }
+    def loop(`x₈`: scala.Boolean): scala.Int = {
+      var `flag₉`: scala.Boolean = `x₈`
+      var count: scala.Int = 0
+      while (`flag₉`) {
+        count = count.+(1)
+        `flag₉` = false
+      }
+
+      (count: scala.Int)
+    }
+    def fromMatch(`x₉`: scala.Boolean): scala.Boolean = {
+      val `flag₁₀`: scala.Boolean = `x₉` match {
+        case true =>
+          false
+        case _ =>
+          true
+      }
+
+      (`flag₁₀`: scala.Boolean)
+    }
+    def selector(`x₁₀`: scala.Boolean): scala.Int = {
+      val `flag₁₁`: scala.Boolean = `x₁₀`
+      `flag₁₁` match {
+        case true =>
+          1
+        case _ =>
+          2
+      }
+    }
+    def binder(`x₁₁`: scala.Boolean): scala.Boolean = `x₁₁` match {
+      case n =>
+        val `flag₁₂`: scala.Boolean = n
+
+        (`flag₁₂`: scala.Boolean)
+    }
+    def effects(`x₁₂`: scala.Boolean): scala.Boolean = {
+      var `flag₁₃`: scala.Boolean = false
+      val result: scala.Boolean = `x₁₂`.&&({
+        `flag₁₃` = `flag₁₃`.unary_!
+        false
+      })
+      `flag₁₃`.||(result)
+    }
+    def guardEffects(`x₁₃`: scala.Boolean, `n₂`: scala.Int): scala.Int = {
+      var `flag₁₄`: scala.Boolean = `x₁₃`
+      `n₂` match {
+        case 1 if {
+          `flag₁₄` = `flag₁₄`.unary_!
+          `flag₁₄`
+        } =>
+          10
+        case _ =>
+          if (`flag₁₄`) 20 else 30
+      }
+    }
+    def longResult(`x₁₄`: scala.Boolean, `n₃`: scala.Long): scala.Long = {
+      val `flag₁₅`: scala.Boolean = `x₁₄`
+      if (`flag₁₅`) `n₃` else 0L
+    }
+    def doubleResult(`x₁₅`: scala.Boolean, `n₄`: scala.Double): scala.Double = {
+      val `flag₁₆`: scala.Boolean = `x₁₅`
+      if (`flag₁₆`) `n₄` else 0.0
+    }
+    def returnFlag(`x₁₆`: scala.Boolean): scala.Boolean = {
+      val `flag₁₇`: scala.Boolean = `x₁₆`
+      return `flag₁₇`
+    }
+    def tailFormal(`x₁₇`: scala.Boolean, `y₃`: scala.Boolean): scala.Boolean = if (`x₁₇`) {
+      return true
+      `y₃`
+    } else false
+    def tailLocal(`x₁₈`: scala.Boolean, `y₄`: scala.Boolean): scala.Boolean = {
+      val `flag₁₈`: scala.Boolean = `y₄`
+
+      (if (`x₁₈`) {
+        return true
+        `flag₁₈`
+      } else false: scala.Boolean)
+    }
+    def tailPattern(`x₁₉`: scala.Boolean): scala.Boolean = `x₁₉` match {
+      case n =>
+        return true
+
+        (`n₅`: scala.Boolean)
+    }
+    def floatResult(`x₂₀`: scala.Boolean, `n₆`: scala.Float): scala.Float = {
+      val `flag₁₉`: scala.Boolean = `x₂₀`
+      if (`flag₁₉`) `n₆` else 0.0f
+    }
+    def assignMatch(`x₂₁`: scala.Boolean): scala.Boolean = {
+      var `flag₂₀`: scala.Boolean = `x₂₁`
+      `flag₂₀` = `x₂₁` match {
+        case true =>
+          false
+        case _ =>
+          true
+      }
+
+      (`flag₂₀`: scala.Boolean)
+    }
+    def effectsOr(`x₂₂`: scala.Boolean): scala.Boolean = {
+      var `flag₂₁`: scala.Boolean = false
+      val `result₂`: scala.Boolean = `x₂₂`.||({
+        `flag₂₁` = `flag₂₁`.unary_!
+        false
+      })
+      `flag₂₁`.&&(`result₂`.unary_!)
+    }
+    def loopReturn(`x₂₃`: scala.Boolean): scala.Int = {
+      var `flag₂₂`: scala.Boolean = `x₂₃`
+      while (`flag₂₂`) {
+        `flag₂₂` = false
+        return 1
+      }
+      0
+    }
+    def unit(`x₂₄`: scala.Boolean): scala.Unit = {
+      var `flag₂₃`: scala.Boolean = `x₂₄`
+      `flag₂₃` = false
+      ()
+    }
+    def tailSingleton(`x₂₅`: scala.Boolean): scala.Boolean = `x₂₅` match {
+      case n @ true =>
+        return false
+
+        (`n₇`: scala.Boolean)
+      case _ =>
+        true
+    }
+    def tailConstant(): scala.Boolean = true match {
+      case n =>
+        return false
+
+        (`n₈`: true)
+    }
+    def siblingScopes(`x₂₆`: scala.Boolean): scala.Int = if (`x₂₆`) {
+      val `flag₂₄`: scala.Boolean = true
+      if (`flag₂₄`) 1 else 2
+    } else {
+      val `flag₂₅`: scala.Boolean = false
+      if (`flag₂₅`) 3 else 4
+    }
+    def parameterShadow(`flag₂₆`: scala.Boolean): scala.Boolean = {
+      val `flag₂₇`: scala.Boolean = false
+
+      (`flag₂₇`: scala.Boolean)
+    }
+    def ascribed(`x₂₇`: scala.Boolean): scala.Boolean = {
+      val `flag₂₈`: scala.Boolean = `x₂₇`
+
+      (`flag₂₈`: scala.Boolean)
+    }
+    def bothReturn(`x₂₈`: scala.Boolean, `y₅`: scala.Boolean): scala.Boolean = {
+      val `flag₂₉`: scala.Boolean = `y₅`
+
+      (if (`x₂₈`) {
+        return true
+        `flag₂₉`
+      } else {
+        return false
+        `flag₂₉`
+      }: scala.Boolean)
+    }
+    def constantLoop(): scala.Int = true match {
+      case n =>
+        while (`n₉`) return 1
+        2
+    }
+    def falseLoop(): scala.Int = false match {
+      case n =>
+        while (`n₁₀`) return 1
+        2
+    }
+  }
+}

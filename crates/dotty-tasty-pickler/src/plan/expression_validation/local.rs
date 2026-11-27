@@ -164,7 +164,8 @@ impl Validator<'_, '_> {
         }
 
         let local_type = self.complete(binding.symbol)?;
-        if (local_type != self.plan.definitions.int
+        if (local_type != self.plan.definitions.boolean
+            && local_type != self.plan.definitions.int
             && local_type != self.plan.definitions.long
             && local_type != self.plan.definitions.float
             && local_type != self.plan.definitions.double
@@ -207,7 +208,8 @@ impl Validator<'_, '_> {
             return Err(PickleError::UnsupportedTypeReference { ty: local_type });
         }
         let source_type_matches = matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
-            || ((local_type == self.plan.definitions.int
+            || ((local_type == self.plan.definitions.boolean
+                || local_type == self.plan.definitions.int
                 || local_type == self.plan.definitions.long
                 || local_type == self.plan.definitions.float
                 || local_type == self.plan.definitions.double)

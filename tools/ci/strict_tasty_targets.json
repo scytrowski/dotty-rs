@@ -5,14 +5,14 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-local target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
   },
   "baseline": {
-    "inventory_count": 36,
-    "accounted_test_seconds": 1760.46,
+    "inventory_count": 37,
+    "accounted_test_seconds": 1768.2,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1836.46,
-    "full_job_seconds": 2011.05
+    "strict_step_seconds": 1844.2,
+    "full_job_seconds": 2018.79
   },
   "targets": [
     {
@@ -158,12 +158,16 @@
     {
       "name": "jvm_tasty_boolean_matches",
       "measured_seconds": 6.65
+    },
+    {
+      "name": "jvm_tasty_boolean_locals",
+      "measured_seconds": 7.74
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 27.84,
+    "estimated_runner_minutes": 27.96,
     "estimated_critical_path_minutes": 10.6,
     "shards": [
       {
@@ -212,7 +216,7 @@
       },
       {
         "id": "shard-4",
-        "estimated_test_seconds": 373.53,
+        "estimated_test_seconds": 381.27,
         "targets": [
           "jvm_tasty_multi_argument_constructor_scala_consumer",
           "jvm_tasty_dual_reference_rust_consumer",
@@ -223,7 +227,8 @@
           "jvm_tasty_dual_reference_artifacts",
           "jvm_tasty_conditional_local_reference_proof",
           "jvm_tasty_conditional_reference_scala_consumer",
-          "jvm_tasty_floating_values"
+          "jvm_tasty_floating_values",
+          "jvm_tasty_boolean_locals"
         ]
       }
     ]

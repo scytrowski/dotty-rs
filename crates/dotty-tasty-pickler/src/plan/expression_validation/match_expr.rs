@@ -241,8 +241,17 @@ impl Validator<'_, '_> {
             }
             self.visible_locals = visible;
         }
+        // A constant Boolean selector and one binder case can retain the
+        // unreachable tail's singleton type. Only proven exits may bypass the
+        // canonical join check; no normal value path is widened by this rule.
+        let boolean_exit_singleton = all_exit
+            && result_type == p.definitions.boolean
+            && semantic_join == Some(p.definitions.boolean)
+            && matches!(self.ty(typed.ty)?, Type::Constant(Constant::Boolean(_)));
         if (bottom && !all_exit)
-            || (returning && typed.ty != semantic_join.unwrap_or(p.definitions.nothing_type))
+            || (returning
+                && typed.ty != semantic_join.unwrap_or(p.definitions.nothing_type)
+                && !boolean_exit_singleton)
         {
             return Err(PickleError::BodyType {
                 tree: typed_id,

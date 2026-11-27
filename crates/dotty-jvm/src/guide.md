@@ -97,5 +97,11 @@ case bindings retain canonical Boolean types and case scopes. Nested Boolean/Int
 matches, short-circuit selectors/guards and all existing primitive results are
 supported. Exactly one final unconditional wildcard or variable case is required,
 even after `true | false`; this is not general exhaustiveness or MatchError
-lowering. Paired TASTy production still excludes ordinary Boolean ValDef locals,
-general Boolean blocks and arbitrary Boolean-returning calls.
+lowering. Paired TASTy production also supports ordinary Boolean locals and
+bounded Boolean value blocks; arbitrary Boolean-returning calls remain outside
+that paired subset.
+
+Ordinary Boolean `val`/`var` declarations keep exact planned symbols and local
+slots, and can drive branches, loops, selectors and guards. Proven returning
+branches authenticate Boolean TermRef tails, including singleton case bindings,
+without confusing Boolean with Int or manufacturing a Nothing type.

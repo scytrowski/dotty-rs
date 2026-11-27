@@ -4518,18 +4518,23 @@ fn validate_branch(
             // Recursive lowering proves the exit. A block can retain the type
             // of its unreachable tail without producing a value on that path.
             let kind = &context.tree(tree)?.kind;
-            // The typer can retain a numeric parameter/local singleton as the
-            // unreachable tail's type. Authenticate the exact planned binding
-            // and JVM kind, keeping Float/Double distinct from Int/Long.
-            let numeric_binding_type = matches!(context.store.types.try_get(tree_ty),
+            // The typer can retain a primitive binding as the unreachable tail's
+            // TermRef type. Authenticate the exact planned binding and kind,
+            // including Boolean singleton case locals; verifier Integer is
+            // insufficient evidence for semantic Boolean identity.
+            let primitive_binding_type = matches!(context.store.types.try_get(tree_ty),
                 Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) })
                     if *prefix == context.definitions.no_prefix
                         && context.store.symbols.contains(*symbol)
-                        && [(context.definitions.long, JvmType::Long),
+                        && [(context.definitions.boolean, JvmType::Boolean),
+                            (context.definitions.long, JvmType::Long),
                             (context.definitions.float, JvmType::Float),
                             (context.definitions.double, JvmType::Double)]
                             .into_iter().any(|(ty, kind)|
-                                context.store.symbols.get(*symbol).info == SymbolInfo::Complete(ty)
+                                (context.store.symbols.get(*symbol).info == SymbolInfo::Complete(ty)
+                                    || (kind == JvmType::Boolean
+                                        && matches!(context.store.symbols.get(*symbol).info, SymbolInfo::Complete(info)
+                                            if matches!(context.store.types.try_get(info), Some(Type::Constant(Constant::Boolean(_)))))))
                                     && (context.method.parameters().iter().any(|p| p.symbol() == *symbol && p.ty() == kind)
                                         || context.local_layout.is_some_and(|l| l.local(*symbol).is_ok_and(|slot| slot.ty() == kind)))));
             let diverges_with_supported_type =
@@ -4542,7 +4547,7 @@ fn validate_branch(
                                 | TreeKind::Block(_)
                                 | TreeKind::Match(_)
                         ))
-                    || ((numeric_binding_type
+                    || ((primitive_binding_type
                         || matches!(
                             primitive_type(context.store, tree_ty, context.definitions),
                             Some(
@@ -6232,6 +6237,67 @@ mod tests {
                 validate_branch(&context, inner, Flow::Diverges),
                 Err(JvmCodegenError::UnsupportedBottomFlow { tree: inner })
             );
+        }
+    }
+
+    #[test]
+    fn proved_boolean_return_tail_requires_exact_semantic_binding_and_kind() {
+        let mut f = Fixture::new(&[JvmType::Boolean]);
+        f.set_result(JvmReturnType::Value(JvmType::Boolean));
+        let value = f.literal(Constant::Boolean(true), f.definitions.boolean);
+        let returned = f.return_expr(Some(value), None);
+        let reference = f.store.types.alloc(Type::TermRef {
+            prefix: f.definitions.no_prefix,
+            target: TermRefTarget::Symbol(f.parameters[0]),
+        });
+        let tail = f.ident(reference);
+        let inner = f.block(vec![returned], tail, reference);
+        let outer = f.block(Vec::new(), inner, reference);
+        let context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+        assert_eq!(validate_branch(&context, inner, Flow::Diverges), Ok(()));
+        let code = lower_method_body(&f.store, &f.ast, &f.definitions, &f.method, outer).unwrap();
+        assert_eq!(method_body_bytes(&f, code), [0x04, 0xac]);
+        for mode in 0..4 {
+            let original = f.ast.get(inner).ty;
+            let original_kind = f.method.parameters[0].ty;
+            let invalid_type = match mode {
+                0 => {
+                    // Int and Boolean have identical verifier categories.
+                    f.method.parameters[0].ty = JvmType::Int;
+                    reference
+                }
+                1 => f.store.types.alloc(Type::TermRef {
+                    prefix: f.definitions.int,
+                    target: TermRefTarget::Symbol(f.parameters[0]),
+                }),
+                2 => {
+                    let foreign = symbol(
+                        &mut f.store,
+                        SymbolKind::Parameter,
+                        None,
+                        f.definitions.boolean,
+                    );
+                    f.store.types.alloc(Type::TermRef {
+                        prefix: f.definitions.no_prefix,
+                        target: TermRefTarget::Symbol(foreign),
+                    })
+                }
+                _ => f.definitions.nothing_type,
+            };
+            f.ast.get_mut(inner).ty = invalid_type;
+            let context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+            // Nothing only authenticates a recursively proven exit, never a value path.
+            let flow = if mode == 3 {
+                Flow::Value(JvmType::Boolean)
+            } else {
+                Flow::Diverges
+            };
+            assert_eq!(
+                validate_branch(&context, inner, flow),
+                Err(JvmCodegenError::UnsupportedBottomFlow { tree: inner })
+            );
+            f.ast.get_mut(inner).ty = original;
+            f.method.parameters[0].ty = original_kind;
         }
     }
 
