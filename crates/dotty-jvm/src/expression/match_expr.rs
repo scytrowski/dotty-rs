@@ -60,6 +60,7 @@ pub(super) fn emit_match(
         }
     };
     let mut cases = Vec::with_capacity(matched.cases.len());
+    let mut boolean_coverage = 0u8;
     for (index, &case_id) in matched.cases.iter().enumerate() {
         context.visit(case_id, depth + 1)?;
         let case_node = context.tree(case_id)?;
@@ -115,7 +116,7 @@ pub(super) fn emit_match(
         }
         let pattern = context.tree(pattern_id)?;
         let pattern_type = pattern.ty;
-        let literals = match &pattern.kind {
+        let mut literals = match &pattern.kind {
             TreeKind::Literal(literal) if matches!(literal.value, Constant::Int(_)) => {
                 let Constant::Int(value) = literal.value else {
                     unreachable!()
@@ -159,12 +160,6 @@ pub(super) fn emit_match(
             }
             _ => return Err(unsupported(case.pattern, "unsupported match pattern")),
         };
-        if (literals.is_empty() && case.guard.is_none()) != (index + 1 == matched.cases.len()) {
-            return Err(unsupported(
-                case.pattern,
-                "match requires exactly one final wildcard",
-            ));
-        }
         if primitive_type(context.store, pattern_type, context.definitions) != Some(selector_type) {
             return Err(unsupported(
                 case.pattern,
@@ -174,6 +169,30 @@ pub(super) fn emit_match(
                     "non-Boolean match pattern type"
                 },
             ));
+        }
+        let last = index + 1 == matched.cases.len();
+        let fallback = literals.is_empty() && case.guard.is_none();
+        if selector_type == JvmType::Boolean && case.guard.is_none() {
+            // Only authenticated Boolean literals reach here. Guarded cases
+            // guarantee no coverage, and repeated alternatives add no values.
+            for &value in &literals {
+                boolean_coverage |= if value == 0 { 1 } else { 2 };
+            }
+        }
+        let exhaustive_boolean =
+            selector_type == JvmType::Boolean && case.guard.is_none() && boolean_coverage == 3;
+        if (fallback && !last) || (last && !fallback && !exhaustive_boolean) {
+            return Err(unsupported(
+                case.pattern,
+                "match requires exactly one final wildcard",
+            ));
+        }
+        if last && exhaustive_boolean {
+            // This private lowering plan may treat the final pattern as the
+            // residual default only after proving full Boolean coverage. Keeping
+            // a final mismatch edge would leave a path without a result. Source
+            // and typed patterns remain unchanged (including binder identity).
+            literals.clear();
         }
         cases.push(MatchCase {
             body: case.body,
