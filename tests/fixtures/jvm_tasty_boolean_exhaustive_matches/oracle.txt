@@ -1,0 +1,175 @@
+/** Decompiled from <oracle>/example/BooleanExhaustiveMatches.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("BooleanExhaustiveMatches.scala") class BooleanExhaustiveMatches() {
+    def ordered(x: scala.Boolean): scala.Int = x match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def reversed(`x₂`: scala.Boolean): scala.Int = `x₂` match {
+      case false =>
+        2
+      case true =>
+        1
+    }
+    def alternative(`x₃`: scala.Boolean): scala.Int = `x₃` match {
+      case (true | false) =>
+        3
+    }
+    def nested_alternative(`x₄`: scala.Boolean): scala.Int = `x₄` match {
+      case ((true | true) | false) =>
+        3
+    }
+    def bind_literals(`x₅`: scala.Boolean): scala.Boolean = `x₅` match {
+      case n @ true =>
+        (n: scala.Boolean)
+      case n @ false =>
+        (`n₂`: scala.Boolean)
+    }
+    def guard_before_complete(`x₆`: scala.Boolean, g: scala.Boolean): scala.Int = `x₆` match {
+      case true if g =>
+        3
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def guarded_alternative_before_complete(`x₇`: scala.Boolean, `g₂`: scala.Boolean): scala.Int = `x₇` match {
+      case (true | true) if `g₂` =>
+        3
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def guard_effect(`x₈`: scala.Boolean): scala.Int = {
+      var c: scala.Int = 0
+      val r: scala.Int = `x₈` match {
+        case (true | true) if {
+          c = c.+(1)
+          false
+        } =>
+          3
+        case true =>
+          10
+        case false =>
+          20
+      }
+      r.+(c)
+    }
+    def selector_effect(`x₉`: scala.Boolean): scala.Int = {
+      var `c₂`: scala.Int = 0
+      val `r₂`: scala.Int = {
+        `c₂` = `c₂`.+(1)
+        `x₉`
+      } match {
+        case true =>
+          10
+        case false =>
+          20
+      }
+      `r₂`.+(`c₂`)
+    }
+    def return_mixed(`x₁₀`: scala.Boolean): scala.Int = `x₁₀` match {
+      case true =>
+        return 1
+      case false =>
+        2
+    }
+    def return_all(`x₁₁`: scala.Boolean): scala.Int = `x₁₁` match {
+      case true =>
+        return 1
+      case false =>
+        return 2
+    }
+    def return_tail(`x₁₂`: scala.Boolean, y: scala.Boolean): scala.Boolean = `x₁₂` match {
+      case true =>
+        return false
+        y
+      case false =>
+        return true
+        y
+    }
+    def local_bool(`x₁₃`: scala.Boolean): scala.Boolean = {
+      val b: scala.Boolean = `x₁₃`
+      b match {
+        case true =>
+          false
+        case false =>
+          true
+      }
+    }
+    def nested(`x₁₄`: scala.Boolean, `y₂`: scala.Boolean): scala.Int = `x₁₄` match {
+      case true =>
+        `y₂` match {
+          case true =>
+            1
+          case false =>
+            2
+        }
+      case false =>
+        3
+    }
+    def result_boolean(`x₁₅`: scala.Boolean): scala.Boolean = `x₁₅` match {
+      case true =>
+        true
+      case false =>
+        false
+    }
+    def return_boolean(`x₁₆`: scala.Boolean, a: scala.Boolean, `b₂`: scala.Boolean): scala.Boolean = `x₁₆` match {
+      case true =>
+        return a
+      case false =>
+        `b₂`
+    }
+    def result_unit(`x₁₇`: scala.Boolean): scala.Unit = `x₁₇` match {
+      case true =>
+        ()
+      case false =>
+        ()
+    }
+    def result_long(`x₁₈`: scala.Boolean): scala.Long = `x₁₈` match {
+      case true =>
+        9223372036854775807L
+      case false =>
+        -9223372036854775808L
+    }
+    def return_long(`x₁₉`: scala.Boolean, `a₂`: scala.Long, `b₃`: scala.Long): scala.Long = `x₁₉` match {
+      case true =>
+        return `a₂`
+      case false =>
+        `b₃`
+    }
+    def result_float(`x₂₀`: scala.Boolean): scala.Float = `x₂₀` match {
+      case true =>
+        -0.0f
+      case false =>
+        1.4E-45f
+    }
+    def return_float(`x₂₁`: scala.Boolean, `a₃`: scala.Float, `b₄`: scala.Float): scala.Float = `x₂₁` match {
+      case true =>
+        return `a₃`
+      case false =>
+        `b₄`
+    }
+    def result_double(`x₂₂`: scala.Boolean): scala.Double = `x₂₂` match {
+      case true =>
+        -0.0
+      case false =>
+        4.9E-324
+    }
+    def return_double(`x₂₃`: scala.Boolean, `a₄`: scala.Double, `b₅`: scala.Double): scala.Double = `x₂₃` match {
+      case true =>
+        return `a₄`
+      case false =>
+        `b₅`
+    }
+    def return_unit(`x₂₄`: scala.Boolean): scala.Unit = `x₂₄` match {
+      case true =>
+        return ()
+      case false =>
+        ()
+    }
+  }
+}
