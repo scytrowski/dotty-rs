@@ -64,9 +64,11 @@ use guarded_match_plan::with_jvm;
 
 #[test]
 fn jvm_case_bindings_are_canonical_slots_and_cannot_change_case_scope() {
-    with_jvm(
+    for source in [
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n + 1; case n => n } }",
-        |unit, definitions| {
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n: Int if n > 0 => n + 1; case n: Int => n } }",
+    ] {
+        with_jvm(source, |unit, definitions| {
             let class = unit.classes[0].class;
             let generated = dotty::jvm::emit_class(unit, class, definitions).unwrap();
             assert!(!generated.bytes().is_empty());
@@ -95,8 +97,8 @@ fn jvm_case_bindings_are_canonical_slots_and_cannot_change_case_scope() {
                 invalid.validate(),
                 Err(dotty::jvm::JvmCodegenError::InvalidLocalDeclaration { .. })
             ));
-        },
-    );
+        });
+    }
 }
 
 #[test]
@@ -204,90 +206,96 @@ fn tasty_rejects_missing_duplicate_or_cross_case_pattern_evidence_without_mutati
             self.patterns.clone()
         }
     }
-    let source = "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n; case n => n } }";
-    dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
-        source,
-        "GuardedMatches.scala",
-        SourceId::from_index(2471),
-        |plan| {
-            let raw = plan.tasty_plan.plan();
-            let method = plan.jvm_unit.classes[0].methods[0].method;
-            let original = raw
-                .typed_bindings
-                .pattern_value_bindings(raw.source.id, method);
-            assert_eq!(original.len(), 2);
-            let checkpoint = raw.store.checkpoint();
-            for mode in 0..4 {
-                let mut patterns = original.clone();
-                match mode {
-                    0 => patterns.clear(),
-                    1 => patterns.push(patterns[0]),
-                    2 => patterns[0].scope = patterns[1].scope,
-                    3 => patterns[0].typed_declaration = patterns[1].typed_declaration,
-                    _ => unreachable!(),
-                }
-                let bindings = Bindings {
-                    original: raw.typed_bindings,
-                    patterns,
-                };
-                let input = ClassStatePicklePlan {
-                    store: raw.store,
-                    definitions: raw.definitions,
-                    source_ast: raw.source_ast,
-                    typed_ast: raw.typed_ast,
-                    source_index: raw.source_index,
-                    typed_bindings: &bindings,
-                    source: raw.source.clone(),
-                    class: raw.class,
-                    class_tree: raw.class_tree,
-                    constructor: dotty_tasty_pickler::PrimaryConstructorInputPlan {
-                        symbol: raw.constructor.symbol,
-                        source_tree: raw.constructor.source_tree,
-                        parameter_clauses: raw.constructor.parameter_clauses.clone(),
-                    },
-                    members: raw.members,
-                };
-                let error = input
-                    .validate()
-                    .and_then(|validated| validated.validate_method_bodies())
-                    .unwrap_err();
-                match mode {
-                    0 => assert!(
-                        matches!(error, PickleError::Unsupported { .. }),
-                        "{error:?}"
-                    ),
-                    1 => assert!(
-                        matches!(error, PickleError::DuplicateDeclaration { .. }),
-                        "{error:?}"
-                    ),
-                    _ => assert!(
-                        matches!(
-                            error,
-                            PickleError::Reference {
-                                reason: ReferenceError::Owner,
-                                ..
-                            }
+    for source in [
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n: Int if n > 0 => n; case n: Int => n } }",
+    ] {
+        dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
+            source,
+            "GuardedMatches.scala",
+            SourceId::from_index(2471),
+            |plan| {
+                let raw = plan.tasty_plan.plan();
+                let method = plan.jvm_unit.classes[0].methods[0].method;
+                let original = raw
+                    .typed_bindings
+                    .pattern_value_bindings(raw.source.id, method);
+                assert_eq!(original.len(), 2);
+                let checkpoint = raw.store.checkpoint();
+                for mode in 0..4 {
+                    let mut patterns = original.clone();
+                    match mode {
+                        0 => patterns.clear(),
+                        1 => patterns.push(patterns[0]),
+                        2 => patterns[0].scope = patterns[1].scope,
+                        3 => patterns[0].typed_declaration = patterns[1].typed_declaration,
+                        _ => unreachable!(),
+                    }
+                    let bindings = Bindings {
+                        original: raw.typed_bindings,
+                        patterns,
+                    };
+                    let input = ClassStatePicklePlan {
+                        store: raw.store,
+                        definitions: raw.definitions,
+                        source_ast: raw.source_ast,
+                        typed_ast: raw.typed_ast,
+                        source_index: raw.source_index,
+                        typed_bindings: &bindings,
+                        source: raw.source.clone(),
+                        class: raw.class,
+                        class_tree: raw.class_tree,
+                        constructor: dotty_tasty_pickler::PrimaryConstructorInputPlan {
+                            symbol: raw.constructor.symbol,
+                            source_tree: raw.constructor.source_tree,
+                            parameter_clauses: raw.constructor.parameter_clauses.clone(),
+                        },
+                        members: raw.members,
+                    };
+                    let error = input
+                        .validate()
+                        .and_then(|validated| validated.validate_method_bodies())
+                        .unwrap_err();
+                    match mode {
+                        0 => assert!(
+                            matches!(error, PickleError::Unsupported { .. }),
+                            "{error:?}"
                         ),
-                        "{error:?}"
-                    ),
+                        1 => assert!(
+                            matches!(error, PickleError::DuplicateDeclaration { .. }),
+                            "{error:?}"
+                        ),
+                        _ => assert!(
+                            matches!(
+                                error,
+                                PickleError::Reference {
+                                    reason: ReferenceError::Owner,
+                                    ..
+                                }
+                            ),
+                            "{error:?}"
+                        ),
+                    }
+                    assert_eq!(checkpoint, raw.store.checkpoint());
                 }
+                let mut classes = plan.jvm_unit.classes.clone();
+                classes[0].methods[0].locals.clear();
+                let unit = JvmCompilationUnit {
+                    store: raw.store,
+                    typed_ast: raw.typed_ast,
+                    classes,
+                };
+                assert!(matches!(
+                    dotty_jvm_tasty_contract::validate_jvm_tasty_class(&unit, plan.tasty_plan),
+                    Err(
+                        dotty_jvm_tasty_contract::JvmTastyContractError::LocalBindingMismatch { .. }
+                    )
+                ));
                 assert_eq!(checkpoint, raw.store.checkpoint());
-            }
-            let mut classes = plan.jvm_unit.classes.clone();
-            classes[0].methods[0].locals.clear();
-            let unit = JvmCompilationUnit {
-                store: raw.store,
-                typed_ast: raw.typed_ast,
-                classes,
-            };
-            assert!(matches!(
-                dotty_jvm_tasty_contract::validate_jvm_tasty_class(&unit, plan.tasty_plan),
-                Err(dotty_jvm_tasty_contract::JvmTastyContractError::LocalBindingMismatch { .. })
-            ));
-            assert_eq!(checkpoint, raw.store.checkpoint());
-        },
-    )
-    .unwrap();
+            },
+        )
+        .unwrap();
+    }
 }
 
 fn copied_typed_ast(
@@ -302,9 +310,11 @@ fn copied_typed_ast(
 
 #[test]
 fn jvm_rejects_non_boolean_guards_and_cross_case_binder_references() {
-    with_jvm(
+    for source in [
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if x > 0 => n; case n => n } }",
-        |unit, definitions| {
+        "package example; class GuardedMatches { def f(x: Int): Int = x match { case n: Int if x > 0 => n; case n: Int => n } }",
+    ] {
+        with_jvm(source, |unit, definitions| {
             let method = &unit.classes[0].methods[0];
             let case_id = method.locals[0].pattern_case().unwrap().1;
             let root = method.body.unwrap();
@@ -351,8 +361,8 @@ fn jvm_rejects_non_boolean_guards_and_cross_case_binder_references() {
                 ),
                 "{error:?}"
             );
-        },
-    );
+        });
+    }
 }
 
 fn jdk_available() -> bool {

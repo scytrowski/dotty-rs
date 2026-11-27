@@ -5960,6 +5960,43 @@ mod tests {
     }
 
     #[test]
+    fn typed_pattern_children_consume_depth_and_node_budgets() {
+        let (fixture, root, pattern) = typed_pattern_fixture(false);
+        let TreeKind::Typed(wrapper) = fixture.ast.get(pattern).kind else {
+            panic!()
+        };
+        for node_budget in [false, true] {
+            let mut context = JvmLoweringContext::new(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+            );
+            let depth = if node_budget {
+                context.node_visits = JVM_EXPRESSION_NODE_BUDGET - 4;
+                0
+            } else {
+                JVM_EXPRESSION_DEPTH_LIMIT - 3
+            };
+            let error =
+                emit_expression(&mut context, root, &mut CodeBuilder::new(), depth).unwrap_err();
+            let expected = if node_budget {
+                JvmCodegenError::ExpressionNodeBudgetExceeded {
+                    tree: wrapper.expr,
+                    limit: JVM_EXPRESSION_NODE_BUDGET,
+                }
+            } else {
+                JvmCodegenError::ExpressionDepthExceeded {
+                    tree: wrapper.tpt,
+                    position: None,
+                    limit: JVM_EXPRESSION_DEPTH_LIMIT,
+                }
+            };
+            assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
     fn numeric_ascriptions_preserve_exact_value_kind_and_instructions() {
         for (kind, expected_bytes) in [
             (JvmType::Long, &[0x0a, 0xad][..]),
