@@ -67,6 +67,8 @@ fn jvm_case_bindings_are_canonical_slots_and_cannot_change_case_scope() {
     for source in [
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n + 1; case n => n } }",
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n: Int if n > 0 => n + 1; case n: Int => n } }",
+        "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n: Long if enabled => n; case n: Long => n } }",
     ] {
         with_jvm(source, |unit, definitions| {
             let class = unit.classes[0].class;
@@ -209,6 +211,9 @@ fn tasty_rejects_missing_duplicate_or_cross_case_pattern_evidence_without_mutati
     for source in [
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n if n > 0 => n; case n => n } }",
         "package example; class GuardedMatches { def f(x: Int): Int = x match { case n: Int if n > 0 => n; case n: Int => n } }",
+        "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n: Long if enabled => n; case n: Long => n } }",
+        "package example; class GuardedMatches { def f(enabled: Boolean): Long = 1L match { case n if enabled => n; case n => n } }",
     ] {
         dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
             source,
@@ -285,12 +290,13 @@ fn tasty_rejects_missing_duplicate_or_cross_case_pattern_evidence_without_mutati
                     typed_ast: raw.typed_ast,
                     classes,
                 };
+                let error = dotty_jvm_tasty_contract::validate_jvm_tasty_class(&unit, plan.tasty_plan).err();
                 assert!(matches!(
-                    dotty_jvm_tasty_contract::validate_jvm_tasty_class(&unit, plan.tasty_plan),
-                    Err(
+                    error,
+                    Some(
                         dotty_jvm_tasty_contract::JvmTastyContractError::LocalBindingMismatch { .. }
                     )
-                ));
+                ), "{source}: {error:?}");
                 assert_eq!(checkpoint, raw.store.checkpoint());
             },
         )

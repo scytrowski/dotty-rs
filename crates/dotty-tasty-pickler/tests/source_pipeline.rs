@@ -5535,8 +5535,12 @@ fn numeric_ascriptions_authenticate_type_syntax_spans_bindings_bits_and_cycles()
 #[test]
 fn primitive_typed_wildcards_preserve_pattern_type_syntax_in_method_only_plans() {
     use dotty_tasty::tasty::*;
-    for ty in ["Int", "Boolean"] {
-        let value = if ty == "Boolean" { "true" } else { "7" };
+    for ty in ["Int", "Boolean", "Long"] {
+        let value = match ty {
+            "Boolean" => "true",
+            "Long" => "7L",
+            _ => "7",
+        };
         let source = format!(
             "package example; class Patterns {{ def f(x: {ty}): {ty} = x match {{ case _: {ty} => {value} }} }}"
         );
@@ -5556,4 +5560,30 @@ fn primitive_typed_wildcards_preserve_pattern_type_syntax_in_method_only_plans()
         assert_eq!(tag, IDENTTPT_TAG);
         assert_eq!(file.render_name(value).unwrap(), ty);
     }
+}
+
+#[test]
+fn long_match_literals_preserve_full_width_and_order_in_method_only_plans() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class Patterns { def f(x: Long): Int = x match { case 1L | 4294967297L | -4294967295L => 7; case _ => 8 } }";
+    let (_, output) = source_outputs_named(source, "Patterns.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let payload = file.section(StandardSection::Asts).unwrap().payload;
+    let values: Vec<_> = index
+        .iter_nodes_with_tag(LONGCONST_TAG)
+        .map(|node| {
+            let RawTree::Leaf(term) =
+                RawTree::decode(&mut Reader::new(&payload[node.offset..])).unwrap()
+            else {
+                panic!()
+            };
+            let TermValue::LongInt(value) = term.value else {
+                panic!()
+            };
+            value
+        })
+        .collect();
+    assert_eq!(values, [1, 4_294_967_297, -4_294_967_295]);
+    assert_eq!(index.iter_nodes_with_tag(ALTERNATIVE_TAG).count(), 1);
 }

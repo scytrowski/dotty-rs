@@ -223,6 +223,16 @@ fn lower_pattern_type(
         })?;
         return context.wire_node(AstNode::Leaf(term));
     }
+    if let Some(Type::Constant(Constant::Long(value))) = store.types.try_get(ty) {
+        let term = SimpleTerm::new(
+            dotty_tasty::tasty::LONGCONST_TAG,
+            TermValue::LongInt(*value),
+        )
+        .map_err(|cause| PickleError::Encoding {
+            cause: Box::new(cause.into()),
+        })?;
+        return context.wire_node(AstNode::Leaf(term));
+    }
     if let Some(Type::Constant(Constant::Boolean(value))) = store.types.try_get(ty) {
         let tag = if *value {
             dotty_tasty::tasty::TRUECONST_TAG
