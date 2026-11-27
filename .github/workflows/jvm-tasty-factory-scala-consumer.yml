@@ -10,6 +10,7 @@ on:
       - 'docs/jvm-tasty-expressions.md'
       - 'docs/jvm-tasty-numeric-ascriptions.md'
       - 'docs/jvm-tasty-guarded-matches.md'
+      - 'docs/jvm-tasty-typed-primitive-patterns.md'
       - 'docs/jvm-tasty-local-returns.md'
       - 'docs/jvm-tasty-long-values.md'
       - 'docs/jvm-tasty-factory-result-arguments.md'

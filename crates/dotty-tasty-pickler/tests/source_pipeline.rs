@@ -5531,3 +5531,29 @@ fn numeric_ascriptions_authenticate_type_syntax_spans_bindings_bits_and_cycles()
         }
     }
 }
+
+#[test]
+fn primitive_typed_wildcards_preserve_pattern_type_syntax_in_method_only_plans() {
+    use dotty_tasty::tasty::*;
+    for ty in ["Int", "Boolean"] {
+        let value = if ty == "Boolean" { "true" } else { "7" };
+        let source = format!(
+            "package example; class Patterns {{ def f(x: {ty}): {ty} = x match {{ case _: {ty} => {value} }} }}"
+        );
+        let (_, output) = source_outputs_named(&source, "Patterns.scala", |_| {}).unwrap();
+        let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let wrappers: Vec<_> = index.iter().filter(|n| n.tag == TYPED_TAG).collect();
+        assert_eq!(wrappers.len(), 1);
+        let typed = wrappers[0].decode_typed().unwrap();
+        assert!(matches!(
+            typed.expression,
+            RawTree::NatAst { tag: IDENT_TAG, .. }
+        ));
+        let RawTree::NatAst { tag, value, .. } = typed.type_tree else {
+            panic!()
+        };
+        assert_eq!(tag, IDENTTPT_TAG);
+        assert_eq!(file.render_name(value).unwrap(), ty);
+    }
+}

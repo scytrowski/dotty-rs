@@ -42,7 +42,12 @@ unguarded coverage of both values with an unguarded final case. A Nothing-typed
 match is accepted only when every case proves a supported local return. A temporary local
 preserves one selector evaluation; branch initialization facts are intersected
 across normal exits. Match lowering currently requires a planned local layout.
-Guards and immutable Int/Boolean binders are supported; extractors, type tests and incomplete coverage without a fallback return typed errors.
+Guards and immutable Int/Boolean binders are supported. Same-type primitive
+patterns `_: Int`, `n: Int`, `n @ (_: Int)` and Boolean counterparts are proved
+irrefutable using exact canonical wrapper, type-tree and wildcard types. An
+unguarded irrefutable case must be final; a guard still requires a fallback.
+This proof emits no runtime type test. Typed alternatives, reference type tests,
+extractors and incomplete coverage without a fallback remain unsupported.
 The semantic TASTy producer retains these source constructs separately; a
 successful JVM emission alone does not certify a paired artifact.
 

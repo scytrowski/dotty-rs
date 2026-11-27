@@ -447,6 +447,15 @@ impl Validator<'_, '_> {
                     }
                     (true, 3)
                 }
+                TreeKind::Typed(_) => self.validate_typed_case_pattern(
+                    source_id,
+                    bind.body,
+                    selector_type,
+                    method,
+                    depth + 1,
+                    visited,
+                    Some((bind.name, typed_id)),
+                )?,
                 TreeKind::Bind(source_bind)
                     if !source_bind.given && source_bind.name == bind.name =>
                 {
@@ -475,6 +484,17 @@ impl Validator<'_, '_> {
             };
             self.visible_locals.insert(binding.symbol);
             return Ok(coverage);
+        }
+        if matches!(typed.kind, TreeKind::Typed(_)) {
+            return self.validate_typed_case_pattern(
+                source_id,
+                typed_id,
+                selector_type,
+                method,
+                depth,
+                visited,
+                None,
+            );
         }
         if matches!(&typed.kind, TreeKind::Ident(ident) if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
         {
@@ -522,6 +542,120 @@ impl Validator<'_, '_> {
             _ => 0,
         };
         Ok((false, coverage))
+    }
+
+    // Implicit `n: T` has source Typed -> typed Bind; only its tpt has
+    // a direct source edge into the synthetic Typed(_, tpt) below that Bind.
+    #[allow(clippy::too_many_arguments)]
+    fn validate_typed_case_pattern(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        selector_type: TypeId,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+        implicit_binder: Option<(dotty_core::names::Name, TreeId<Typed>)>,
+    ) -> Result<(bool, u8), PickleError> {
+        if depth + 1 > self.limits.expression_depth_limit() {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.limits.expression_depth_limit(),
+            });
+        }
+        self.charge(3)?;
+        let source = self.source_tree(source_id)?;
+        let typed = self
+            .plan
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        let (TreeKind::Typed(source_value), TreeKind::Typed(typed_value)) =
+            (&source.kind, &typed.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let source_value = *source_value;
+        let typed_value = *typed_value;
+        if implicit_binder.is_none() {
+            self.source_typed_binding(source_id, typed_id)?;
+        }
+        self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+        if typed.ty != selector_type {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed.ty,
+            });
+        }
+        for id in [typed_id, typed_value.tpt, typed_value.expr] {
+            if !visited.insert(id) {
+                return Err(PickleError::RepeatedExpression { tree: id });
+            }
+        }
+        let expected_name = if selector_type == self.plan.definitions.int {
+            "Int"
+        } else {
+            "Boolean"
+        };
+        let source_tpt = self.source_tree(source_value.tpt)?;
+        let tpt =
+            self.plan
+                .typed_ast
+                .try_get(typed_value.tpt)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_value.tpt,
+                })?;
+        self.source_typed_binding(source_value.tpt, typed_value.tpt)?;
+        self.paired_source_typed_span(source_tpt.position, tpt.position, typed_value.tpt)?;
+        if tpt.ty != selector_type
+            || !matches!(tpt.kind, TreeKind::TypeTree(_))
+            || !matches!(&source_tpt.kind, TreeKind::Ident(ident)
+                if ident.name.is_type() && !ident.backquoted && self.name_text(ident.name.text())? == expected_name)
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_value.tpt,
+                ty: tpt.ty,
+            });
+        }
+        let source_expr = self.source_tree(source_value.expr)?;
+        let wildcard =
+            self.plan
+                .typed_ast
+                .try_get(typed_value.expr)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_value.expr,
+                })?;
+        self.paired_source_typed_span(source_expr.position, wildcard.position, typed_value.expr)?;
+        if wildcard.ty != selector_type
+            || !matches!(&wildcard.kind, TreeKind::Ident(ident)
+                if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_value.expr,
+                ty: wildcard.ty,
+            });
+        }
+        if let Some((name, bind)) = implicit_binder {
+            self.source_typed_binding(source_value.expr, bind)?;
+            if !matches!(&source_expr.kind, TreeKind::Ident(ident)
+                if ident.name == name && ident.name.is_term() && !ident.backquoted
+                    && self.name_text(name.text())?.chars().next().is_some_and(|c| c == '_' || c.is_lowercase()))
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+        } else {
+            self.source_typed_binding(source_value.expr, typed_value.expr)?;
+            if !matches!(&source_expr.kind, TreeKind::Ident(ident)
+                if ident.name.is_term() && !ident.backquoted && self.name_text(ident.name.text())? == "_")
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+        }
+        Ok((true, 3))
     }
 
     fn match_pattern_type(&self, ty: TypeId, selector_type: TypeId) -> Result<bool, PickleError> {

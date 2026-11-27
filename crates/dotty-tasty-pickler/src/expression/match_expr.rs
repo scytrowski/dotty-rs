@@ -121,6 +121,36 @@ fn lower_pattern(
             fields,
         });
     }
+    if let TreeKind::Typed(typed) = node.kind {
+        state.budget.visit(root, state.depth)?;
+        state.budget.visit(typed.tpt, state.depth + 1)?;
+        let tpt = ast
+            .try_get(typed.tpt)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed.tpt })?;
+        if tpt.ty != node.ty || !matches!(tpt.kind, TreeKind::TypeTree(_)) {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: node.ty,
+            });
+        }
+        let expression = lower_pattern(
+            store,
+            ast,
+            typed.expr,
+            method,
+            parameters,
+            ExpressionState {
+                depth: state.depth + 1,
+                budget: state.budget,
+            },
+            context,
+        )?;
+        let type_tree = context.primitive_type_syntax(node.ty)?;
+        return context.wire_node(AstNode::Length {
+            tag: dotty_tasty::tasty::TYPED_TAG,
+            fields: vec![AstField::Tree(expression), AstField::Tree(type_tree)],
+        });
+    }
     if let TreeKind::Bind(bind) = node.kind {
         state.budget.visit(root, state.depth)?;
         let symbol = context
