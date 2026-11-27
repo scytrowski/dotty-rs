@@ -1,0 +1,241 @@
+/** Decompiled from <oracle>/reference/example/NumericAscriptions.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("NumericAscriptions.scala") class NumericAscriptions() {
+    def long_identity(x: scala.Long, b: scala.Boolean, n: scala.Int): scala.Long = (x: scala.Long)
+    def long_literal(`x₂`: scala.Long, `b₂`: scala.Boolean, `n₂`: scala.Int): scala.Long = (7L: scala.Long)
+    def long_nested(`x₃`: scala.Long, `b₃`: scala.Boolean, `n₃`: scala.Int): scala.Long = ((`x₃`: scala.Long): scala.Long)
+    def long_local_explicit(`x₄`: scala.Long, `b₄`: scala.Boolean, `n₄`: scala.Int): scala.Long = {
+      val a: scala.Long = (`x₄`: scala.Long)
+
+      (a: scala.Long)
+    }
+    def long_local_inferred(`x₅`: scala.Long, `b₅`: scala.Boolean, `n₅`: scala.Int): scala.Long = {
+      val `a₂`: scala.Long = (`x₅`: scala.Long)
+
+      (`a₂`: scala.Long)
+    }
+    def long_local_read(`x₆`: scala.Long, `b₆`: scala.Boolean, `n₆`: scala.Int): scala.Long = {
+      val `a₃`: scala.Long = `x₆`
+
+      (`a₃`: scala.Long)
+    }
+    def long_assignment(`x₇`: scala.Long, `b₇`: scala.Boolean, `n₇`: scala.Int): scala.Long = {
+      var `a₄`: scala.Long = 7L
+      `a₄` = (`x₇`: scala.Long)
+
+      (`a₄`: scala.Long)
+    }
+    def long_if_inside(`x₈`: scala.Long, `b₈`: scala.Boolean, `n₈`: scala.Int): scala.Long = (if (`b₈`) `x₈` else 7L: scala.Long)
+    def long_if_branches(`x₉`: scala.Long, `b₉`: scala.Boolean, `n₉`: scala.Int): scala.Long = if (`b₉`) (`x₉`: scala.Long) else (7L: scala.Long)
+    def long_block_inside(`x₁₀`: scala.Long, `b₁₀`: scala.Boolean, `n₁₀`: scala.Int): scala.Long = ({
+      val `a₅`: scala.Long = `x₁₀`
+
+      (`a₅`: scala.Long)
+    }: scala.Long)
+    def long_int_match_inside(`x₁₁`: scala.Long, `b₁₁`: scala.Boolean, `n₁₁`: scala.Int): scala.Long = (`n₁₁` match {
+      case 1 =>
+        `x₁₁`
+      case _ =>
+        7L
+    }: scala.Long)
+    def long_bool_match_inside(`x₁₂`: scala.Long, `b₁₂`: scala.Boolean, `n₁₂`: scala.Int): scala.Long = (`b₁₂` match {
+      case true =>
+        `x₁₂`
+      case false =>
+        7L
+    }: scala.Long)
+    def long_bool_match_bodies(`x₁₃`: scala.Long, `b₁₃`: scala.Boolean, `n₁₃`: scala.Int): scala.Long = `b₁₃` match {
+      case true =>
+        (`x₁₃`: scala.Long)
+      case false =>
+        (7L: scala.Long)
+    }
+    def long_return_value(`x₁₄`: scala.Long, `b₁₄`: scala.Boolean, `n₁₄`: scala.Int): scala.Long = return (`x₁₄`: scala.Long)
+    def long_return_branch(`x₁₅`: scala.Long, `b₁₅`: scala.Boolean, `n₁₅`: scala.Int): scala.Long = if (`b₁₅`) return (`x₁₅`: scala.Long) else (7L: scala.Long)
+    def long_return_match(`x₁₆`: scala.Long, `b₁₆`: scala.Boolean, `n₁₆`: scala.Int): scala.Long = `b₁₆` match {
+      case true =>
+        return (`x₁₆`: scala.Long)
+      case false =>
+        (7L: scala.Long)
+    }
+    def long_effects(`x₁₇`: scala.Long, `b₁₇`: scala.Boolean, `n₁₇`: scala.Int): scala.Long = {
+      var count: scala.Int = 0
+      val `a₆`: scala.Long = ({
+        count = count.+(1)
+        `x₁₇`
+      }: scala.Long)
+
+      (if (count.==(1)) `a₆` else 7L: scala.Long)
+    }
+    def long_loop(`x₁₈`: scala.Long, `b₁₈`: scala.Boolean, `n₁₈`: scala.Int): scala.Long = {
+      var `a₇`: scala.Long = (`x₁₈`: scala.Long)
+      var i: scala.Int = 0
+      while (i.<(`n₁₈`)) {
+        `a₇` = (7L: scala.Long)
+        i = i.+(1)
+      }
+
+      (`a₇`: scala.Long)
+    }
+    def float_identity(`x₁₉`: scala.Float, `b₁₉`: scala.Boolean, `n₁₉`: scala.Int): scala.Float = (`x₁₉`: scala.Float)
+    def float_literal(`x₂₀`: scala.Float, `b₂₀`: scala.Boolean, `n₂₀`: scala.Int): scala.Float = (0.5f: scala.Float)
+    def float_nested(`x₂₁`: scala.Float, `b₂₁`: scala.Boolean, `n₂₁`: scala.Int): scala.Float = ((`x₂₁`: scala.Float): scala.Float)
+    def float_local_explicit(`x₂₂`: scala.Float, `b₂₂`: scala.Boolean, `n₂₂`: scala.Int): scala.Float = {
+      val `a₈`: scala.Float = (`x₂₂`: scala.Float)
+
+      (`a₈`: scala.Float)
+    }
+    def float_local_inferred(`x₂₃`: scala.Float, `b₂₃`: scala.Boolean, `n₂₃`: scala.Int): scala.Float = {
+      val `a₉`: scala.Float = (`x₂₃`: scala.Float)
+
+      (`a₉`: scala.Float)
+    }
+    def float_local_read(`x₂₄`: scala.Float, `b₂₄`: scala.Boolean, `n₂₄`: scala.Int): scala.Float = {
+      val `a₁₀`: scala.Float = `x₂₄`
+
+      (`a₁₀`: scala.Float)
+    }
+    def float_assignment(`x₂₅`: scala.Float, `b₂₅`: scala.Boolean, `n₂₅`: scala.Int): scala.Float = {
+      var `a₁₁`: scala.Float = 0.5f
+      `a₁₁` = (`x₂₅`: scala.Float)
+
+      (`a₁₁`: scala.Float)
+    }
+    def float_if_inside(`x₂₆`: scala.Float, `b₂₆`: scala.Boolean, `n₂₆`: scala.Int): scala.Float = (if (`b₂₆`) `x₂₆` else 0.5f: scala.Float)
+    def float_if_branches(`x₂₇`: scala.Float, `b₂₇`: scala.Boolean, `n₂₇`: scala.Int): scala.Float = if (`b₂₇`) (`x₂₇`: scala.Float) else (0.5f: scala.Float)
+    def float_block_inside(`x₂₈`: scala.Float, `b₂₈`: scala.Boolean, `n₂₈`: scala.Int): scala.Float = ({
+      val `a₁₂`: scala.Float = `x₂₈`
+
+      (`a₁₂`: scala.Float)
+    }: scala.Float)
+    def float_int_match_inside(`x₂₉`: scala.Float, `b₂₉`: scala.Boolean, `n₂₉`: scala.Int): scala.Float = (`n₂₉` match {
+      case 1 =>
+        `x₂₉`
+      case _ =>
+        0.5f
+    }: scala.Float)
+    def float_bool_match_inside(`x₃₀`: scala.Float, `b₃₀`: scala.Boolean, `n₃₀`: scala.Int): scala.Float = (`b₃₀` match {
+      case true =>
+        `x₃₀`
+      case false =>
+        0.5f
+    }: scala.Float)
+    def float_bool_match_bodies(`x₃₁`: scala.Float, `b₃₁`: scala.Boolean, `n₃₁`: scala.Int): scala.Float = `b₃₁` match {
+      case true =>
+        (`x₃₁`: scala.Float)
+      case false =>
+        (0.5f: scala.Float)
+    }
+    def float_return_value(`x₃₂`: scala.Float, `b₃₂`: scala.Boolean, `n₃₂`: scala.Int): scala.Float = return (`x₃₂`: scala.Float)
+    def float_return_branch(`x₃₃`: scala.Float, `b₃₃`: scala.Boolean, `n₃₃`: scala.Int): scala.Float = if (`b₃₃`) return (`x₃₃`: scala.Float) else (0.5f: scala.Float)
+    def float_return_match(`x₃₄`: scala.Float, `b₃₄`: scala.Boolean, `n₃₄`: scala.Int): scala.Float = `b₃₄` match {
+      case true =>
+        return (`x₃₄`: scala.Float)
+      case false =>
+        (0.5f: scala.Float)
+    }
+    def float_effects(`x₃₅`: scala.Float, `b₃₅`: scala.Boolean, `n₃₅`: scala.Int): scala.Float = {
+      var `count₂`: scala.Int = 0
+      val `a₁₃`: scala.Float = ({
+        `count₂` = `count₂`.+(1)
+        `x₃₅`
+      }: scala.Float)
+
+      (if (`count₂`.==(1)) `a₁₃` else 0.5f: scala.Float)
+    }
+    def float_loop(`x₃₆`: scala.Float, `b₃₆`: scala.Boolean, `n₃₆`: scala.Int): scala.Float = {
+      var `a₁₄`: scala.Float = (`x₃₆`: scala.Float)
+      var `i₂`: scala.Int = 0
+      while (`i₂`.<(`n₃₆`)) {
+        `a₁₄` = (0.5f: scala.Float)
+        `i₂` = `i₂`.+(1)
+      }
+
+      (`a₁₄`: scala.Float)
+    }
+    def double_identity(`x₃₇`: scala.Double, `b₃₇`: scala.Boolean, `n₃₇`: scala.Int): scala.Double = (`x₃₇`: scala.Double)
+    def double_literal(`x₃₈`: scala.Double, `b₃₈`: scala.Boolean, `n₃₈`: scala.Int): scala.Double = (0.5: scala.Double)
+    def double_nested(`x₃₉`: scala.Double, `b₃₉`: scala.Boolean, `n₃₉`: scala.Int): scala.Double = ((`x₃₉`: scala.Double): scala.Double)
+    def double_local_explicit(`x₄₀`: scala.Double, `b₄₀`: scala.Boolean, `n₄₀`: scala.Int): scala.Double = {
+      val `a₁₅`: scala.Double = (`x₄₀`: scala.Double)
+
+      (`a₁₅`: scala.Double)
+    }
+    def double_local_inferred(`x₄₁`: scala.Double, `b₄₁`: scala.Boolean, `n₄₁`: scala.Int): scala.Double = {
+      val `a₁₆`: scala.Double = (`x₄₁`: scala.Double)
+
+      (`a₁₆`: scala.Double)
+    }
+    def double_local_read(`x₄₂`: scala.Double, `b₄₂`: scala.Boolean, `n₄₂`: scala.Int): scala.Double = {
+      val `a₁₇`: scala.Double = `x₄₂`
+
+      (`a₁₇`: scala.Double)
+    }
+    def double_assignment(`x₄₃`: scala.Double, `b₄₃`: scala.Boolean, `n₄₃`: scala.Int): scala.Double = {
+      var `a₁₈`: scala.Double = 0.5
+      `a₁₈` = (`x₄₃`: scala.Double)
+
+      (`a₁₈`: scala.Double)
+    }
+    def double_if_inside(`x₄₄`: scala.Double, `b₄₄`: scala.Boolean, `n₄₄`: scala.Int): scala.Double = (if (`b₄₄`) `x₄₄` else 0.5: scala.Double)
+    def double_if_branches(`x₄₅`: scala.Double, `b₄₅`: scala.Boolean, `n₄₅`: scala.Int): scala.Double = if (`b₄₅`) (`x₄₅`: scala.Double) else (0.5: scala.Double)
+    def double_block_inside(`x₄₆`: scala.Double, `b₄₆`: scala.Boolean, `n₄₆`: scala.Int): scala.Double = ({
+      val `a₁₉`: scala.Double = `x₄₆`
+
+      (`a₁₉`: scala.Double)
+    }: scala.Double)
+    def double_int_match_inside(`x₄₇`: scala.Double, `b₄₇`: scala.Boolean, `n₄₇`: scala.Int): scala.Double = (`n₄₇` match {
+      case 1 =>
+        `x₄₇`
+      case _ =>
+        0.5
+    }: scala.Double)
+    def double_bool_match_inside(`x₄₈`: scala.Double, `b₄₈`: scala.Boolean, `n₄₈`: scala.Int): scala.Double = (`b₄₈` match {
+      case true =>
+        `x₄₈`
+      case false =>
+        0.5
+    }: scala.Double)
+    def double_bool_match_bodies(`x₄₉`: scala.Double, `b₄₉`: scala.Boolean, `n₄₉`: scala.Int): scala.Double = `b₄₉` match {
+      case true =>
+        (`x₄₉`: scala.Double)
+      case false =>
+        (0.5: scala.Double)
+    }
+    def double_return_value(`x₅₀`: scala.Double, `b₅₀`: scala.Boolean, `n₅₀`: scala.Int): scala.Double = return (`x₅₀`: scala.Double)
+    def double_return_branch(`x₅₁`: scala.Double, `b₅₁`: scala.Boolean, `n₅₁`: scala.Int): scala.Double = if (`b₅₁`) return (`x₅₁`: scala.Double) else (0.5: scala.Double)
+    def double_return_match(`x₅₂`: scala.Double, `b₅₂`: scala.Boolean, `n₅₂`: scala.Int): scala.Double = `b₅₂` match {
+      case true =>
+        return (`x₅₂`: scala.Double)
+      case false =>
+        (0.5: scala.Double)
+    }
+    def double_effects(`x₅₃`: scala.Double, `b₅₃`: scala.Boolean, `n₅₃`: scala.Int): scala.Double = {
+      var `count₃`: scala.Int = 0
+      val `a₂₀`: scala.Double = ({
+        `count₃` = `count₃`.+(1)
+        `x₅₃`
+      }: scala.Double)
+
+      (if (`count₃`.==(1)) `a₂₀` else 0.5: scala.Double)
+    }
+    def double_loop(`x₅₄`: scala.Double, `b₅₄`: scala.Boolean, `n₅₄`: scala.Int): scala.Double = {
+      var `a₂₁`: scala.Double = (`x₅₄`: scala.Double)
+      var `i₃`: scala.Int = 0
+      while (`i₃`.<(`n₅₄`)) {
+        `a₂₁` = (0.5: scala.Double)
+        `i₃` = `i₃`.+(1)
+      }
+
+      (`a₂₁`: scala.Double)
+    }
+    def minL(): scala.Long = (-9223372036854775808L: scala.Long)
+    def maxL(): scala.Long = (9223372036854775807L: scala.Long)
+    def zeroF(): scala.Float = (-0.0f: scala.Float)
+    def tinyF(): scala.Float = (1.4E-45f: scala.Float)
+    def maxF(): scala.Float = (3.4028235E38f: scala.Float)
+    def zeroD(): scala.Double = (-0.0: scala.Double)
+    def tinyD(): scala.Double = (4.9E-324: scala.Double)
+    def maxD(): scala.Double = (1.7976931348623157E308: scala.Double)
+  }
+}
