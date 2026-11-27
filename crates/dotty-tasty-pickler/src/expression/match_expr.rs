@@ -193,5 +193,18 @@ fn lower_pattern_type(
         })?;
         return context.wire_node(AstNode::Leaf(term));
     }
+    if let Some(Type::Constant(Constant::Boolean(value))) = store.types.try_get(ty) {
+        let tag = if *value {
+            dotty_tasty::tasty::TRUECONST_TAG
+        } else {
+            dotty_tasty::tasty::FALSECONST_TAG
+        };
+        let term = SimpleTerm::new(tag, TermValue::Boolean(*value)).map_err(|cause| {
+            PickleError::Encoding {
+                cause: Box::new(cause.into()),
+            }
+        })?;
+        return context.wire_node(AstNode::Leaf(term));
+    }
     context.lower_type(ty)
 }

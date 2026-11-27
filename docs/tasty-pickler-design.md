@@ -1,5 +1,8 @@
 # Source semantic TASTy pickler: minimal Scala 3.9 contract
 
+Boolean-selector matches and canonical Boolean case bindings in both output paths
+are described in [the Boolean-match contract](jvm-tasty-boolean-matches.md).
+
 This document began as the readiness audit for
 [#1189](https://github.com/scytrowski/dotty-rs/issues/1189), auditing repository
 revision `3882dbb50` and Scala

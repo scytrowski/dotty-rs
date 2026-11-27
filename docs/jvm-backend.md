@@ -1,5 +1,8 @@
 # JVM backend boundary
 
+Boolean-selector matches and canonical Boolean case bindings in both output paths
+are described in [the Boolean-match contract](jvm-tasty-boolean-matches.md).
+
 Long-valued Int matches and paired Long method values are described in
 [`jvm-tasty-long-values.md`](jvm-tasty-long-values.md).
 

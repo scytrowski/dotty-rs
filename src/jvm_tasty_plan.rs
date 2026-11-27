@@ -490,8 +490,9 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 /// the resulting canonical identities, validate them independently, and prove
 /// their class/member ABI agrees. Supported Int/Long/Float/Double locals retain
 /// the typer's exact source, typed-declaration, symbol and scope bindings,
-/// including inferred declarations. Primitive ascriptions, operators and bounded Int-selector
-/// matches are accepted only when both producers validate the same roots.
+/// including inferred declarations. Boolean pattern bindings retain their exact case
+/// scopes; ordinary Boolean declarations remain unsupported by the pickler.
+/// Primitive ascriptions, operators and bounded Int/Boolean-selector matches are accepted only when both producers validate the same roots.
 /// The callback keeps the borrowed session alive
 /// for the entire planning receipt lifetime.
 pub fn with_paired_jvm_tasty_class_plan<R>(

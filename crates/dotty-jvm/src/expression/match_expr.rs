@@ -44,6 +44,21 @@ pub(super) fn emit_match(
     if matched.cases.is_empty() {
         return Err(unsupported(tree, "match requires a final wildcard"));
     }
+    let selector = context.tree(matched.selector)?;
+    let selector_type = match block_value_type(
+        context,
+        matched.selector,
+        selector.ty,
+        Some(matched.selector),
+    )? {
+        Some(kind @ (JvmType::Int | JvmType::Boolean)) => kind,
+        _ => {
+            return Err(unsupported(
+                matched.selector,
+                "unsupported match selector type",
+            ));
+        }
+    };
     let mut cases = Vec::with_capacity(matched.cases.len());
     for (index, &case_id) in matched.cases.iter().enumerate() {
         context.visit(case_id, depth + 1)?;
@@ -87,7 +102,7 @@ pub(super) fn emit_match(
                         symbol,
                     })?;
             if local.declaration() != pattern_id
-                || local.ty() != JvmType::Int
+                || local.ty() != selector_type
                 || !local
                     .pattern_case()
                     .is_some_and(|(_, case)| case == case_id)
@@ -111,6 +126,19 @@ pub(super) fn emit_match(
                 }
                 vec![value]
             }
+            TreeKind::Literal(literal) if matches!(literal.value, Constant::Boolean(_)) => {
+                let Constant::Boolean(value) = literal.value else {
+                    unreachable!()
+                };
+                if !matches!(context.store.types.try_get(pattern.ty), Some(Type::Constant(Constant::Boolean(typed))) if *typed == value)
+                {
+                    return Err(unsupported(
+                        case.pattern,
+                        "inconsistent Boolean match literal",
+                    ));
+                }
+                vec![i32::from(value)]
+            }
             TreeKind::Ident(ident)
                 if !ident.backquoted
                     && ident.name.is_term()
@@ -120,7 +148,13 @@ pub(super) fn emit_match(
             }
             TreeKind::Alternative(_) if binder.is_none() => {
                 let mut literals = Vec::new();
-                collect_alternative_literals(context, pattern_id, depth + 2, &mut literals)?;
+                collect_alternative_literals(
+                    context,
+                    pattern_id,
+                    selector_type,
+                    depth + 2,
+                    &mut literals,
+                )?;
                 literals
             }
             _ => return Err(unsupported(case.pattern, "unsupported match pattern")),
@@ -131,8 +165,15 @@ pub(super) fn emit_match(
                 "match requires exactly one final wildcard",
             ));
         }
-        if primitive_type(context.store, pattern_type, context.definitions) != Some(JvmType::Int) {
-            return Err(unsupported(case.pattern, "non-Int match pattern type"));
+        if primitive_type(context.store, pattern_type, context.definitions) != Some(selector_type) {
+            return Err(unsupported(
+                case.pattern,
+                if selector_type == JvmType::Int {
+                    "non-Int match pattern type"
+                } else {
+                    "non-Boolean match pattern type"
+                },
+            ));
         }
         cases.push(MatchCase {
             body: case.body,
@@ -141,8 +182,11 @@ pub(super) fn emit_match(
             binder,
         });
     }
-    if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(JvmType::Int) {
-        return Err(unsupported(matched.selector, "non-Int match selector"));
+    if emit_expression(context, matched.selector, code, depth + 1)? != Flow::Value(selector_type) {
+        return Err(unsupported(
+            matched.selector,
+            "match selector flow/type mismatch",
+        ));
     }
     let slot = context.reserve_temporary_local_slots(tree, 1)?;
     let result = emit_cases(context, tree, &cases, expected, slot, code, depth);
@@ -278,24 +322,48 @@ fn unsupported(tree: TreeId<Typed>, node: &'static str) -> JvmCodegenError {
 fn collect_alternative_literals(
     context: &mut JvmLoweringContext<'_>,
     root: TreeId<Typed>,
+    selector_type: JvmType,
     depth: usize,
     literals: &mut Vec<i32>,
 ) -> Result<(), JvmCodegenError> {
     let node = context.tree(root)?;
     match &node.kind {
         TreeKind::Literal(literal) => {
-            let Constant::Int(value) = literal.value else {
-                return Err(unsupported(root, "unsupported Int match alternative"));
+            let (value, mismatch) = match (selector_type, &literal.value) {
+                (JvmType::Int, Constant::Int(value)) => (*value, "inconsistent Int match literal"),
+                (JvmType::Boolean, Constant::Boolean(value)) => {
+                    (i32::from(*value), "inconsistent Boolean match literal")
+                }
+                _ => {
+                    return Err(unsupported(
+                        root,
+                        "unsupported match alternative literal type",
+                    ));
+                }
             };
-            if !matches!(context.store.types.try_get(node.ty), Some(Type::Constant(Constant::Int(typed))) if *typed == value)
+            if !matches!(context.store.types.try_get(node.ty), Some(Type::Constant(typed)) if *typed == literal.value)
             {
-                return Err(unsupported(root, "inconsistent Int match literal"));
+                return Err(unsupported(root, mismatch));
             }
             literals.push(value);
         }
         TreeKind::Alternative(alternative) => {
-            if node.ty != context.definitions.int || alternative.alternatives.is_empty() {
-                return Err(unsupported(root, "invalid Int match alternative"));
+            if node.ty
+                != (if selector_type == JvmType::Int {
+                    context.definitions.int
+                } else {
+                    context.definitions.boolean
+                })
+                || alternative.alternatives.is_empty()
+            {
+                return Err(unsupported(
+                    root,
+                    if selector_type == JvmType::Int {
+                        "invalid Int match alternative"
+                    } else {
+                        "invalid Boolean match alternative"
+                    },
+                ));
             }
             let count = alternative.alternatives.len();
             if count > JVM_EXPRESSION_NODE_BUDGET.saturating_sub(context.node_visits) {
@@ -310,7 +378,7 @@ fn collect_alternative_literals(
                 };
                 let child = alternative.alternatives[ordinal];
                 context.visit(child, depth + 1)?;
-                collect_alternative_literals(context, child, depth + 1, literals)?;
+                collect_alternative_literals(context, child, selector_type, depth + 1, literals)?;
             }
         }
         _ => return Err(unsupported(root, "unsupported Int match alternative")),

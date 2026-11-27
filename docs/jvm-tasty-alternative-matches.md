@@ -71,3 +71,6 @@ cargo test --test jvm_tasty_alternative_matches --locked -- --nocapture --test-t
 Put the JDK's `bin` directory on PATH as well. The required JDK workflow includes
 this target. The strict TASTy manifest and aggregate inventory also require it;
 ordinary Rust tests may skip external consumers unless the flags above are set.
+
+The later [Boolean-match contract](jvm-tasty-boolean-matches.md) extends the
+selector/pattern family while preserving ordered cases and the final fallback.

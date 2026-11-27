@@ -1394,6 +1394,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::Block(_)
                 | TreeKind::Closure(_)
                 | TreeKind::Return(_)
+                | TreeKind::Match(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1405,7 +1406,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::If(_)
         | TreeKind::Block(_)
         | TreeKind::Closure(_)
-        | TreeKind::Return(_) => None,
+        | TreeKind::Return(_)
+        | TreeKind::Match(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -1455,6 +1457,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                     | dotty_tasty::tasty::IF_TAG
                     | dotty_tasty::tasty::BLOCK_TAG
                     | dotty_tasty::tasty::RETURN_TAG
+                    | dotty_tasty::tasty::MATCH_TAG
             ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
@@ -5019,4 +5022,33 @@ fn local_return_depth_limits_count_the_value_child_without_charging_dispatch() {
         })
     );
     assert_eq!(validate(1), Ok(()));
+}
+
+#[test]
+fn boolean_selector_matches_emit_exact_literal_patterns_in_method_plans() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class BoolCases { def f(x: Boolean): Int = x match { case true | false => 1; case _ => 2 } }";
+    let (_, output) = source_outputs_named(source, "BoolCases.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let cases: Vec<_> = index.iter().filter(|n| n.tag == CASEDEF_TAG).collect();
+    assert_eq!(cases.len(), 2);
+    let RawTree::LengthNode(alt) = cases[0].decode_case_def().unwrap().pattern else {
+        panic!()
+    };
+    let alt = alt.decode_alternative().unwrap();
+    let constants: Vec<_> = alt
+        .alternatives
+        .iter()
+        .map(|pattern| {
+            let RawTree::Leaf(term) = pattern else {
+                panic!()
+            };
+            term.constant_value().unwrap().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        constants,
+        [ConstantValue::Boolean(true), ConstantValue::Boolean(false)]
+    );
 }
