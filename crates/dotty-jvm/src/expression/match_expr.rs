@@ -102,7 +102,7 @@ pub(super) fn emit_match(
                         symbol,
                     })?;
             if local.declaration() != pattern_id
-                || local.ty() != JvmType::Int
+                || local.ty() != selector_type
                 || !local
                     .pattern_case()
                     .is_some_and(|(_, case)| case == case_id)
@@ -148,7 +148,13 @@ pub(super) fn emit_match(
             }
             TreeKind::Alternative(_) if binder.is_none() => {
                 let mut literals = Vec::new();
-                collect_alternative_literals(context, pattern_id, depth + 2, &mut literals)?;
+                collect_alternative_literals(
+                    context,
+                    pattern_id,
+                    selector_type,
+                    depth + 2,
+                    &mut literals,
+                )?;
                 literals
             }
             _ => return Err(unsupported(case.pattern, "unsupported match pattern")),
@@ -316,24 +322,48 @@ fn unsupported(tree: TreeId<Typed>, node: &'static str) -> JvmCodegenError {
 fn collect_alternative_literals(
     context: &mut JvmLoweringContext<'_>,
     root: TreeId<Typed>,
+    selector_type: JvmType,
     depth: usize,
     literals: &mut Vec<i32>,
 ) -> Result<(), JvmCodegenError> {
     let node = context.tree(root)?;
     match &node.kind {
         TreeKind::Literal(literal) => {
-            let Constant::Int(value) = literal.value else {
-                return Err(unsupported(root, "unsupported Int match alternative"));
+            let (value, mismatch) = match (selector_type, &literal.value) {
+                (JvmType::Int, Constant::Int(value)) => (*value, "inconsistent Int match literal"),
+                (JvmType::Boolean, Constant::Boolean(value)) => {
+                    (i32::from(*value), "inconsistent Boolean match literal")
+                }
+                _ => {
+                    return Err(unsupported(
+                        root,
+                        "unsupported match alternative literal type",
+                    ));
+                }
             };
-            if !matches!(context.store.types.try_get(node.ty), Some(Type::Constant(Constant::Int(typed))) if *typed == value)
+            if !matches!(context.store.types.try_get(node.ty), Some(Type::Constant(typed)) if *typed == literal.value)
             {
-                return Err(unsupported(root, "inconsistent Int match literal"));
+                return Err(unsupported(root, mismatch));
             }
             literals.push(value);
         }
         TreeKind::Alternative(alternative) => {
-            if node.ty != context.definitions.int || alternative.alternatives.is_empty() {
-                return Err(unsupported(root, "invalid Int match alternative"));
+            if node.ty
+                != (if selector_type == JvmType::Int {
+                    context.definitions.int
+                } else {
+                    context.definitions.boolean
+                })
+                || alternative.alternatives.is_empty()
+            {
+                return Err(unsupported(
+                    root,
+                    if selector_type == JvmType::Int {
+                        "invalid Int match alternative"
+                    } else {
+                        "invalid Boolean match alternative"
+                    },
+                ));
             }
             let count = alternative.alternatives.len();
             if count > JVM_EXPRESSION_NODE_BUDGET.saturating_sub(context.node_visits) {
@@ -348,7 +378,7 @@ fn collect_alternative_literals(
                 };
                 let child = alternative.alternatives[ordinal];
                 context.visit(child, depth + 1)?;
-                collect_alternative_literals(context, child, depth + 1, literals)?;
+                collect_alternative_literals(context, child, selector_type, depth + 1, literals)?;
             }
         }
         _ => return Err(unsupported(root, "unsupported Int match alternative")),

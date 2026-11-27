@@ -32692,3 +32692,52 @@ fn boolean_literal_matches_execute_with_primitive_results_on_jdk21() {
         );
     }
 }
+
+#[test]
+fn boolean_match_bindings_guards_alternatives_execute_on_jdk21() {
+    let output = TestOutputDirectory::new("boolean-match-bindings");
+    let artifacts = compile_source_classes(
+        include_str!("fixtures/jvm_tasty_boolean_matches/BooleanMatches.scala"),
+        "BooleanMatches.scala",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(artifacts.len(), 1);
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let client = output.path().join("JavaConsumer.java");
+    fs::write(
+        &client,
+        include_str!("fixtures/jvm_tasty_boolean_matches/JavaConsumer.java"),
+    )
+    .unwrap();
+    let compile = Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(output.path())
+        .arg("JavaConsumer")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "boolean match oracle ok"
+    );
+}

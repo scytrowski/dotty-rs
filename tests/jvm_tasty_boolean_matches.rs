@@ -125,3 +125,47 @@ fn jvm_rejects_boolean_int_pattern_confusion() {
         },
     );
 }
+
+#[test]
+fn jvm_boolean_case_bindings_and_alternatives_keep_exact_scopes() {
+    for method in [
+        "def f(x: Boolean): Boolean = x match { case n @ true if n => n; case n @ _ => n }",
+        "def f(x: Boolean, n: Boolean): Boolean = x match { case n if n => n; case n => n }",
+        "def f(): Boolean = true match { case n => n }",
+        "def f(): Boolean = false match { case n => n }",
+        "def f(x: Boolean, y: Boolean): Boolean = x match { case n => y match { case m if m => n; case _ => n } }",
+        "def f(x: Boolean): Boolean = x match { case n => !n }",
+        "def f(x: Boolean, y: Boolean): Boolean = x match { case n => n && y }",
+        "def f(x: Boolean, flag: Boolean): Int = x match { case (true | true) | false if flag => 1; case _ => 2 }",
+    ] {
+        guarded_match_plan::with_jvm(
+            &format!("package example; class BooleanMatches {{ {method} }}"),
+            |unit, defs| {
+                dotty::jvm::emit_class(unit, unit.classes[0].class, defs).unwrap();
+                let method = &unit.classes[0].methods[0];
+                if let Some(first) = method.locals.first() {
+                    let mut classes = unit.classes.clone();
+                    let (_, case) = first.pattern_case().unwrap();
+                    // A case from another proof cannot authenticate a binding, even when spelling agrees.
+                    if let Some(other) = method.locals.get(1) {
+                        classes[0].methods[0].locals[0] = dotty::jvm::JvmLocalBinding::pattern(
+                            first.declaration,
+                            first.symbol,
+                            other.pattern_case().unwrap().0,
+                            case,
+                        );
+                        let invalid = dotty::jvm::JvmCompilationUnit {
+                            store: unit.store,
+                            typed_ast: unit.typed_ast,
+                            classes,
+                        };
+                        assert!(matches!(
+                            invalid.validate(),
+                            Err(dotty::jvm::JvmCodegenError::InvalidLocalDeclaration { .. })
+                        ));
+                    }
+                }
+            },
+        );
+    }
+}
