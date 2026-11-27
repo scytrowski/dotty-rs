@@ -1,0 +1,280 @@
+/** Decompiled from <oracle>/reference/example/TypedPrimitivePatterns.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("TypedPrimitivePatterns.scala") class TypedPrimitivePatterns() {
+    def int_wildcard(x: scala.Int, b: scala.Boolean): scala.Int = x match {
+      case _: scala.Int =>
+        1
+    }
+    def int_binder(`x₂`: scala.Int, `b₂`: scala.Boolean): scala.Int = `x₂` match {
+      case n: scala.Int =>
+        (n: scala.Int)
+    }
+    def int_explicit_binder(`x₃`: scala.Int, `b₃`: scala.Boolean): scala.Int = `x₃` match {
+      case n: scala.Int =>
+        (`n₂`: scala.Int)
+    }
+    def int_literal_prefix(`x₄`: scala.Int, `b₄`: scala.Boolean): scala.Int = `x₄` match {
+      case 1 =>
+        1
+      case n: scala.Int =>
+        (`n₃`: scala.Int)
+    }
+    def int_guarded_binder(`x₅`: scala.Int, `b₅`: scala.Boolean): scala.Int = `x₅` match {
+      case n: scala.Int if `b₅` =>
+        (`n₄`: scala.Int)
+      case _ =>
+        0
+    }
+    def int_guarded_wildcard(`x₆`: scala.Int, `b₆`: scala.Boolean): scala.Int = `x₆` match {
+      case _: scala.Int if `b₆` =>
+        1
+      case _ =>
+        0
+    }
+    def int_two_binders(`x₇`: scala.Int, `b₇`: scala.Boolean): scala.Int = `x₇` match {
+      case n: scala.Int if `b₇` =>
+        (`n₅`: scala.Int)
+      case n: scala.Int =>
+        (`n₆`: scala.Int)
+    }
+    def int_nested(`x₈`: scala.Int, `b₈`: scala.Boolean): scala.Int = `x₈` match {
+      case n: scala.Int =>
+        `n₇` match {
+          case k: scala.Int =>
+            (k: scala.Int)
+        }
+    }
+    def int_typed_body(`x₉`: scala.Int, `b₉`: scala.Boolean): scala.Int = `x₉` match {
+      case n: scala.Int =>
+        (`n₈`: scala.Int)
+    }
+    def int_local_value(`x₁₀`: scala.Int, `b₁₀`: scala.Boolean): scala.Int = {
+      val a: scala.Int = `x₁₀` match {
+        case n: scala.Int =>
+          (`n₉`: scala.Int)
+      }
+
+      (a: scala.Int)
+    }
+    def int_assignment(`x₁₁`: scala.Int, `b₁₁`: scala.Boolean): scala.Int = {
+      var `a₂`: scala.Int = 0
+      `a₂` = `x₁₁` match {
+        case n: scala.Int =>
+          (`n₁₀`: scala.Int)
+      }
+
+      (`a₂`: scala.Int)
+    }
+    def int_returns(`x₁₂`: scala.Int, `b₁₂`: scala.Boolean): scala.Int = `x₁₂` match {
+      case n: scala.Int if `b₁₂` =>
+        return `n₁₁`
+      case n: scala.Int =>
+        return `n₁₂`
+    }
+    def int_result_int(`x₁₃`: scala.Int, `b₁₃`: scala.Boolean): scala.Int = `x₁₃` match {
+      case _: scala.Int =>
+        7
+    }
+    def int_result_boolean(`x₁₄`: scala.Int, `b₁₄`: scala.Boolean): scala.Boolean = `x₁₄` match {
+      case _: scala.Int =>
+        `b₁₄`
+    }
+    def int_result_unit(`x₁₅`: scala.Int, `b₁₅`: scala.Boolean): scala.Unit = `x₁₅` match {
+      case _: scala.Int =>
+        ()
+    }
+    def int_result_long(`x₁₆`: scala.Int, `b₁₆`: scala.Boolean, `a₃`: scala.Long): scala.Long = `x₁₆` match {
+      case _: scala.Int =>
+        `a₃`
+    }
+    def int_result_float(`x₁₇`: scala.Int, `b₁₇`: scala.Boolean, `a₄`: scala.Float): scala.Float = `x₁₇` match {
+      case _: scala.Int =>
+        `a₄`
+    }
+    def int_result_double(`x₁₈`: scala.Int, `b₁₈`: scala.Boolean, `a₅`: scala.Double): scala.Double = `x₁₈` match {
+      case _: scala.Int =>
+        `a₅`
+    }
+    def boolean_wildcard(`x₁₉`: scala.Boolean, `b₁₉`: scala.Boolean): scala.Boolean = `x₁₉` match {
+      case _: scala.Boolean =>
+        true
+    }
+    def boolean_binder(`x₂₀`: scala.Boolean, `b₂₀`: scala.Boolean): scala.Boolean = `x₂₀` match {
+      case n: scala.Boolean =>
+        (`n₁₃`: scala.Boolean)
+    }
+    def boolean_explicit_binder(`x₂₁`: scala.Boolean, `b₂₁`: scala.Boolean): scala.Boolean = `x₂₁` match {
+      case n: scala.Boolean =>
+        (`n₁₄`: scala.Boolean)
+    }
+    def boolean_literal_prefix(`x₂₂`: scala.Boolean, `b₂₂`: scala.Boolean): scala.Boolean = `x₂₂` match {
+      case true =>
+        true
+      case n: scala.Boolean =>
+        (`n₁₅`: scala.Boolean)
+    }
+    def boolean_guarded_binder(`x₂₃`: scala.Boolean, `b₂₃`: scala.Boolean): scala.Boolean = `x₂₃` match {
+      case n: scala.Boolean if `b₂₃` =>
+        (`n₁₆`: scala.Boolean)
+      case _ =>
+        false
+    }
+    def boolean_guarded_wildcard(`x₂₄`: scala.Boolean, `b₂₄`: scala.Boolean): scala.Boolean = `x₂₄` match {
+      case _: scala.Boolean if `b₂₄` =>
+        true
+      case _ =>
+        false
+    }
+    def boolean_two_binders(`x₂₅`: scala.Boolean, `b₂₅`: scala.Boolean): scala.Boolean = `x₂₅` match {
+      case n: scala.Boolean if `b₂₅` =>
+        (`n₁₇`: scala.Boolean)
+      case n: scala.Boolean =>
+        (`n₁₈`: scala.Boolean)
+    }
+    def boolean_nested(`x₂₆`: scala.Boolean, `b₂₆`: scala.Boolean): scala.Boolean = `x₂₆` match {
+      case n: scala.Boolean =>
+        `n₁₉` match {
+          case k: scala.Boolean =>
+            (`k₂`: scala.Boolean)
+        }
+    }
+    def boolean_typed_body(`x₂₇`: scala.Boolean, `b₂₇`: scala.Boolean): scala.Boolean = `x₂₇` match {
+      case n: scala.Boolean =>
+        (`n₂₀`: scala.Boolean)
+    }
+    def boolean_local_value(`x₂₈`: scala.Boolean, `b₂₈`: scala.Boolean): scala.Boolean = {
+      val `a₆`: scala.Boolean = `x₂₈` match {
+        case n: scala.Boolean =>
+          (`n₂₁`: scala.Boolean)
+      }
+
+      (`a₆`: scala.Boolean)
+    }
+    def boolean_assignment(`x₂₉`: scala.Boolean, `b₂₉`: scala.Boolean): scala.Boolean = {
+      var `a₇`: scala.Boolean = false
+      `a₇` = `x₂₉` match {
+        case n: scala.Boolean =>
+          (`n₂₂`: scala.Boolean)
+      }
+
+      (`a₇`: scala.Boolean)
+    }
+    def boolean_returns(`x₃₀`: scala.Boolean, `b₃₀`: scala.Boolean): scala.Boolean = `x₃₀` match {
+      case n: scala.Boolean if `b₃₀` =>
+        return `n₂₃`
+      case n: scala.Boolean =>
+        return `n₂₄`
+    }
+    def boolean_result_int(`x₃₁`: scala.Boolean, `b₃₁`: scala.Boolean): scala.Int = `x₃₁` match {
+      case _: scala.Boolean =>
+        7
+    }
+    def boolean_result_boolean(`x₃₂`: scala.Boolean, `b₃₂`: scala.Boolean): scala.Boolean = `x₃₂` match {
+      case _: scala.Boolean =>
+        `b₃₂`
+    }
+    def boolean_result_unit(`x₃₃`: scala.Boolean, `b₃₃`: scala.Boolean): scala.Unit = `x₃₃` match {
+      case _: scala.Boolean =>
+        ()
+    }
+    def boolean_result_long(`x₃₄`: scala.Boolean, `b₃₄`: scala.Boolean, `a₈`: scala.Long): scala.Long = `x₃₄` match {
+      case _: scala.Boolean =>
+        `a₈`
+    }
+    def boolean_result_float(`x₃₅`: scala.Boolean, `b₃₅`: scala.Boolean, `a₉`: scala.Float): scala.Float = `x₃₅` match {
+      case _: scala.Boolean =>
+        `a₉`
+    }
+    def boolean_result_double(`x₃₆`: scala.Boolean, `b₃₆`: scala.Boolean, `a₁₀`: scala.Double): scala.Double = `x₃₆` match {
+      case _: scala.Boolean =>
+        `a₁₀`
+    }
+    def selector_effect(`x₃₇`: scala.Int, `b₃₇`: scala.Boolean): scala.Int = {
+      var trace: scala.Int = 0
+      val value: scala.Int = {
+        trace = trace.*(10).+(1)
+        `x₃₇`
+      } match {
+        case n: scala.Int if {
+          trace = trace.*(10).+(2)
+          `b₃₇`
+        } =>
+          trace = trace.*(10).+(3)
+
+          (`n₂₅`: scala.Int)
+        case m: scala.Int =>
+          trace = trace.*(10).+(4)
+
+          (m: scala.Int)
+      }
+      trace.*(100).+(value)
+    }
+    def guard_skipped(`x₃₈`: scala.Int, `b₃₈`: scala.Boolean): scala.Int = {
+      var `trace₂`: scala.Int = 0
+      val `value₂`: scala.Int = {
+        `trace₂` = `trace₂`.*(10).+(1)
+        `x₃₈`
+      } match {
+        case 0 if {
+          `trace₂` = `trace₂`.*(10).+(2)
+          `b₃₈`
+        } =>
+          `trace₂` = `trace₂`.*(10).+(3)
+          0
+        case n: scala.Int =>
+          `trace₂` = `trace₂`.*(10).+(4)
+
+          (`n₂₆`: scala.Int)
+      }
+      `trace₂`.*(100).+(`value₂`)
+    }
+    def boolean_effect(`x₃₉`: scala.Boolean, `b₃₉`: scala.Boolean): scala.Int = {
+      var `trace₃`: scala.Int = 0
+      val `value₃`: scala.Int = {
+        `trace₃` = `trace₃`.*(10).+(1)
+        `x₃₉`
+      } match {
+        case n: scala.Boolean if {
+          `trace₃` = `trace₃`.*(10).+(2)
+          `b₃₉`
+        } =>
+          `trace₃` = `trace₃`.*(10).+(3)
+          if (`n₂₇`) 10 else 20
+        case m: scala.Boolean =>
+          `trace₃` = `trace₃`.*(10).+(4)
+          if (`m₂`) 10 else 20
+      }
+      `trace₃`.*(100).+(`value₃`)
+    }
+    def shadow(`n₂₈`: scala.Int, `b₄₀`: scala.Boolean): scala.Int = `n₂₈` match {
+      case n: scala.Int if `b₄₀` =>
+        (`n₂₉`: scala.Int)
+      case n: scala.Int =>
+        (`n₃₀`: scala.Int)
+    }
+    def singleton_int(): scala.Int = 1 match {
+      case n: scala.Int =>
+        (`n₃₁`: 1)
+    }
+    def singleton_boolean(): scala.Boolean = true match {
+      case n: scala.Boolean =>
+        (`n₃₂`: true)
+    }
+    def parenthesized(`x₄₀`: scala.Int): scala.Int = `x₄₀` match {
+      case _: scala.Int =>
+        1
+    }
+    def binder_guard_int(`x₄₁`: scala.Int): scala.Int = `x₄₁` match {
+      case n: scala.Int if `n₃₃`.>(0) =>
+        (`n₃₃`: scala.Int)
+      case _: scala.Int =>
+        0
+    }
+    def binder_guard_boolean(`x₄₂`: scala.Boolean): scala.Int = `x₄₂` match {
+      case n: scala.Boolean if `n₃₄` =>
+        1
+      case _: scala.Boolean =>
+        0
+    }
+  }
+}
