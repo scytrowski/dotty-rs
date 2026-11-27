@@ -1,0 +1,129 @@
+/** Decompiled from <oracle>/example/BooleanMatches.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("BooleanMatches.scala") class BooleanMatches() {
+    private[this] var trace: scala.Int = 0
+    def reset(): scala.Unit = BooleanMatches.this.trace = 0
+    def observed(): scala.Int = BooleanMatches.this.trace
+    def mark(n: scala.Int): scala.Int = {
+      BooleanMatches.this.trace = BooleanMatches.this.trace.*(10).+(n)
+      n
+    }
+    def select(x: scala.Boolean): scala.Int = BooleanMatches.this.mark(1).>(0).&&(x) match {
+      case true if BooleanMatches.this.mark(2).<(0) =>
+        20
+      case false if BooleanMatches.this.mark(3).>(0) =>
+        30
+      case _ =>
+        40
+    }
+    def alternate(`x₂`: scala.Boolean, flag: scala.Boolean): scala.Int = `x₂` match {
+      case ((true | true) | false) if BooleanMatches.this.mark(2).>(0).&&(flag) =>
+        10
+      case _ =>
+        20
+    }
+    def bind(`x₃`: scala.Boolean): scala.Boolean = `x₃` match {
+      case n @ true if `n₂` =>
+        (`n₂`: scala.Boolean)
+      case n =>
+        (`n₃`: scala.Boolean)
+    }
+    def shadow(`x₄`: scala.Boolean, `n₄`: scala.Boolean): scala.Boolean = `x₄` match {
+      case n if `n₅` =>
+        (`n₅`: scala.Boolean)
+      case n =>
+        (`n₆`: scala.Boolean)
+    }
+    def inverted(`x₅`: scala.Boolean): scala.Boolean = `x₅` match {
+      case n =>
+        (`n₇`.unary_! : scala.Boolean)
+    }
+    def conjunction(`x₆`: scala.Boolean, `flag₂`: scala.Boolean): scala.Boolean = `x₆` match {
+      case n =>
+        `n₈`.&&(`flag₂`)
+    }
+    def falseSingleton(): scala.Boolean = false match {
+      case n =>
+        (`n₉`: false)
+    }
+    def loop(`n₁₀`: scala.Int, `x₇`: scala.Boolean): scala.Int = {
+      var i: scala.Int = `n₁₀`
+      while (i.>(0)) {
+        `x₇` match {
+          case true =>
+            return i
+          case _ =>
+            ()
+        }
+        i = i.-(1)
+      }
+      0
+    }
+    def singleton(): scala.Boolean = true match {
+      case n =>
+        (`n₁₁`: true)
+    }
+    def nested(`x₈`: scala.Boolean, y: scala.Boolean): scala.Boolean = `x₈` match {
+      case n =>
+        (y match {
+          case m if m =>
+            `n₁₂`
+          case _ =>
+            `n₁₂`
+        }: scala.Boolean)
+    }
+    def nestedInt(`x₉`: scala.Boolean, `y₂`: scala.Int): scala.Int = `x₉` match {
+      case n if `n₁₃` =>
+        `y₂` match {
+          case 0 =>
+            7
+          case _ =>
+            8
+        }
+      case _ =>
+        9
+    }
+    def longValue(`x₁₀`: scala.Boolean, a: scala.Long, b: scala.Long): scala.Long = `x₁₀` match {
+      case true =>
+        a
+      case _ =>
+        b
+    }
+    def floatValue(`x₁₁`: scala.Boolean, `a₂`: scala.Float, `b₂`: scala.Float): scala.Float = `x₁₁` match {
+      case true =>
+        `a₂`
+      case _ =>
+        `b₂`
+    }
+    def doubleValue(`x₁₂`: scala.Boolean, `a₃`: scala.Double, `b₃`: scala.Double): scala.Double = `x₁₂` match {
+      case true =>
+        `a₃`
+      case _ =>
+        `b₃`
+    }
+    def returned(`x₁₃`: scala.Boolean, `a₄`: scala.Double, `b₄`: scala.Double): scala.Double = `x₁₃` match {
+      case true =>
+        return `a₄`
+      case _ =>
+        return `b₄`
+    }
+    def mixed(`x₁₄`: scala.Boolean): scala.Int = `x₁₄` match {
+      case true =>
+        return 1
+      case _ =>
+        2
+    }
+    def unitValue(`x₁₅`: scala.Boolean): scala.Unit = `x₁₅` match {
+      case true =>
+        ()
+      case _ =>
+        ()
+    }
+    def shortCircuit(`x₁₆`: scala.Boolean, `y₃`: scala.Boolean): scala.Int = `x₁₆`.&&(`y₃`) match {
+      case true =>
+        1
+      case _ =>
+        2
+    }
+  }
+}
