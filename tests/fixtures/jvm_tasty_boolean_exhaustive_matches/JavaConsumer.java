@@ -7,6 +7,8 @@ public final class JavaConsumer {
   public static void main(String[] args){
     BooleanExhaustiveMatches p=new BooleanExhaustiveMatches();
     for(boolean x:new boolean[]{false,true}){
+      eq(p.assign(x),x?0:1);eq(p.matchLoop(x),x?1:0);
+      eq(p.intNested(x,1),x?10:30);eq(p.intNested(x,0),x?20:30);
       eq(p.ordered(x),x?1:2);eq(p.reversed(x),x?1:2);
       eq(p.alternative(x),3);eq(p.nested_alternative(x),3);
       ok(p.bind_literals(x)==x);ok(p.local_bool(x)==!x);
@@ -19,6 +21,9 @@ public final class JavaConsumer {
       for(float a:new float[]{-0.0f,Float.MIN_VALUE,Float.MAX_VALUE,Float.POSITIVE_INFINITY,Float.NaN})fbits(p.return_float(x,a,0.0f),x?a:0.0f);
       for(double a:new double[]{-0.0,Double.MIN_VALUE,Double.MAX_VALUE,Double.POSITIVE_INFINITY,Double.NaN})dbits(p.return_double(x,a,0.0),x?a:0.0);
       for(boolean y:new boolean[]{false,true}){
+        eq(p.orderedEffects(x,y),x?(y?12310:12420):1530);
+        eq(p.shortCircuit(x,y),x?(y?11:2):0);
+        eq(p.guardedWildcard(x,y),y?5:(x?1:2));
         eq(p.guard_before_complete(x,y),x?(y?3:1):2);
         eq(p.guarded_alternative_before_complete(x,y),x?(y?3:1):2);
         ok(p.return_tail(x,y)==!x);ok(p.return_boolean(x,y,!y)==(x?y:!y));

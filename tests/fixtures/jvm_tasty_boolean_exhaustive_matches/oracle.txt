@@ -171,5 +171,82 @@ package example {
       case false =>
         ()
     }
+    def orderedEffects(`x₂₅`: scala.Boolean, `g₃`: scala.Boolean): scala.Int = {
+      var trace: scala.Int = 0
+      val `r₃`: scala.Int = {
+        trace = trace.*(10).+(1)
+        `x₂₅`
+      } match {
+        case (true | true) if {
+          trace = trace.*(10).+(2)
+          `g₃`
+        } =>
+          trace = trace.*(10).+(3)
+          10
+        case true =>
+          trace = trace.*(10).+(4)
+          20
+        case false =>
+          trace = trace.*(10).+(5)
+          30
+      }
+      trace.*(100).+(`r₃`)
+    }
+    def assign(`x₂₆`: scala.Boolean): scala.Int = {
+      var flag: scala.Boolean = `x₂₆`
+      flag = `x₂₆` match {
+        case false =>
+          true
+        case true =>
+          false
+      }
+      if (flag) 1 else 0
+    }
+    def shortCircuit(`x₂₇`: scala.Boolean, `y₃`: scala.Boolean): scala.Int = {
+      var `n₃`: scala.Int = 0
+      val `b₆`: scala.Boolean = `x₂₇`.&&(`y₃` match {
+        case true =>
+          `n₃` = `n₃`.+(1)
+          true
+        case false =>
+          `n₃` = `n₃`.+(2)
+          false
+      })
+      if (`b₆`) `n₃`.+(10) else `n₃`
+    }
+    def guardedWildcard(`x₂₈`: scala.Boolean, `g₄`: scala.Boolean): scala.Int = `x₂₈` match {
+      case _ if `g₄` =>
+        5
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def matchLoop(`x₂₉`: scala.Boolean): scala.Int = {
+      var `flag₂`: scala.Boolean = `x₂₉`
+      var count: scala.Int = 0
+      while (`flag₂`) {
+        `flag₂` = `flag₂` match {
+          case true =>
+            false
+          case false =>
+            true
+        }
+        count = count.+(1)
+      }
+
+      (count: scala.Int)
+    }
+    def intNested(`x₃₀`: scala.Boolean, `n₄`: scala.Int): scala.Int = `x₃₀` match {
+      case true =>
+        `n₄` match {
+          case 1 =>
+            10
+          case _ =>
+            20
+        }
+      case false =>
+        30
+    }
   }
 }
