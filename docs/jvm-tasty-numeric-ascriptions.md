@@ -79,3 +79,33 @@ cargo test --test jvm_tasty_expressions --locked -- --nocapture --test-threads=1
 
 Put the JDK bin directory on PATH. The oracle runner checks the pinned revision,
 cached compiler artifacts, fixture/client hashes and unchanged original outputs.
+
+## Implemented verification
+
+The existing expression target now has 20 tests, including 10 numeric-ascription
+regressions. The complete serial target with mandatory Scala/JDK consumers
+measured 12.50 seconds locally; strict TASTy inventory remains at 38 targets and
+keeps its existing assignments. Its shard-3 estimate includes the measured increase.
+
+JVM unit tests pin the constant/load-return instructions and reject inconsistent
+type trees and equal-width operand mismatches. The direct source fixture passes
+all 2888 Java checks independently of TASTy production. Paired tests preserve all
+83 original TYPED nodes, exact primitive syntax, mixed formal order, descriptors,
+physical slots, stack maxima and full numeric match frames. They exercise normal,
+mixed-returning and all-returning branches/cases, guards and nested matches.
+
+Read-only rejection covers forged wrapper/type-tree/operand types, foreign
+same-named formals, incorrect source syntax, spans and source/typed bindings,
+bit mismatches and cycles. The method-only path also checks deterministic output
+and explicit validation item/depth and encoding-depth limits. Unsupported value
+positions, widening, partial matches and numeric calls publish no pair.
+
+The independently compiled Java and Scala consumers each pass 2888 checks against
+original Rust artifacts and Scala's rebuilt from-TASTy classes. Original hashes
+remain unchanged. The Scala-generated reference is kept separately and is not
+used as a substitute for Rust artifact acceptance.
+
+The full local workspace check passed 8633 tests (57 existing ignored), plus 44
+all-feature doctests. Formatting, frontend boundaries, Clippy/rustdoc with warnings
+denied, the standalone compiler client, strict inventory/timing checks, workflow
+lint and diff checks also passed.

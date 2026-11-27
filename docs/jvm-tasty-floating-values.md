@@ -22,10 +22,13 @@ Double verifier entries remain distinct from Int and Long despite equal widths.
 
 This slice excludes floating arithmetic/comparison, numeric conversions/widening,
 Float/Double selectors, floating fields/constructor parameters/calls in paired
-output, boxing, discarded floating expression statements, expression ascriptions,
+output, boxing, discarded floating expression statements,
 contextual/curried/polymorphic floating methods and non-local returns. Existing
 independent JVM field/call support is unchanged. No new frontend or codec model is
 needed and production dependency boundaries remain unchanged.
+
+Same-type expression ascriptions are now covered by
+[the numeric-ascription contract](jvm-tasty-numeric-ascriptions.md).
 
 ## Evidence and acceptance
 

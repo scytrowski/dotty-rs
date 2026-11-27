@@ -982,6 +982,10 @@ explicit, and ambiguous evidence.
 
 ## Primitive expression parity with JVM emission
 
+Canonical Long/Float/Double expression ascriptions extend the earlier
+Int/Boolean/Unit subset as described in
+[the numeric-ascription contract](jvm-tasty-numeric-ascriptions.md).
+
 The current bounded producer also admits the primitive ascriptions, Int `&`,
 Int equality/inequality and literal Int-selector matches described in
 [jvm-tasty-expressions.md](jvm-tasty-expressions.md). These extend the historical

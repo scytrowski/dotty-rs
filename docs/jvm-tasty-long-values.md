@@ -23,6 +23,9 @@ widening, boxing, discarded Long values requiring pop2, Long fields and primary
 constructor parameters, Calls with Long arguments or results, and Float/Double parity.
 Existing independent JVM support for those field/call shapes is unchanged.
 
+Same-type Long/Float/Double expression ascriptions are covered by
+[the numeric-ascription contract](jvm-tasty-numeric-ascriptions.md).
+
 ## Oracle boundary
 
 Scala 3.9 TastyPrinter reads signed numeric payloads with readNat. Large Long
