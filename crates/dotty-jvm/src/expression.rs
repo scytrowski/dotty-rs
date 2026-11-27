@@ -5805,6 +5805,160 @@ mod tests {
         );
     }
 
+    fn typed_pattern_fixture(boolean: bool) -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
+        let mut fixture = Fixture::new(&[]);
+        let ty = if boolean {
+            fixture.definitions.boolean
+        } else {
+            fixture.definitions.int
+        };
+        let constant = if boolean {
+            Constant::Boolean(true)
+        } else {
+            Constant::Int(1)
+        };
+        let singleton = fixture.store.types.alloc(Type::Constant(constant.clone()));
+        let selector = fixture.literal(constant, singleton);
+        let expr = fixture.ast.alloc(Tree {
+            kind: TreeKind::Ident(Ident {
+                name: Name::new(fixture.store.names.intern("_"), Namespace::Term),
+                backquoted: false,
+            }),
+            position: None,
+            ty,
+        });
+        let tpt = fixture.ast.alloc(Tree {
+            kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+            position: None,
+            ty,
+        });
+        let pattern = fixture.ast.alloc(Tree {
+            kind: TreeKind::Typed(dotty_core::ast::TypedExpr { expr, tpt }),
+            position: None,
+            ty,
+        });
+        let int = fixture.definitions.int;
+        let body = fixture.literal(Constant::Int(7), int);
+        let case = fixture.ast.alloc(Tree {
+            kind: TreeKind::CaseDef(dotty_core::ast::CaseDef {
+                pattern,
+                guard: None,
+                body,
+            }),
+            position: None,
+            ty: int,
+        });
+        let root = fixture.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match {
+                selector,
+                cases: vec![case],
+            }),
+            position: None,
+            ty: int,
+        });
+        (fixture, root, pattern)
+    }
+
+    #[test]
+    fn same_type_primitive_patterns_lower_to_one_selector_store_without_runtime_test() {
+        for boolean in [false, true] {
+            let (fixture, root, _) = typed_pattern_fixture(boolean);
+            let layout = JvmLocalLayout {
+                method: fixture.method.symbol(),
+                locals: vec![],
+                by_symbol: Default::default(),
+                max_locals: 1,
+            };
+            let mut context = JvmLoweringContext::new(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+            );
+            context.local_layout = Some(&layout);
+            let mut code = CodeBuilder::new();
+            assert_eq!(
+                emit_expression(&mut context, root, &mut code, 0).unwrap(),
+                Flow::Value(JvmType::Int)
+            );
+            code.ireturn().unwrap();
+            assert_eq!(
+                method_body_bytes(&fixture, code),
+                [0x04, 0x3c, 0x10, 7, 0xac]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_typed_primitive_patterns_reject_read_only() {
+        for boolean in [false, true] {
+            for mode in 0..8 {
+                let (mut fixture, root, pattern) = typed_pattern_fixture(boolean);
+                let TreeKind::Typed(value) = fixture.ast.get(pattern).kind else {
+                    panic!()
+                };
+                let wrong = if boolean {
+                    fixture.definitions.int
+                } else {
+                    fixture.definitions.boolean
+                };
+                match mode {
+                    0 => fixture.ast.get_mut(pattern).ty = wrong,
+                    1 => fixture.ast.get_mut(value.tpt).ty = wrong,
+                    2 => fixture.ast.get_mut(value.expr).ty = wrong,
+                    3 => {
+                        fixture.ast.get_mut(value.tpt).kind =
+                            fixture.ast.get(value.expr).kind.clone()
+                    }
+                    4 => {
+                        fixture.ast.get_mut(value.expr).kind =
+                            TreeKind::Literal(dotty_core::ast::Literal {
+                                value: Constant::Int(0),
+                            })
+                    }
+                    5 => {
+                        let TreeKind::Ident(ident) = &mut fixture.ast.get_mut(value.expr).kind
+                        else {
+                            panic!()
+                        };
+                        ident.backquoted = true;
+                    }
+                    6 => {
+                        let TreeKind::Typed(typed) = &mut fixture.ast.get_mut(pattern).kind else {
+                            panic!()
+                        };
+                        typed.expr = pattern;
+                    }
+                    7 => {
+                        fixture.ast.get_mut(value.expr).ty =
+                            fixture.store.types.alloc(Type::Constant(if boolean {
+                                Constant::Boolean(true)
+                            } else {
+                                Constant::Int(1)
+                            }))
+                    }
+                    _ => unreachable!(),
+                }
+                let before = fixture.store.checkpoint();
+                assert_eq!(
+                    lower_expression(
+                        &fixture.store,
+                        &fixture.ast,
+                        &fixture.definitions,
+                        &fixture.method,
+                        root
+                    )
+                    .unwrap_err(),
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        tree: pattern,
+                        node: "inconsistent typed primitive pattern"
+                    }
+                );
+                assert_eq!(before, fixture.store.checkpoint());
+            }
+        }
+    }
+
     #[test]
     fn numeric_ascriptions_preserve_exact_value_kind_and_instructions() {
         for (kind, expected_bytes) in [

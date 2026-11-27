@@ -147,6 +147,35 @@ pub(super) fn emit_match(
             {
                 Vec::new()
             }
+            TreeKind::Typed(typed) => {
+                let typed = *typed;
+                let expected = if selector_type == JvmType::Int {
+                    context.definitions.int
+                } else {
+                    context.definitions.boolean
+                };
+                let child_depth = depth + if binder.is_some() { 4 } else { 3 };
+                context.visit(typed.tpt, child_depth)?;
+                context.visit(typed.expr, child_depth)?;
+                let tpt = context.tree(typed.tpt)?;
+                let wildcard = context.tree(typed.expr)?;
+                if pattern_type != expected
+                    || tpt.ty != expected
+                    || !matches!(tpt.kind, TreeKind::TypeTree(_))
+                    || wildcard.ty != expected
+                    || !matches!(&wildcard.kind, TreeKind::Ident(ident)
+                        if !ident.backquoted && ident.name.is_term()
+                            && context.store.names.try_resolve(ident.name.text()) == Some("_"))
+                {
+                    return Err(unsupported(
+                        pattern_id,
+                        "inconsistent typed primitive pattern",
+                    ));
+                }
+                // Same canonical primitive family: this pattern cannot fail.
+                // The source guard, if present, still controls case coverage.
+                Vec::new()
+            }
             TreeKind::Alternative(_) if binder.is_none() => {
                 let mut literals = Vec::new();
                 collect_alternative_literals(
