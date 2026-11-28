@@ -262,23 +262,9 @@ fn lower_expression_inner(
                 ty: condition.ty,
             });
         }
-        let body = ast
-            .try_get(while_expr.body)
-            .ok_or(PickleError::InvalidTypedTree {
-                tree: while_expr.body,
-            })?;
-        if body.ty != context.definitions().unit
-            && body.ty != context.definitions().nothing_type
-            && !matches!(
-                store.types.try_get(body.ty),
-                Some(Type::Constant(Constant::Unit))
-            )
-        {
-            return Err(PickleError::BodyType {
-                tree: while_expr.body,
-                ty: body.ty,
-            });
-        }
+        // Statement validation has authenticated the primitive/Unit/returning
+        // body. Keep its canonical tree: Scala's While emitter loads it in a
+        // Unit context, discarding a normal primitive result without boxing.
         let condition = lower_expression_inner(
             store,
             ast,

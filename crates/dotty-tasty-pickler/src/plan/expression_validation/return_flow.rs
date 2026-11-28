@@ -37,16 +37,18 @@ impl Validator<'_, '_> {
                     if node.ty == self.plan.definitions.unit
                         && block.stats.len() == 1
                         && block.stats[0] != id
-                        && self
-                            .plan
-                            .typed_bindings
-                            .typed_at(self.plan.source.id, source_id)
-                            == Some(block.stats[0]) =>
+                        && self.plan.typed_ast.try_get(block.expr).is_some_and(|tail|
+                            tail.position.is_none() && matches!(&tail.kind, TreeKind::Literal(v) if v.value == Constant::Unit))
+                        && (!matches!(&source.kind, TreeKind::Block(b)
+                            if self.source_tree(b.expr).is_ok_and(|expr| matches!(&expr.kind, TreeKind::Literal(v) if v.value == Constant::Unit))))
+                        && self.plan.typed_bindings.typed_at(self.plan.source.id, source_id)
+                            .is_some_and(|mapped| mapped == id || mapped == block.stats[0]) =>
                 {
-                    // The flow validator authenticates the enclosing incomplete
-                    // If and the complete synthetic Unit adaptation shape.
+                    // Detection only: the validator authenticates the complete
+                    // wrapper and the appropriate source-to-child/root mapping.
                     vec![(source_id, block.stats[0])]
                 }
+                (TreeKind::Typed(source), TreeKind::Typed(typed)) => vec![(source.expr, typed.expr)],
                 (TreeKind::Return(_), TreeKind::Return(_)) => return true,
                 (TreeKind::Block(source), TreeKind::Block(block)) => {
                     if source.stats.len() != block.stats.len() || block.stats.len() > remaining {
@@ -194,6 +196,12 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if expected == p.definitions.unit
+            && let Some(exits) =
+                self.validate_unit_adaptation(source_id, typed_id, method, depth, visited, false)?
+        {
+            return Ok(exits);
+        }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
             self.source_typed_binding(source_id, typed_id)?;
             self.span(source.position)?;
@@ -320,36 +328,13 @@ impl Validator<'_, '_> {
                             },
                         )?;
                     } else {
-                        let expected_stat = if node.ty == p.definitions.nothing_type {
-                            p.definitions.unit
-                        } else {
-                            self.primitive_flow_type(node.ty)?
-                                .ok_or(PickleError::BodyType {
-                                    tree: stat,
-                                    ty: node.ty,
-                                })?
-                        };
-                        let stat_exits = self.validate_return_flow(
+                        let stat_exits = self.validate_discarded_expression(
                             source_stat,
                             stat,
                             method,
-                            expected_stat,
                             depth + 1,
                             visited,
                         )?;
-                        if [
-                            p.definitions.long,
-                            p.definitions.float,
-                            p.definitions.double,
-                        ]
-                        .contains(&expected_stat)
-                            && !stat_exits
-                        {
-                            return Err(self.unsupported(
-                                UnsupportedFeature::BodyExpression,
-                                Some(method.symbol),
-                            ));
-                        }
                         exits |= stat_exits;
                     }
                 }
@@ -444,11 +429,10 @@ impl Validator<'_, '_> {
                     visited,
                 )?;
                 let visible = self.visible_locals.clone();
-                self.validate_return_flow(
+                self.validate_discarded_expression(
                     source_loop.body,
                     looped.body,
                     method,
-                    p.definitions.unit,
                     depth + 1,
                     visited,
                 )?;
@@ -509,69 +493,11 @@ impl Validator<'_, '_> {
         if mapped == Some(typed) || !allow_adaptation {
             return self.validate_return_flow(source, typed, method, expected, depth, visited);
         }
-        if depth > self.limits.expression_depth_limit() {
-            return Err(PickleError::LimitExceeded {
-                kind: LimitKind::ExpressionDepth,
-                limit: self.limits.expression_depth_limit(),
-            });
-        }
-        let node = self
-            .plan
-            .typed_ast
-            .try_get(typed)
-            .ok_or(PickleError::InvalidTypedTree { tree: typed })?;
-        let TreeKind::Block(block) = &node.kind else {
-            return Err(PickleError::BodyType {
-                tree: typed,
-                ty: node.ty,
-            });
-        };
-        if node.ty != self.plan.definitions.unit
-            || block.stats.len() != 1
-            || mapped != Some(block.stats[0])
+        if let Some(exits) =
+            self.validate_unit_adaptation(source, typed, method, depth, visited, true)?
         {
-            return Err(PickleError::BodyType {
-                tree: typed,
-                ty: node.ty,
-            });
+            return Ok(exits);
         }
-        let child = block.stats[0];
-        let unit = block.expr;
-        self.paired_source_typed_span(self.source_tree(source)?.position, node.position, typed)?;
-        self.charge(2)?;
-        if !visited.insert(typed) {
-            return Err(PickleError::RepeatedExpression { tree: typed });
-        }
-        let tail = self
-            .plan
-            .typed_ast
-            .try_get(unit)
-            .ok_or(PickleError::InvalidTypedTree { tree: unit })?;
-        if tail.ty != self.plan.definitions.unit
-            || tail.position.is_some()
-            || !matches!(&tail.kind, TreeKind::Literal(value) if value.value == Constant::Unit)
-            || !visited.insert(unit)
-        {
-            return Err(PickleError::BodyType {
-                tree: unit,
-                ty: tail.ty,
-            });
-        }
-        let child_ty = self
-            .plan
-            .typed_ast
-            .try_get(child)
-            .ok_or(PickleError::InvalidTypedTree { tree: child })?
-            .ty;
-        let child_expected = if child_ty == self.plan.definitions.nothing_type {
-            expected
-        } else {
-            self.primitive_flow_type(child_ty)?
-                .ok_or(PickleError::BodyType {
-                    tree: child,
-                    ty: child_ty,
-                })?
-        };
-        self.validate_return_flow(source, child, method, child_expected, depth + 1, visited)
+        self.validate_return_flow(source, typed, method, expected, depth, visited)
     }
 }

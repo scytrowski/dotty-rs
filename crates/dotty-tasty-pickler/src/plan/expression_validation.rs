@@ -7,6 +7,7 @@ mod local;
 mod match_expr;
 mod numeric_value;
 mod return_flow;
+mod statement;
 mod while_loop;
 
 fn validate_cross_class_target_signature(
@@ -1764,6 +1765,16 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
+        if result_type == p.definitions.unit {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            if self
+                .validate_unit_adaptation(rhs, body, method, depth, seen, false)?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
         if [
             p.definitions.long,
             p.definitions.float,

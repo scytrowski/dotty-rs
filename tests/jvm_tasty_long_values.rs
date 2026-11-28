@@ -561,7 +561,6 @@ fn unsupported_long_and_other_category_two_shapes_publish_no_pair() {
         "def other(): Long = 1L; def f(): Long = other()",
         "def other(x: Long): Int = 1; def f(x: Long): Int = other(x)",
         "def f(x: Long): Long = x + 1L",
-        "def f(a: Long, b: Long): Long = { a; b }",
         "def f(): Long = 1",
         "def f(x: Long): Long = { val saved: Long = x; saved = x; saved }",
         "def f(x: Long): Long = { val saved: Long = return x; saved }",

@@ -908,6 +908,7 @@ impl<'a> PicklePlan<'a> {
             seen_local_bindings: HashSet::new(),
             seen_local_symbols: HashSet::new(),
             visible_locals: HashSet::new(),
+            adapted_unit_bindings: Vec::new(),
             context_closures: HashMap::new(),
             context_defaults: HashMap::new(),
         };
@@ -976,6 +977,7 @@ pub(crate) fn validate_class_state_method(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        adapted_unit_bindings: Vec::new(),
         context_closures: HashMap::new(),
         context_defaults: HashMap::new(),
     };
@@ -1089,6 +1091,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        adapted_unit_bindings: Vec::new(),
         context_closures: HashMap::new(),
         context_defaults: HashMap::new(),
     };
@@ -1153,6 +1156,7 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        adapted_unit_bindings: Vec::new(),
         context_closures: HashMap::new(),
         context_defaults: HashMap::new(),
     };
@@ -1188,6 +1192,8 @@ struct Validator<'p, 'a> {
     seen_local_bindings: HashSet<TreeId<Untyped>>,
     seen_local_symbols: HashSet<SymbolId>,
     visible_locals: HashSet<SymbolId>,
+    // Scoped evidence for source roots remapped to an authenticated Unit wrapper.
+    adapted_unit_bindings: Vec<(TreeId<Untyped>, TreeId<Typed>, TreeId<Typed>)>,
     context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
     context_defaults: HashMap<SymbolId, ContextualDefault>,
 }

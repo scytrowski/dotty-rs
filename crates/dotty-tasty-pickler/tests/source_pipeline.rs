@@ -4200,18 +4200,11 @@ fn while_validation_rejects_forged_types_swapped_body_bindings_and_depth_exhaust
         }
     );
 
-    let unsupported_source = LOOP.replace(
+    let primitive_statement_source = LOOP.replace(
         "      total = total + i\n",
         "      i + 1\n      total = total + i\n",
     );
-    let unsupported = source_outputs_named(&unsupported_source, "Loop.scala", |_| {}).unwrap_err();
-    assert!(matches!(
-        unsupported,
-        PickleError::Unsupported {
-            feature: UnsupportedFeature::BodyExpression,
-            ..
-        }
-    ));
+    source_outputs_named(&primitive_statement_source, "Loop.scala", |_| {}).unwrap();
 
     let missing_result = source_outputs_named_with_tree_edits(
         LOOP,
@@ -5631,5 +5624,63 @@ fn floating_match_literals_preserve_raw_bits_and_source_order_in_method_only_pla
             .collect();
         assert_eq!(values, expected);
         assert_eq!(index.iter_nodes_with_tag(ALTERNATIVE_TAG).count(), 1);
+    }
+}
+
+#[test]
+fn primitive_statement_blocks_keep_final_expression_and_ordered_formal_reference() {
+    use dotty_tasty::tasty::*;
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
+        let source =
+            format!("package example; class Statements {{def f(x: {ty}): Int = {{x; 7}}}}");
+        let (_, output) = source_outputs_named(&source, "Statements.scala", |_| {}).unwrap();
+        let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let block = index
+            .iter()
+            .find(|n| n.tag == BLOCK_TAG)
+            .unwrap()
+            .decode_block()
+            .unwrap();
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            block.expression,
+            RawTree::Leaf(SimpleTerm {
+                tag: INTCONST_TAG,
+                value: TermValue::Int(7),
+                ..
+            })
+        ));
+        assert!(matches!(
+            block.stats[0],
+            RawTree::Leaf(SimpleTerm {
+                tag: TERMREFDIRECT_TAG,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn primitive_unit_adaptation_obeys_validation_depth_limit() {
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
+        let source = format!("package example; class Adapt {{ def f(x: {ty}): Unit = (x: {ty}) }}");
+        let error = source_outputs_named_with_limits(
+            &source,
+            "Adapt.scala",
+            ValidationLimits {
+                max_expression_depth: 0,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: 0
+            }
+        );
     }
 }

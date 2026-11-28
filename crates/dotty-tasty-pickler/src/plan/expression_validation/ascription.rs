@@ -87,6 +87,9 @@ impl Validator<'_, '_> {
                 tree: typed_value.tpt,
             });
         }
+        if self.contains_local_return(source_value.expr, typed_value.expr) {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
         self.validate_method_expression_inner(
             Some(source_value.expr),
             Some(typed_value.expr),

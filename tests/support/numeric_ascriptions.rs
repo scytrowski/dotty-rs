@@ -256,7 +256,6 @@ fn unsupported_numeric_ascriptions_never_publish_a_pair() {
         for method in [
             format!("def f(x: {ty}): {ty} = ({{ return x; {value} }}: {ty})"),
             format!("def f(x: {ty}): {ty} = {{ val a = ({{ return x; {value} }}: {ty}); a }}"),
-            format!("def f(x: {ty}): {ty} = {{ (x: {ty}); {value} }}"),
             format!("def f(x: {ty}, b: Boolean): {ty} = ((b match {{ case true => x }}): {ty})"),
             format!("def identity(x: {ty}): {ty} = x; def f(x: {ty}): {ty} = (identity(x): {ty})"),
         ] {
