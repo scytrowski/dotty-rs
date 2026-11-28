@@ -15,6 +15,7 @@ on:
       - 'docs/jvm-tasty-long-values.md'
       - 'docs/jvm-tasty-long-selector-matches.md'
       - 'docs/jvm-tasty-floating-selector-matches.md'
+      - 'docs/jvm-tasty-primitive-value-discard.md'
       - 'docs/jvm-tasty-factory-result-arguments.md'
       - 'docs/jvm-tasty-reference-local-flows.md'
       - 'Cargo.toml'

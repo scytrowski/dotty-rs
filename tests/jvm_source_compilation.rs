@@ -776,6 +776,9 @@ fn compile_source_batch_with_typer_failure_observer(
                             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Function(_)),
                             Some(expected),
                         ) => typer.type_expression_expected(rhs, context, expected),
+                        (_, Some(expected)) if expected == definitions.unit => {
+                            typer.type_expression_expected(rhs, context, expected)
+                        }
                         _ => typer.type_expression(rhs, context),
                     };
                     match typed_body {
@@ -2286,16 +2289,15 @@ fn float_double_literals_parameters_locals_and_returns_verify_and_execute() {
 }
 
 #[test]
-fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
+fn discarded_long_values_emit_and_arithmetic_still_fails_in_typer() {
     let output = TestOutputDirectory::new("LongDiscard.scala");
-    let error = compile_source(
+    compile_source(
         "class LongDiscard:\n  def valueTwice(value: Long): Long =\n    value\n    value\n",
         "LongDiscard.scala",
         output.path(),
     )
-    .expect_err("discarding a Long requires unsupported pop2");
-    assert!(matches!(error, PipelineFailure::Codegen(_)));
-    assert!(output.class_files().is_empty());
+    .unwrap();
+    assert_eq!(output.class_files().len(), 1);
 
     let output = TestOutputDirectory::new("LongMixedJoin.scala");
     let error = compile_source(
@@ -24438,20 +24440,15 @@ fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
 }
 
 #[test]
-fn discarded_double_values_fail_without_publishing_artifacts() {
-    assert_source_failure(
-        "discarded-double-value",
+fn discarded_double_values_publish_supported_artifacts() {
+    let output = TestOutputDirectory::new("discarded-double-value");
+    compile_source(
         "class DoubleDiscard { def twice(value: Double): Double = { value; value } }",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
-                    node: "discarded category-two value requires category-two stack operation",
-                    ..
-                })
-            )
-        },
-    );
+        "DoubleDiscard.scala",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(output.class_files().len(), 1);
 }
 
 #[test]
@@ -33032,5 +33029,54 @@ fn floating_selector_matches_preserve_values_and_effects_on_jdk21() {
     assert_eq!(
         String::from_utf8_lossy(&run.stdout).trim(),
         "OK 3502 checks"
+    );
+}
+
+#[test]
+fn primitive_value_discard_preserve_values_and_effects_on_jdk21() {
+    let output = TestOutputDirectory::new("primitive-value-discard");
+    let artifacts = compile_source_classes(
+        include_str!("fixtures/jvm_tasty_primitive_value_discard/PrimitiveValueDiscard.scala"),
+        "PrimitiveValueDiscard.scala",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(artifacts.len(), 1);
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let client = output.path().join("JavaConsumer.java");
+    fs::write(
+        &client,
+        include_str!("fixtures/jvm_tasty_primitive_value_discard/JavaConsumer.java"),
+    )
+    .unwrap();
+    let compile = Command::new("javac")
+        .args(["--release", "21", "-cp"])
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(client)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(output.path())
+        .arg("JavaConsumer")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "OK 1928 checks"
     );
 }

@@ -901,32 +901,12 @@ impl Validator<'_, '_> {
                 self.validate_while_statement(source_stat, typed_stat, method, depth + 1, visited)?;
                 continue;
             }
-            if matches!(source_stat_node.kind, TreeKind::Block(_))
-                || matches!(stat.kind, TreeKind::Block(_))
-            {
-                return Err(
-                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
-                );
-            }
-            self.validate_method_expression_inner(
-                Some(source_stat),
-                Some(typed_stat),
-                method,
-                self.plan.definitions.int,
-                depth,
-                (Some(visited), false),
-            )?;
+            self.validate_discarded_expression(source_stat, typed_stat, method, depth, visited)?;
         }
-        let source_result = self.source_tree(source_block.expr)?;
         if visited.contains(&typed_block.expr) {
             return Err(PickleError::RepeatedExpression {
                 tree: typed_block.expr,
             });
-        }
-        if matches!(source_result.kind, TreeKind::Block(_))
-            || matches!(typed_result.kind, TreeKind::Block(_))
-        {
-            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
         self.validate_method_expression_inner(
             Some(source_block.expr),
@@ -1258,6 +1238,12 @@ impl Validator<'_, '_> {
                 ty: typed.ty,
             });
         }
+        if self
+            .validate_unit_adaptation(source_id, typed_id, method, depth, visited, false)?
+            .is_some()
+        {
+            return Ok(());
+        }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
             &self.source_tree(source_id)?.kind
         {
@@ -1396,21 +1382,7 @@ impl Validator<'_, '_> {
                 )?;
                 continue;
             }
-            if matches!(
-                (&source_stat_node.kind, &stat.kind),
-                (TreeKind::If(_), TreeKind::If(_)) | (TreeKind::While(_), TreeKind::While(_))
-            ) {
-                self.validate_unit_expression(source_stat, typed_stat, method, depth + 1, visited)?;
-                continue;
-            }
-            if !matches!(source_stat_node.kind, TreeKind::Assign(_))
-                || !matches!(stat.kind, TreeKind::Assign(_))
-            {
-                return Err(
-                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
-                );
-            }
-            self.validate_assignment_statement(
+            self.validate_discarded_expression(
                 source_stat,
                 typed_stat,
                 method,

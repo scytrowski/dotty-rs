@@ -2307,6 +2307,21 @@ fn emit_field_assignment(
     result
 }
 
+// Unit and diverging flows have no operand; callers handle their control flow.
+fn emit_value_discard(
+    tree: TreeId<Typed>,
+    value: JvmType,
+    code: &mut CodeBuilder,
+) -> Result<(), JvmCodegenError> {
+    if value.slot_width() == 2 {
+        code.pop2()
+    } else {
+        code.pop()
+    }
+    .map(|_| ())
+    .map_err(|error| JvmCodegenError::CodeBuilder { tree, error })
+}
+
 fn emit_block(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
@@ -2332,16 +2347,7 @@ fn emit_block(
             continue;
         }
         match emit_expression(context, stat, code, depth + 1)? {
-            Flow::Value(JvmType::Long | JvmType::Double) => {
-                return Err(JvmCodegenError::UnsupportedTypedExpression {
-                    tree: stat,
-                    node: "discarded category-two value requires category-two stack operation",
-                });
-            }
-            Flow::Value(_) => {
-                code.pop()
-                    .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
-            }
+            Flow::Value(value) => emit_value_discard(stat, value, code)?,
             Flow::Null => {
                 code.pop()
                     .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
@@ -4312,15 +4318,8 @@ fn emit_while_body(
 
     let body_flow = emit_expression(context, body, code, depth + 1)?;
     match body_flow {
-        Flow::Value(JvmType::Long) => {
-            return Err(JvmCodegenError::UnsupportedTypedExpression {
-                tree: body,
-                node: "discarded Long value requires category-two stack operation",
-            });
-        }
-        Flow::Value(_) => {
-            code.pop()
-                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+        Flow::Value(value) => {
+            emit_value_discard(body, value, code)?;
             code.goto(header)
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -6662,6 +6661,42 @@ mod tests {
             ),
             vec![0x10, 7, 0x57, 0x04, 0x57, 0x10, 42, 0xac]
         );
+    }
+
+    #[test]
+    fn primitive_statements_discard_exact_width_and_preserve_final_int() {
+        for (ty, value, prefix) in [
+            (JvmType::Long, Constant::Long(1), vec![0x0a, 0x58]),
+            (
+                JvmType::Double,
+                Constant::DoubleBits(1.0f64.to_bits()),
+                vec![0x0f, 0x58],
+            ),
+            (
+                JvmType::Float,
+                Constant::FloatBits(1.0f32.to_bits()),
+                vec![0x0c, 0x57],
+            ),
+        ] {
+            let mut f = Fixture::new(&[]);
+            let declared = match ty {
+                JvmType::Long => f.definitions.long,
+                JvmType::Double => f.definitions.double,
+                _ => f.definitions.float,
+            };
+            let stat = f.literal(value, declared);
+            let result = f.literal(Constant::Int(7), f.definitions.int);
+            let root = f.block(vec![stat], result, f.definitions.int);
+            let mut expected = prefix;
+            expected.extend([0x10, 7, 0xac]);
+            assert_eq!(
+                method_body_bytes(
+                    &f,
+                    lower_method_body(&f.store, &f.ast, &f.definitions, &f.method, root).unwrap()
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -606,6 +606,13 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Removes one category-two value or two category-one values from the stack.
+    /// Analysis rejects underflow and a category-one top above a category-two value.
+    pub fn pop2(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::Pop2);
+        Ok(self)
+    }
+
     /// Reads an instance field by symbolic owner, name, and descriptor.
     pub fn getfield(
         &mut self,

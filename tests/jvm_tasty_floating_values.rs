@@ -600,8 +600,6 @@ fn unsupported_floating_shapes_never_publish_a_pair() {
         "def f(x: Float): Float = x + 1.0f",
         "def f(x: Double): Boolean = x < 1.0",
         "def f(x: Float): Double = x",
-        "def f(x: Float): Int = { x; 1 }",
-        "def f(x: Double): Int = { x; 1 }",
         "def f(x: Double): Double = { val saved: Double = x; saved = x; saved }",
         "def f(x: Float): Float = { val saved: Float = return x; saved }",
         "def f(x: Double)(y: Double): Double = x",

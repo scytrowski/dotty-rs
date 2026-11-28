@@ -495,6 +495,9 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 /// flow and local returns; returns inside operands remain unsupported.
 /// Same-type Int/Boolean/Unit/Long/Float/Double ascriptions preserve explicit
 /// type syntax and evaluate their operand once without runtime conversion.
+/// Methods with canonical Unit results use the frontend's expected-Unit adaptation
+/// before either plan borrows its exact body root. Primitive discarded statements
+/// preserve evaluation order and exceptions without introducing boxed Unit values.
 /// Primitive operators and bounded Int/Boolean-selector matches are accepted
 /// only when both producers validate the same roots.
 /// Boolean matches may omit a final fallback only when authenticated unguarded cases cover both values and the final case has no guard; guarded cases guarantee no coverage.
@@ -718,9 +721,12 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
                 let context = typer
                     .expression_context_for(method)
                     .map_err(PairedPlanError::Typer)?;
-                let body = typer
-                    .type_expression(rhs, context)
-                    .map_err(PairedPlanError::Typer)?;
+                let body = if has_unit_method_result(typer.store(), method, &definitions) {
+                    typer.type_expression_expected(rhs, context, definitions.unit)
+                } else {
+                    typer.type_expression(rhs, context)
+                }
+                .map_err(PairedPlanError::Typer)?;
                 if typer.source_typed_index().get(source_id, rhs) != Some(body) {
                     return Err(PairedPlanError::UnsupportedSourceShape(
                         "canonical source-to-typed method body binding",
@@ -876,7 +882,8 @@ pub fn with_paired_jvm_tasty_class_plan<R>(
 /// The callback-scoped view preserves source declaration order and borrows
 /// the same semantic store, source index, typed arena and source-to-typed
 /// bindings for every class. This API only plans; it does not encode or
-/// publish artifacts. The existing one-class API remains unchanged.
+/// publish artifacts. As in the one-class API, canonical Unit method results
+/// apply the frontend's expected-Unit adaptation before binding either output root.
 pub fn with_paired_jvm_tasty_batch_plan<R>(
     source_text: &str,
     source_name: &str,
@@ -1367,13 +1374,16 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             reason: format!("{error:?}"),
                         }
                     })?;
-                    let body = typer.type_expression(rhs, context).map_err(|error| {
-                        PairedPlanError::BatchClass {
-                            class_index,
-                            declaration_index: member_index,
-                            phase: "method body typing",
-                            reason: format!("{error:?}"),
-                        }
+                    let body = (if has_unit_method_result(typer.store(), method, &definitions) {
+                        typer.type_expression_expected(rhs, context, definitions.unit)
+                    } else {
+                        typer.type_expression(rhs, context)
+                    })
+                    .map_err(|error| PairedPlanError::BatchClass {
+                        class_index,
+                        declaration_index: member_index,
+                        phase: "method body typing",
+                        reason: format!("{error:?}"),
                     })?;
                     if typer.source_typed_index().get(source_id, rhs) != Some(body) {
                         return Err(fail(
@@ -2415,4 +2425,15 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         source_id,
         constructor_call_proofs: &constructor_call_proofs,
     }))
+}
+
+// Keep expected-Unit adaptation in the frontend assembly, before borrowing the
+// canonical typed root for either output plan. Other result contracts are unchanged.
+fn has_unit_method_result(
+    store: &SemanticStore,
+    method: SymbolId,
+    definitions: &Definitions,
+) -> bool {
+    matches!(store.symbols.info(method), SymbolInfo::Complete(ty)
+        if *ty == definitions.unit || matches!(store.types.try_get(*ty), Some(Type::Method(m)) if m.result == definitions.unit))
 }

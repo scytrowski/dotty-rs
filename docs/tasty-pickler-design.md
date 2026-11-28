@@ -1026,7 +1026,8 @@ The [Long value contract](jvm-tasty-long-values.md) adds canonical scala.Long
 method signatures and LONGconst leaves, exact 64-bit source/typed value checks,
 ordered mixed-width formals, locals and existing primitive control-flow shapes.
 The combined contract projects Long as J without boxing or widening. It retains
-explicit rejection of Long fields/constructors/calls and discarded Long values.
+explicit rejection of Long fields/constructors/calls; primitive statement discard
+is covered by the later primitive value discard contract.
 The oracle uses semantic decompilation and from-tasty execution because the
 pinned Scala raw printer reads signed numeric payloads as a 31-bit Nat.
 
@@ -1051,3 +1052,16 @@ primitive type syntax for supported numeric values. Original Rust artifacts pass
 independent Java/Scala clients before and after pinned Scala from-tasty; raw numeric
 printer output is not used as the oracle. Floating fields/calls, arithmetic and
 numeric conversions remain outside this slice.
+
+## Primitive statement and expected-Unit parity
+
+The [primitive value discard contract](jvm-tasty-primitive-value-discard.md)
+adds existing Int/Boolean/Long/Float/Double expression producers in discarded
+statement positions. Unit adaptation validates the canonical wrapper and its
+original child without rewriting the semantic store or source-to-typed map.
+Incomplete-If branch mappings remain explicitly distinguished from ordinary
+expected-expression mappings. While bodies preserve their canonical primitive
+shape; pinned Scala accepts these original Rust-produced BLOCK/WHILE trees.
+Malformed wrappers, missing bindings, scope escapes, cycles and traversal limits
+reject without complete artifacts. Existing unsupported operand returns and
+reference/wide-call boundaries remain explicit.

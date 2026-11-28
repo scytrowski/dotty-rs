@@ -348,6 +348,13 @@ pub enum AnalysisError {
         /// The category-two value at the top of the stack.
         actual: ValueKind,
     },
+    /// `pop2` cannot remove a category-one top together with a category-two value below it.
+    Pop2CategoryTwoBelowOne {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// The category-two value immediately below the category-one top.
+        actual: ValueKind,
+    },
     /// A constant-pool operand is absent or has the wrong entry family.
     InvalidConstantPoolOperand {
         /// Zero-based instruction position.
@@ -833,6 +840,13 @@ impl fmt::Display for AnalysisError {
             } => write!(
                 formatter,
                 "instruction {instruction} cannot pop category-two value {actual}"
+            ),
+            Self::Pop2CategoryTwoBelowOne {
+                instruction,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} cannot pop2 category-one top above category-two value {actual}"
             ),
             Self::InvalidConstantPoolOperand {
                 instruction,
@@ -2031,6 +2045,40 @@ impl Frame {
                     .stack_allocation_sites
                     .last_mut()
                     .expect("push_typed adds an allocation-site slot") = allocation_site;
+            }
+            Instruction::Pop2 => {
+                let available = self.stack.len();
+                let top = self.stack.last().ok_or(AnalysisError::StackUnderflow {
+                    instruction: instruction_index,
+                    needed: 1,
+                    available,
+                })?;
+                let count = if top.slots() == 2 {
+                    1
+                } else {
+                    if available < 2 {
+                        return Err(AnalysisError::StackUnderflow {
+                            instruction: instruction_index,
+                            needed: 2,
+                            available,
+                        });
+                    }
+                    let below = self.stack[available - 2];
+                    if below.slots() != 1 {
+                        return Err(AnalysisError::Pop2CategoryTwoBelowOne {
+                            instruction: instruction_index,
+                            actual: below,
+                        });
+                    }
+                    2
+                };
+                let retained = available - count;
+                self.stack.truncate(retained);
+                self.stack_classes.truncate(retained);
+                self.stack_nulls.truncate(retained);
+                self.stack_join_evidence.truncate(retained);
+                self.stack_allocation_sites.truncate(retained);
+                self.stack_slots -= 2;
             }
             Instruction::Pop => {
                 let available = self.stack.len();
@@ -3610,7 +3658,7 @@ impl CfgCodeAnalyzer {
     /// stack state fails explicitly instead of growing a cycle.
     ///
     /// This compatibility entry point supports primitive constants, primitive
-    /// local loads/stores and returns, `dup`/`pop` for category-one values,
+    /// local loads/stores and returns, `dup`/`pop` for category-one values, both `pop2` forms,
     /// integer arithmetic/comparisons, signed Long `lcmp`, Float/Double `fcmpl`/`dcmpl`, and gotos.
     /// Reference, exception and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
@@ -4106,6 +4154,7 @@ fn validate_flow_instruction_with_context(
             | Instruction::DCmpL
             | Instruction::Dup
             | Instruction::Pop
+            | Instruction::Pop2
             | Instruction::Return
             | Instruction::IReturn
             | Instruction::Ldc(LdcConstant::Integer(_))
@@ -9021,6 +9070,86 @@ mod tests {
                 available: 0,
             })
         );
+    }
+
+    #[test]
+    fn pop2_obeys_both_value_forms_and_rejects_mixed_categories() {
+        use super::super::{SmallDoubleConstant, SmallFloatConstant};
+        let pool = ConstantPool::default();
+        let int = Instruction::IConst(SmallIntConstant::One);
+        let long = Instruction::LConst(SmallLongConstant::Zero);
+        let double = Instruction::DConst(SmallDoubleConstant::Zero);
+        let float = Instruction::FConst(SmallFloatConstant::Zero);
+        for suffix in [vec![long], vec![double], vec![int, float], vec![float, int]] {
+            let mut instructions = vec![int];
+            instructions.extend(suffix);
+            instructions.extend([Instruction::Pop2, Instruction::IReturn]);
+            assert_eq!(
+                analyze("()I", true, &instructions, &pool)
+                    .unwrap()
+                    .max_stack,
+                3
+            );
+            let mut sequence = CodeSequence::new();
+            for i in instructions {
+                sequence.instruction(i);
+            }
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            assert_eq!(
+                CfgCodeAnalyzer::analyze(&graph, "()I", true, &pool)
+                    .unwrap()
+                    .max_stack,
+                3
+            );
+        }
+        for (prefix, expected) in [
+            (
+                vec![],
+                AnalysisError::StackUnderflow {
+                    instruction: 0,
+                    needed: 1,
+                    available: 0,
+                },
+            ),
+            (
+                vec![int],
+                AnalysisError::StackUnderflow {
+                    instruction: 1,
+                    needed: 2,
+                    available: 1,
+                },
+            ),
+            (
+                vec![long, int],
+                AnalysisError::Pop2CategoryTwoBelowOne {
+                    instruction: 2,
+                    actual: ValueKind::Long,
+                },
+            ),
+            (
+                vec![double, float],
+                AnalysisError::Pop2CategoryTwoBelowOne {
+                    instruction: 2,
+                    actual: ValueKind::Double,
+                },
+            ),
+        ] {
+            let mut instructions = prefix;
+            instructions.extend([Instruction::Pop2, Instruction::Return]);
+            assert_eq!(
+                analyze("()V", true, &instructions, &pool),
+                Err(expected.clone())
+            );
+            let mut sequence = CodeSequence::new();
+            for i in instructions {
+                sequence.instruction(i);
+            }
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            assert_eq!(
+                CfgCodeAnalyzer::analyze(&graph, "()V", true, &pool),
+                Err(expected)
+            );
+        }
     }
 
     #[test]

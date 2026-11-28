@@ -50,13 +50,15 @@ impl Validator<'_, '_> {
             method,
             depth + 1,
             visited,
-        )?;
-        self.validate_unit_expression(
+        )
+        .map(|_| ())?;
+        self.validate_discarded_expression(
             source_while.body,
             typed_while.body,
             method,
             depth + 1,
             visited,
         )
+        .map(|_| ())
     }
 }

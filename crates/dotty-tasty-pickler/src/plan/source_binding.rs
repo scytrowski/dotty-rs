@@ -15,7 +15,9 @@ impl Validator<'_, '_> {
 
     /// Checks the authoritative source-to-typed identity for one expression.
     /// Nested validation uses the frontend's exact mapping, never a name or a
-    /// structurally similar tree.
+    /// structurally similar tree. A validated expected-Unit wrapper may authorize
+    /// its exact original-child edge for the duration of that child's validation;
+    /// the canonical source map and all descendant edges remain unchanged.
     pub(super) fn source_typed_binding(
         &self,
         source: TreeId<Untyped>,
@@ -33,7 +35,14 @@ impl Validator<'_, '_> {
                     .find(|binding| binding.source_tree == source)
                     .map(|binding| binding.typed_declaration)
             });
-        if actual != Some(typed) {
+        if actual != Some(typed)
+            && !self
+                .adapted_unit_bindings
+                .iter()
+                .any(|&(root, child, wrapper)| {
+                    root == source && child == typed && actual == Some(wrapper)
+                })
+        {
             return Err(PickleError::BodyBinding {
                 source: source_id,
                 tree: source,
