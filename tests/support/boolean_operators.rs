@@ -349,7 +349,6 @@ fn strict_operators_compose_with_operand_values_mutable_flags_and_result_widths(
 #[test]
 fn unsupported_boolean_shapes_reject_before_artifacts() {
     for methods in [
-        "def source(a: Boolean): Boolean = a; def f(a: Boolean): Boolean = source(a)",
         "def f(a: Boolean,b: Boolean): Boolean = a.&(b)",
         "def f(a: Boolean,b: Any): Boolean = a == b",
         "def f(a: Boolean,b: Boolean): Boolean = a & {return b; b}",

@@ -33,6 +33,9 @@ object ScalaConsumer {
       for (b <- List(false, true)) {
         check(p.both(a, b), a && b)
         check(p.ordered(a, b), 12)
+        check(p.eagerState(a, b), 12)
+        check(p.andState(a, b), if (a) 12 else 1)
+        check(p.orState(a, b), if (a) 1 else 12)
         check(p.conditionalArg(a, b), if (a) b else !b)
       }
       throwsArithmetic(p.eager(a, 0))

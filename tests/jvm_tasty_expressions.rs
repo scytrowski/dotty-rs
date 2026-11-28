@@ -389,3 +389,6 @@ mod primitive_value_discard;
 
 #[path = "support/boolean_operators.rs"]
 mod boolean_operators;
+
+#[path = "support/boolean_calls.rs"]
+mod boolean_calls;

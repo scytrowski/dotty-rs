@@ -1125,6 +1125,12 @@ impl Validator<'_, '_> {
                 .typed_ast
                 .try_get(typed_arg)
                 .ok_or(PickleError::InvalidTypedTree { tree: typed_arg })?;
+            if self.contains_local_return(source_arg, typed_arg) {
+                return Err(self.unsupported(
+                    UnsupportedFeature::BodyExpression,
+                    Some(current_method.symbol),
+                ));
+            }
             let argument_depth = if matches!(
                 argument.kind,
                 TreeKind::Apply(_)

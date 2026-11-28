@@ -104,7 +104,7 @@ fn same_class_boolean_call_signatures_keep_parameter_order_and_this_syntax() {
 #[test]
 fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
     let source = "package example; class Calls { def base(x: Int,b: Boolean): Boolean = b; def other(x: Int,b: Boolean): Boolean = !b; def run(x: Int,b: Boolean): Boolean = this.base(x,b); def second(x: Int,b: Boolean): Boolean = this.other(x,b) }";
-    for mode in 0..6 {
+    for mode in 0..8 {
         let error = source_outputs_named_with_tree_edits(
             source,
             "Calls.scala",
@@ -153,6 +153,23 @@ fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
                         };
                         a.args[1] = *root;
                     }
+                    6 => {
+                        let mut foreign = AstArena::new();
+                        let mut invalid = foreign.alloc(typed.get(call.args[0]).clone());
+                        for _ in typed.iter() {
+                            invalid = foreign.alloc(typed.get(call.args[0]).clone());
+                        }
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args[1] = invalid;
+                    }
+                    7 => {
+                        let TreeKind::Select(select) = typed.get(call.function).kind else {
+                            panic!()
+                        };
+                        typed.get_mut(select.qualifier).ty = int_arg_type;
+                    }
                     _ => unreachable!(),
                 }
             },
@@ -172,6 +189,14 @@ fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
                 5 => matches!(error, PickleError::RepeatedExpression { .. }),
                 2 => matches!(error, PickleError::NameMismatch { .. }),
                 4 => matches!(error, PickleError::BodyType { .. }),
+                6 => matches!(error, PickleError::InvalidTypedTree { .. }),
+                7 => matches!(
+                    error,
+                    PickleError::Reference {
+                        reason: ReferenceError::Owner,
+                        ..
+                    }
+                ),
                 _ => false,
             },
             "mode {mode}: {error:?}"
@@ -195,6 +220,18 @@ fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
             limit: 0
         }
     );
+}
+
+#[test]
+fn same_class_call_int_argument_cannot_return_through_the_caller() {
+    let source = "package example\nclass Calls {\n def truth(x: Int): Boolean = x > 0\n def f(x: Int): Boolean = truth({return true; x})\n}";
+    assert!(matches!(
+        source_outputs_named(source, "Calls.scala", |_| {}),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        })
+    ));
 }
 
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");

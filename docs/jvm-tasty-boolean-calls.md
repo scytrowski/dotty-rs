@@ -35,8 +35,8 @@ If restrictions remain explicit.
 
 ## Reference and acceptance
 
-The 26-method `BooleanCalls.scala` fixture and looped Java/Scala clients execute
-66 checks each. The adjacent `run.py` authenticates pinned toolchain artifacts,
+The 30-method `BooleanCalls.scala` fixture and looped Java/Scala clients execute
+78 checks each. The adjacent `run.py` authenticates pinned toolchain artifacts,
 preserves original hashes, reads TASTy and tests original and from-TASTy classes.
 Run it without an argument to regenerate the reference excerpts and provenance;
 pass a directory of actual Rust artifacts for producer acceptance. The compact

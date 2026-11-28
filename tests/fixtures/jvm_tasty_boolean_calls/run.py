@@ -55,7 +55,7 @@ def consume(toolchain, candidate, output):
         cp = f"{producer}:{toolchain.runtime_classpath}"
         result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
                           f"{java}:{cp}", "JavaConsumer"])
-        assert result.strip() == "OK 66 checks", result
+        assert result.strip() == "OK 78 checks", result
         results[f"java_{name}"] = result.strip()
         scala = output / f"scala-{name}"
         scala.mkdir()
@@ -63,7 +63,7 @@ def consume(toolchain, candidate, output):
                            classpath=cp)
         result = execute([toolchain.java, "-Xverify:all", "-ea", "-cp",
                           f"{scala}:{cp}", "ScalaConsumer"])
-        assert result.strip() == "OK 66 checks", result
+        assert result.strip() == "OK 78 checks", result
         results[f"scala_{name}"] = result.strip()
     assert all(digest(p) == sha for p, sha in before.items())
     results["original_sha256"] = {str(p.relative_to(candidate)): sha for p, sha in before.items()}

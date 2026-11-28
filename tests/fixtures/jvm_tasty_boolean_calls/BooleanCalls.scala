@@ -1,5 +1,6 @@
 package example
 class BooleanCalls {
+  private var visits: Int = 0
   def positive(x: Int): Boolean = x > 0
   def identity(b: Boolean): Boolean = b
   def both(a: Boolean, b: Boolean): Boolean = a & b
@@ -26,4 +27,8 @@ class BooleanCalls {
   def returns(x: Int): Boolean = { if positive(x) then return identity(true); false }
   def ordered(a: Boolean, b: Boolean): Int = { var order: Int = 0; both({ order = order * 10 + 1; a }, { order = order * 10 + 2; b }); order }
   def conditionalArg(a: Boolean, b: Boolean): Boolean = identity(if a then b else !b)
+  def hit(tag: Int, b: Boolean): Boolean = { visits = visits * 10 + tag; b }
+  def eagerState(a: Boolean, b: Boolean): Int = { visits = 0; hit(1, a) & hit(2, b); visits }
+  def andState(a: Boolean, b: Boolean): Int = { visits = 0; hit(1, a) && hit(2, b); visits }
+  def orState(a: Boolean, b: Boolean): Int = { visits = 0; hit(1, a) || hit(2, b); visits }
 }

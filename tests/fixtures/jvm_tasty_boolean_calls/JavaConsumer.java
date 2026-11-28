@@ -38,6 +38,9 @@ public class JavaConsumer {
             for (boolean b : new boolean[] {false, true}) {
                 check(p.both(a, b), a && b);
                 check(p.ordered(a, b), 12);
+                check(p.eagerState(a, b), 12);
+                check(p.andState(a, b), a ? 12 : 1);
+                check(p.orState(a, b), a ? 1 : 12);
                 check(p.conditionalArg(a, b), a ? b : !b);
             }
             throwsArithmetic(() -> p.eager(a, 0));
