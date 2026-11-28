@@ -5684,3 +5684,180 @@ fn primitive_unit_adaptation_obeys_validation_depth_limit() {
         );
     }
 }
+
+#[test]
+fn boolean_eager_operators_validate_canonical_source_bindings_read_only() {
+    for operator in ["&", "|", "^", "==", "!="] {
+        let source = format!(
+            "package example; class Logic {{def f(a: Boolean,b: Boolean): Boolean = a {operator} b}}"
+        );
+        let mut validated = false;
+        // Validate explicitly before encoding, checking that the proof borrows
+        // the canonical plan without changing either arena.
+        let _output = source_outputs_named(&source, "Logic.scala", |plan| {
+            let before = format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast);
+            let checked = plan.validate().unwrap();
+            assert!(std::ptr::eq(checked.plan().store, plan.store));
+            assert_eq!(checked.plan().methods[0].body, plan.methods[0].body);
+            assert_eq!(
+                before,
+                format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast)
+            );
+            validated = true;
+        })
+        .unwrap();
+        assert!(validated, "{operator}");
+    }
+}
+
+#[test]
+fn boolean_eager_operators_reject_forged_trees_and_limits() {
+    for operator in ["&", "|", "^", "==", "!="] {
+        let source = format!(
+            "package example\nclass Logic {{\ndef f(a: Boolean,b: Boolean): Boolean = a {operator} b\ndef other(a: Boolean,b: Boolean): Boolean = a || b\ndef number(): Int = 1\n}}"
+        );
+        for mode in 0..10 {
+            let error = source_outputs_named_with_tree_edits(
+                &source,
+                "Logic.scala",
+                ValidationLimits::default(),
+                |source_ast, typed_ast, _, _| {
+                    let (root, apply) = typed_ast
+                        .iter()
+                        .find_map(|(id, tree)| match &tree.kind {
+                            TreeKind::Apply(a) => Some((id, a.clone())),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let TreeKind::Select(select) = typed_ast.get(apply.function).kind else {
+                        panic!()
+                    };
+                    let other = typed_ast
+                        .iter()
+                        .find_map(|(_, tree)| match &tree.kind {
+                            TreeKind::Select(s) if s.name != select.name => {
+                                Some((s.name, tree.ty, s.qualifier))
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let int_type = typed_ast
+                        .iter()
+                        .find_map(|(_, tree)| {
+                            matches!(
+                                &tree.kind,
+                                TreeKind::Literal(Literal {
+                                    value: Constant::Int(_)
+                                })
+                            )
+                            .then_some(tree.ty)
+                        })
+                        .unwrap();
+                    match mode {
+                        0 => typed_ast.get_mut(root).ty = int_type,
+                        1 => {
+                            let TreeKind::Select(s) = &mut typed_ast.get_mut(apply.function).kind
+                            else {
+                                panic!()
+                            };
+                            s.name = other.0;
+                        }
+                        2 => {
+                            let TreeKind::Apply(a) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            a.args.clear();
+                        }
+                        3 => {
+                            let TreeKind::Apply(a) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            a.kind = ApplyKind::Using;
+                        }
+                        4 => typed_ast.get_mut(apply.args[0]).ty = int_type,
+                        5 => {
+                            let TreeKind::Apply(a) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            a.args[0] = select.qualifier;
+                        }
+                        6 => {
+                            let TreeKind::Apply(a) = &mut typed_ast.get_mut(root).kind else {
+                                panic!()
+                            };
+                            a.args[0] = root;
+                        }
+                        7 => typed_ast.get_mut(apply.function).ty = other.1,
+                        8 => {
+                            let tree = source_ast
+                                .iter_mut()
+                                .find(|tree| {
+                                    matches!(
+                                        tree.kind,
+                                        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+                                    )
+                                })
+                                .unwrap();
+                            let TreeKind::PhaseSpecific(UntypedNode::InfixOp(i)) = &mut tree.kind
+                            else {
+                                panic!()
+                            };
+                            i.op = other.0;
+                        }
+                        9 => {
+                            let TreeKind::Select(s) = &mut typed_ast.get_mut(apply.function).kind
+                            else {
+                                panic!()
+                            };
+                            s.qualifier = other.2;
+                        }
+                        _ => unreachable!(),
+                    }
+                },
+                |_| {},
+            )
+            .unwrap_err();
+            assert!(
+                match mode {
+                    0 | 4 => matches!(error, PickleError::BodyType { .. }),
+                    1 | 8 => matches!(error, PickleError::SourceShape { .. }),
+                    2 | 3 => matches!(
+                        error,
+                        PickleError::Unsupported {
+                            feature: UnsupportedFeature::BodyExpression,
+                            ..
+                        }
+                    ),
+                    5 | 6 => matches!(error, PickleError::RepeatedExpression { .. }),
+                    7 => matches!(error, PickleError::SourceShape { .. }),
+                    9 => matches!(
+                        error,
+                        PickleError::Reference {
+                            reason: ReferenceError::Owner,
+                            ..
+                        }
+                    ),
+                    _ => false,
+                },
+                "{operator} mode {mode}: {error:?}"
+            );
+        }
+        let error = source_outputs_named_with_limits(
+            &source,
+            "Logic.scala",
+            ValidationLimits {
+                max_expression_depth: 0,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: 0
+            }
+        );
+    }
+}

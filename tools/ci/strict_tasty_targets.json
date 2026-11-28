@@ -5,7 +5,7 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-local target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; exhaustive Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; expression target including numeric ascriptions remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target including typed primitive patterns remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target including Long selectors remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target including Float/Double selectors remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; expression target including primitive value discard remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21; expression parity target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; local-return target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; alternative-pattern target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Boolean-local target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; exhaustive Boolean-match target measured locally with pinned Scala 3.9/JDK 21, serial libtest execution; expression target including numeric ascriptions remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; guarded-match target including typed primitive patterns remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; Long-value target including Long selectors remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; floating-value target including Float/Double selectors remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; expression target including primitive value discard remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution; expression target including Boolean eager/equality operators remeasured locally with pinned Scala 3.9/JDK 21, serial libtest execution"
   },
   "baseline": {
     "inventory_count": 38,
@@ -133,7 +133,7 @@
     },
     {
       "name": "jvm_tasty_expressions",
-      "measured_seconds": 22.43
+      "measured_seconds": 26.68
     },
     {
       "name": "jvm_tasty_guarded_matches",
@@ -171,7 +171,7 @@
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 30.26,
+    "estimated_runner_minutes": 30.33,
     "estimated_critical_path_minutes": 10.44,
     "shards": [
       {
@@ -204,7 +204,7 @@
       },
       {
         "id": "shard-3",
-        "estimated_test_seconds": 414.62,
+        "estimated_test_seconds": 418.87,
         "targets": [
           "jvm_tasty_dual_reference_forwarding_scala_consumer",
           "jvm_tasty_reference_local_scala_consumer",

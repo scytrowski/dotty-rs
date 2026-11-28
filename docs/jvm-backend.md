@@ -1510,3 +1510,13 @@ adaptations across JVM and semantic TASTy. The 104-method fixture has independen
 Java/Scala clients, each checking 1928 cases against original Rust classes and
 classes rebuilt from Rust-produced TASTy by pinned Scala 3.9. Effects, exceptions,
 local exits, exact final values, stack widths and frames have focused coverage.
+
+## Boolean operator TASTy parity
+
+The [Boolean operator contract](jvm-tasty-boolean-operators.md) connects the
+existing canonical Boolean intrinsic lowering to complete semantic TASTy for
+infix `&`, `|`, `^`, `==` and `!=`. No new JVM instruction is needed. Exact Z
+signatures, IAND/IOR/IXOR, comparison frames, eager operand effects/exceptions and
+unchanged short-circuit controls have focused regressions. Independent clients
+execute original Rust classes and Scala-rebuilt TASTy, 448 checks per execution.
+The bounded paired subset and the independent JVM subset remain distinct.

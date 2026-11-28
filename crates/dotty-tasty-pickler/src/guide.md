@@ -52,7 +52,12 @@ guards and canonical Int/Boolean/Long binders follow the contract below. Extract
 unsupported. Int `&` and equality/inequality between Int
 operands use Scala 3.9 signed primitive selections. Source Any equality symbols
 remain canonical; only their validated Int application is specialized to the
-Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
+Scala Int wire signature. Boolean infix `&`, `|`, `^`, `==` and `!=` instead
+use their own canonical Boolean member identities and `(Boolean): Boolean`
+signatures. Both operands evaluate once in source order, preserving effects and
+exceptions; `&&`/`||` retain short-circuit behavior. These expressions compose
+with existing value blocks, locals, conditions, guards, matches and supported
+Unit adaptations. Ordinary Int locals use exact source/typed/symbol/scope
 bindings, including declarations whose Int type was inferred by the typer.
 
 Guarded Int/Boolean/Long/Float/Double matches preserve optional guards as the final CASEDEF child, after
@@ -194,3 +199,20 @@ local returns while preserving evaluation order, exceptions and existing operand
 restrictions. Reference discard, boxing, new arithmetic and new call/field
 signatures remain unsupported. Scala 3.9 consumes original Rust artifacts and
 executes both original and independently rebuilt from-TASTy output.
+
+## Boolean operator output
+
+The five eager/equality operators above reuse APPLY and signed SELECTin nodes
+with the original receiver/RHS and scala.Boolean owner. They do not use the
+Any-to-Int equality specialization. Validation checks canonical metadata and
+signatures, exact source/typed edges, prefix/type agreement and local/case scope
+before complete output. Mutated selections, exhausted limits and missing proofs
+reject read-only without a partial artifact. Deterministic output is checked for
+single-class and batch plans; pinned Scala 3.9 consumes original Rust artifacts
+and separately rebuilds their TASTy with independent Java/Scala execution.
+
+This remains the existing infix subset: explicit operator application syntax,
+universal/reference equality, boxing and general Boolean calls are unsupported.
+Singleton case binders may supply RHS values; using such a binder as an operator
+receiver remains a source-typer limitation. The independent pre-existing
+literal-Unit If branch limitation also remains explicit.

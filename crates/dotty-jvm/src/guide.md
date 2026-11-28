@@ -133,3 +133,15 @@ consumes Long/Double. Unit and proven returning paths require no pop. The final
 block expression keeps its exact result type. Expected-Unit method bodies borrow
 the frontend's actual adapted root; lowering does not fabricate source bindings.
 This support does not add arithmetic, conversions or call/field signatures.
+
+## Paired Boolean operators
+
+Canonical Boolean `&`, `|`, `^`, `==` and `!=` retain strict left-to-right operand
+evaluation through existing IAND/IOR/IXOR and Boolean comparison lowering. Their
+semantic TASTy counterpart preserves the Boolean-owned signed selection, rather
+than the Any-to-Int equality specialization. Existing `&&`/`||` still evaluate
+only the necessary RHS. Paired integration tests execute original Rust classes
+and Scala-rebuilt TASTy with independent clients, checking effects, exceptions,
+Unit discard and local returns as well as truth tables. This adds no new call
+signatures or implicit conversions; standalone JVM and paired source subsets
+continue to have separate contracts.

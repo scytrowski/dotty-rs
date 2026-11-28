@@ -1,0 +1,111 @@
+Scala 3.9.0 / TASTy 28.9.0: formal-operand DEFDEF excerpts
+Extracted from -Yprint-tasty; original addresses and shared references retained.
+
+    30:           TERMREFpkg 11 [scala]
+
+    33:       DEFDEF(34) 12 [and_formals]
+    36:         PARAM(7) 13 [a]
+    39:           IDENTtpt 14 [Boolean]
+    41:             TYPEREF 14 [Boolean]
+    43:               TERMREFpkg 11 [scala]
+    45:         PARAM(5) 15 [b]
+    48:           IDENTtpt 14 [Boolean]
+    50:             SHAREDtype 41
+    52:         IDENTtpt 14 [Boolean]
+    54:           SHAREDtype 41
+    56:         APPLY(11)
+    58:           SELECTin(7) 18 [&[Signed Signature(List(scala.Boolean),scala.Boolean) @&]]
+    61:             TERMREFdirect 36
+    63:             TYPEREF 14 [Boolean]
+    65:               SHAREDtype 30
+    67:           TERMREFdirect 45
+
+  1005:       DEFDEF(32) 56 [or_formals]
+  1008:         PARAM(5) 13 [a]
+  1011:           IDENTtpt 14 [Boolean]
+  1013:             SHAREDtype 41
+  1015:         PARAM(5) 15 [b]
+  1018:           IDENTtpt 14 [Boolean]
+  1020:             SHAREDtype 41
+  1022:         IDENTtpt 14 [Boolean]
+  1024:           SHAREDtype 41
+  1026:         APPLY(11)
+  1028:           SELECTin(6) 58 [|[Signed Signature(List(scala.Boolean),scala.Boolean) @|]]
+  1031:             TERMREFdirect 1008
+  1034:             SHAREDtype 63
+  1036:           TERMREFdirect 1015
+
+  1974:       DEFDEF(32) 73 [xor_formals]
+  1977:         PARAM(5) 13 [a]
+  1980:           IDENTtpt 14 [Boolean]
+  1982:             SHAREDtype 41
+  1984:         PARAM(5) 15 [b]
+  1987:           IDENTtpt 14 [Boolean]
+  1989:             SHAREDtype 41
+  1991:         IDENTtpt 14 [Boolean]
+  1993:           SHAREDtype 41
+  1995:         APPLY(11)
+  1997:           SELECTin(6) 75 [^[Signed Signature(List(scala.Boolean),scala.Boolean) @^]]
+  2000:             TERMREFdirect 1977
+  2003:             SHAREDtype 63
+  2005:           TERMREFdirect 1984
+
+  2943:       DEFDEF(32) 90 [eq_formals]
+  2946:         PARAM(5) 13 [a]
+  2949:           IDENTtpt 14 [Boolean]
+  2951:             SHAREDtype 41
+  2953:         PARAM(5) 15 [b]
+  2956:           IDENTtpt 14 [Boolean]
+  2958:             SHAREDtype 41
+  2960:         IDENTtpt 14 [Boolean]
+  2962:           SHAREDtype 41
+  2964:         APPLY(11)
+  2966:           SELECTin(6) 92 [==[Signed Signature(List(scala.Boolean),scala.Boolean) @==]]
+  2969:             TERMREFdirect 2946
+  2972:             SHAREDtype 63
+  2974:           TERMREFdirect 2953
+
+  3912:       DEFDEF(32) 107 [ne_formals]
+  3915:         PARAM(5) 13 [a]
+  3918:           IDENTtpt 14 [Boolean]
+  3920:             SHAREDtype 41
+  3922:         PARAM(5) 15 [b]
+  3925:           IDENTtpt 14 [Boolean]
+  3927:             SHAREDtype 41
+  3929:         IDENTtpt 14 [Boolean]
+  3931:           SHAREDtype 41
+  3933:         APPLY(11)
+  3935:           SELECTin(6) 109 [!=[Signed Signature(List(scala.Boolean),scala.Boolean) @!=]]
+  3938:             TERMREFdirect 3915
+  3941:             SHAREDtype 63
+  3943:           TERMREFdirect 3922
+
+  4881:       DEFDEF(32) 124 [short_and_formals]
+  4884:         PARAM(5) 13 [a]
+  4887:           IDENTtpt 14 [Boolean]
+  4889:             SHAREDtype 41
+  4891:         PARAM(5) 15 [b]
+  4894:           IDENTtpt 14 [Boolean]
+  4896:             SHAREDtype 41
+  4898:         IDENTtpt 14 [Boolean]
+  4900:           SHAREDtype 41
+  4902:         APPLY(11)
+  4904:           SELECTin(6) 25 [&&[Signed Signature(List(scala.Boolean),scala.Boolean) @&&]]
+  4907:             TERMREFdirect 4884
+  4910:             SHAREDtype 63
+  4912:           TERMREFdirect 4891
+
+  5861:       DEFDEF(33) 139 [short_or_formals]
+  5865:         PARAM(5) 13 [a]
+  5868:           IDENTtpt 14 [Boolean]
+  5870:             SHAREDtype 41
+  5872:         PARAM(5) 15 [b]
+  5875:           IDENTtpt 14 [Boolean]
+  5877:             SHAREDtype 41
+  5879:         IDENTtpt 14 [Boolean]
+  5881:           SHAREDtype 41
+  5883:         APPLY(11)
+  5885:           SELECTin(6) 22 [||[Signed Signature(List(scala.Boolean),scala.Boolean) @||]]
+  5888:             TERMREFdirect 5865
+  5891:             SHAREDtype 63
+  5893:           TERMREFdirect 5872

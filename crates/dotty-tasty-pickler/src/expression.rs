@@ -880,7 +880,7 @@ fn lower_expression_inner(
             && (context.is_registered_int_arithmetic_target(*target)?
                 || context.is_registered_int_comparison_target(*target)?
                 || context.int_equality_operator(*target).is_some()
-                || context.is_registered_boolean_short_circuit_target(*target)?)
+                || context.is_registered_boolean_binary_target(*target)?)
         {
             if application.args.len() != 1 || application.kind != ApplyKind::Regular {
                 return Err(PickleError::PrimitiveOperatorArity {

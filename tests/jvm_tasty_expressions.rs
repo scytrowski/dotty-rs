@@ -386,3 +386,6 @@ mod numeric_ascriptions;
 
 #[path = "support/primitive_value_discard.rs"]
 mod primitive_value_discard;
+
+#[path = "support/boolean_operators.rs"]
+mod boolean_operators;
