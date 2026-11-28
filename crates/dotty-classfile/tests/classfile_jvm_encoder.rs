@@ -3440,3 +3440,117 @@ fn floating_comparisons_preserve_ieee_equality_and_cfg_frames() {
         "floating comparison ok"
     );
 }
+
+#[test]
+fn pop2_preserves_residual_wide_values_and_reference_cfg_metadata() {
+    let mut class = ClassFileBuilder::new(
+        "Pop2Values",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    class
+        .add_static_method("longValue", "(J)J", |code| {
+            code.lload(0)?.lload(0)?.pop2()?.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_static_method("doubleValue", "(D)D", |code| {
+            code.dload(0)?.dload(0)?.pop2()?.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_static_method(
+            "reference",
+            "(Ljava/lang/Object;JDZ)Ljava/lang/Object;",
+            |code| {
+                let otherwise = code.new_label()?;
+                let join = code.new_label()?;
+                code.aload(0)?.iload(5)?.ifeq(otherwise.clone())?;
+                code.lload(1)?
+                    .pop2()?
+                    .fconst_bits(1.0f32.to_bits())?
+                    .iconst(7)?
+                    .pop2()?
+                    .goto(join.clone())?;
+                code.mark(otherwise)?
+                    .dload(3)?
+                    .pop2()?
+                    .aconst_null()?
+                    .iconst(7)?
+                    .pop2()?;
+                code.mark(join)?.areturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let bytes = class.encode().unwrap();
+    let decoded = decode_and_validate(&bytes);
+    for (index, expected) in [
+        (0, vec![0x1e, 0x1e, 0x58, 0xad]),
+        (1, vec![0x26, 0x26, 0x58, 0xaf]),
+    ] {
+        let body = code(&decoded.methods[index]);
+        assert_eq!(body.code, expected);
+        assert_eq!((body.max_stack, body.max_locals), (4, 2));
+    }
+    let body = code(&decoded.methods[2]);
+    assert_eq!((body.max_stack, body.max_locals), (3, 6));
+    assert_eq!(body.code.iter().filter(|&&b| b == 0x58).count(), 4);
+    assert!(body.attributes.iter().any(|a| matches!(a, Attribute::Other(raw) if decoded.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))));
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    fs::write(directory.path().join("Pop2Values.class"), bytes).unwrap();
+    let client = directory.path().join("Pop2Harness.java");
+    fs::write(&client, r#"public class Pop2Harness {
+        public static void main(String[] args) {
+            for(long x:new long[]{Long.MIN_VALUE,-1L,0L,4294967297L,Long.MAX_VALUE})
+                if(Pop2Values.longValue(x)!=x)throw new AssertionError();
+            for(double x:new double[]{-0.0,0.0,Double.MIN_VALUE,Double.MAX_VALUE,Double.POSITIVE_INFINITY,Double.NaN})
+                if(Double.doubleToRawLongBits(Pop2Values.doubleValue(x))!=Double.doubleToRawLongBits(x))throw new AssertionError();
+            for(Object o:new Object[]{new Object(),null}) for(boolean b:new boolean[]{false,true})
+                if(Pop2Values.reference(o,Long.MIN_VALUE,Double.NaN,b)!=o)throw new AssertionError();
+            System.out.println("pop2 values verified");
+        }
+    }"#).unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    let compile = run(
+        "javac",
+        &[
+            "--release",
+            "21",
+            "-cp",
+            &path,
+            "-d",
+            &path,
+            client.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let output = run(
+        "java",
+        &["-Xverify:all", "-ea", "-cp", &path, "Pop2Harness"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "pop2 values verified"
+    );
+}

@@ -463,6 +463,7 @@ fn write_instruction(
         Instruction::DCmpL => writer.write_u1(0x97),
         Instruction::Dup => writer.write_u1(0x59),
         Instruction::Pop => writer.write_u1(0x57),
+        Instruction::Pop2 => writer.write_u1(0x58),
         Instruction::GetField(reference) => {
             write_reference(
                 writer,
@@ -1153,6 +1154,22 @@ mod tests {
             [0x03, 0x99, 0x00, 0x06, 0x7e, 0x80, 0x82, 0xb1]
         );
         assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn pop2_has_exact_opcode_and_labeled_layout() {
+        let pool = ConstantPool::default();
+        assert_eq!(assemble(&[Instruction::Pop2], &pool).unwrap(), [0x58]);
+        let mut sequence = super::super::CodeSequence::new();
+        let end = sequence.new_label().unwrap();
+        sequence.instruction(Instruction::Pop2);
+        sequence.branch(super::super::BranchInstruction::IfEq(end.clone()));
+        sequence.instruction(Instruction::Pop2);
+        sequence.bind(end).unwrap();
+        sequence.instruction(Instruction::Return);
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        assert_eq!(assembled.bytes, [0x58, 0x99, 0, 4, 0x58, 0xb1]);
+        assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5]);
     }
 
     #[test]

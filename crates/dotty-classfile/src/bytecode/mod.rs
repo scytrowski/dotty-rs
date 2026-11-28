@@ -53,6 +53,7 @@
 //! | `LCmp` | [`lcmp`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lcmp) `0x94` | 0 | `[long, long] -> [int]` |
 //! | `IXor` | [`ixor`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ixor) `0x82` | 0 | `[int, int] -> [int]` |
 //! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
+//! | `Pop2` | [`pop2`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.pop2) `0x58` | 0 | `[category-2] -> []` or `[category-1, category-1] -> []` |
 //! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
 //! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
 //! | `PutField(FieldReference)` | [`putfield`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.putfield) `0xb5` | 2 | `[reference, field value] -> []` |
@@ -466,6 +467,9 @@ pub enum Instruction {
     Dup,
     /// Removes the top category-one stack value.
     Pop,
+    /// Removes one category-two value or two category-one values from the top of the stack.
+    /// A category-one top above a category-two value is not a valid operand shape.
+    Pop2,
     /// Reads an instance field.
     GetField(FieldReference),
     /// Writes an instance field.
