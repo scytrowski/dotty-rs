@@ -1030,51 +1030,60 @@ mod tests {
         let definitions = Definitions::bootstrap(&mut store);
         let index = SourceSemanticIndex::new();
         let symbols = definitions.boolean_primitive_operator_ids().unwrap();
-        let symbol = symbols.and_then;
-        let malformed = store.types.alloc(Type::Method(MethodType {
-            params: vec![MethodParam {
-                name: TermName::new(store.names.intern("rhs")),
-                ty: definitions.int,
-                erased: false,
-                varargs: false,
-            }],
-            result: definitions.boolean,
-            kind: MethodKind::Plain,
-        }));
-        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(malformed);
-        let mut context = make_context(&store, &definitions, &index, source);
-        let receiver = make_receiver(&mut context, false);
-        assert_eq!(
-            context.primitive_operator_select(
-                symbol,
-                receiver,
-                definitions.boolean,
-                &[definitions.boolean],
-                definitions.boolean,
-                Some(1),
-            ),
-            Err(PickleError::MalformedType {
-                ty: malformed,
-                role: TypeRole::Parameter,
-            })
-        );
+        for symbol in [
+            symbols.and_then,
+            symbols.or_else,
+            symbols.eager_and,
+            symbols.eager_or,
+            symbols.xor,
+            symbols.equal,
+            symbols.not_equal,
+        ] {
+            let malformed = store.types.alloc(Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: TermName::new(store.names.intern("rhs")),
+                    ty: definitions.int,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: definitions.boolean,
+                kind: MethodKind::Plain,
+            }));
+            store.symbols.get_mut(symbol).info = SymbolInfo::Complete(malformed);
+            let mut context = make_context(&store, &definitions, &index, source);
+            let receiver = make_receiver(&mut context, false);
+            assert_eq!(
+                context.primitive_operator_select(
+                    symbol,
+                    receiver,
+                    definitions.boolean,
+                    &[definitions.boolean],
+                    definitions.boolean,
+                    Some(1),
+                ),
+                Err(PickleError::MalformedType {
+                    ty: malformed,
+                    role: TypeRole::Parameter,
+                })
+            );
 
-        store.symbols.get_mut(symbol).info = SymbolInfo::Missing;
-        let mut context = make_context(&store, &definitions, &index, source);
-        let receiver = make_receiver(&mut context, false);
-        assert_eq!(
-            context.primitive_operator_select(
-                symbol,
-                receiver,
-                definitions.boolean,
-                &[definitions.boolean],
-                definitions.boolean,
-                Some(1),
-            ),
-            Err(PickleError::IncompleteSymbol {
-                symbol,
-                info: SymbolInfo::Missing,
-            })
-        );
+            store.symbols.get_mut(symbol).info = SymbolInfo::Missing;
+            let mut context = make_context(&store, &definitions, &index, source);
+            let receiver = make_receiver(&mut context, false);
+            assert_eq!(
+                context.primitive_operator_select(
+                    symbol,
+                    receiver,
+                    definitions.boolean,
+                    &[definitions.boolean],
+                    definitions.boolean,
+                    Some(1),
+                ),
+                Err(PickleError::IncompleteSymbol {
+                    symbol,
+                    info: SymbolInfo::Missing,
+                })
+            );
+        }
     }
 }
