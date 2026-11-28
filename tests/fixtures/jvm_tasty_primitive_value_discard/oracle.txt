@@ -1,0 +1,700 @@
+/** Decompiled from <oracle>/reference/example/PrimitiveValueDiscard.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("PrimitiveValueDiscard.scala") class PrimitiveValueDiscard() {
+    def int_formal(x: scala.Int, y: scala.Int, b: scala.Boolean): scala.Unit = {
+      x
+      ()
+    }
+    def int_literal(`x₂`: scala.Int, `y₂`: scala.Int, `b₂`: scala.Boolean): scala.Unit = {
+      1
+      ()
+    }
+    def int_ascription(`x₃`: scala.Int, `y₃`: scala.Int, `b₃`: scala.Boolean): scala.Unit = {
+      (`x₃`: scala.Int)
+      ()
+    }
+    def int_if_unit(`x₄`: scala.Int, `y₄`: scala.Int, `b₄`: scala.Boolean): scala.Unit = if (`b₄`) {
+      `x₄`
+      ()
+    } else {
+      `y₄`
+      ()
+    }
+    def int_match_unit(`x₅`: scala.Int, `y₅`: scala.Int, `b₅`: scala.Boolean): scala.Unit = `b₅` match {
+      case true =>
+        {
+          `x₅`
+          ()
+        }
+      case false =>
+        {
+          `y₅`
+          ()
+        }
+    }
+    def int_return_value(`x₆`: scala.Int, `y₆`: scala.Int, `b₆`: scala.Boolean): scala.Unit = return {
+      `x₆`
+      ()
+    }
+    def int_block_unit(`x₇`: scala.Int, `y₇`: scala.Int, `b₇`: scala.Boolean): scala.Unit = {
+      var n: scala.Int = 0
+      n = n.+(1)
+      `x₇`
+      ()
+    }
+    def int_mixed_unit(`x₈`: scala.Int, `y₈`: scala.Int, `b₈`: scala.Boolean): scala.Unit = {
+      if (`b₈`) return () else ()
+      `x₈`
+      ()
+    }
+    def int_nested_unit(`x₉`: scala.Int, `y₉`: scala.Int, `b₉`: scala.Boolean): scala.Unit = {
+      `x₉`
+      1
+      1
+      ()
+    }
+    def int_statement(`x₁₀`: scala.Int, `y₁₀`: scala.Int, `b₁₀`: scala.Boolean): scala.Int = {
+      `x₁₀`
+      7
+    }
+    def int_local_read(`x₁₁`: scala.Int, `y₁₁`: scala.Int, `b₁₁`: scala.Boolean): scala.Int = {
+      val z: scala.Int = `x₁₁`
+      z
+      7
+    }
+    def int_if_no_else(`x₁₂`: scala.Int, `y₁₂`: scala.Int, `b₁₂`: scala.Boolean): scala.Int = {
+      var steps: scala.Int = 0
+      if (`b₁₂`) {
+        steps = steps.+(1)
+        `x₁₂`
+        ()
+      } else ()
+
+      (steps: scala.Int)
+    }
+    def int_while_body(`x₁₃`: scala.Int, `y₁₃`: scala.Int, `b₁₃`: scala.Boolean): scala.Int = {
+      var `steps₂`: scala.Int = 0
+      while (`steps₂`.<(2)) {
+        `steps₂` = `steps₂`.+(1)
+        `x₁₃`
+        ()
+      }
+
+      (`steps₂`: scala.Int)
+    }
+    def int_effect_order(`x₁₄`: scala.Int, `y₁₄`: scala.Int, `b₁₄`: scala.Boolean): scala.Int = {
+      var `steps₃`: scala.Int = 0
+      `steps₃` = `steps₃`.*(10).+(1)
+      `x₁₄`
+      `steps₃` = `steps₃`.*(10).+(2)
+      `y₁₄`
+
+      (`steps₃`: scala.Int)
+    }
+    def int_match_statement(`x₁₅`: scala.Int, `y₁₅`: scala.Int, `b₁₅`: scala.Boolean): scala.Int = {
+      var `steps₄`: scala.Int = 0
+      `b₁₅` match {
+        case true =>
+          `steps₄` = 11
+          `x₁₅`
+        case false =>
+          `steps₄` = 22
+          `y₁₅`
+      }
+
+      (`steps₄`: scala.Int)
+    }
+    def int_preserve_result(`x₁₆`: scala.Int, `y₁₆`: scala.Int, `b₁₆`: scala.Boolean): scala.Int = {
+      `x₁₆`
+      `y₁₆`
+    }
+    def int_selector_statement(`x₁₇`: scala.Int, `y₁₇`: scala.Int, `b₁₇`: scala.Boolean): scala.Int = {
+      `x₁₇`
+      `b₁₇`
+    } match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def int_guard_statement(`x₁₈`: scala.Int, `y₁₈`: scala.Int, `b₁₈`: scala.Boolean): scala.Int = `b₁₈` match {
+      case n if {
+        `x₁₈`
+        `n₂`
+      } =>
+        1
+      case _ =>
+        2
+    }
+    def int_mixed_return(`x₁₉`: scala.Int, `y₁₉`: scala.Int, `b₁₉`: scala.Boolean): scala.Int = {
+      if (`b₁₉`) return 3 else ()
+      `x₁₉`
+      7
+    }
+    def int_all_returning(`x₂₀`: scala.Int, `y₂₀`: scala.Int, `b₂₀`: scala.Boolean): scala.Int = {
+      if (`b₂₀`) return 3 else return 4
+      `x₂₀`
+      7
+    }
+    def boolean_formal(`x₂₁`: scala.Boolean, `y₂₁`: scala.Boolean, `b₂₁`: scala.Boolean): scala.Unit = {
+      `x₂₁`
+      ()
+    }
+    def boolean_literal(`x₂₂`: scala.Boolean, `y₂₂`: scala.Boolean, `b₂₂`: scala.Boolean): scala.Unit = {
+      true
+      ()
+    }
+    def boolean_ascription(`x₂₃`: scala.Boolean, `y₂₃`: scala.Boolean, `b₂₃`: scala.Boolean): scala.Unit = {
+      (`x₂₃`: scala.Boolean)
+      ()
+    }
+    def boolean_if_unit(`x₂₄`: scala.Boolean, `y₂₄`: scala.Boolean, `b₂₄`: scala.Boolean): scala.Unit = if (`b₂₄`) {
+      `x₂₄`
+      ()
+    } else {
+      `y₂₄`
+      ()
+    }
+    def boolean_match_unit(`x₂₅`: scala.Boolean, `y₂₅`: scala.Boolean, `b₂₅`: scala.Boolean): scala.Unit = `b₂₅` match {
+      case true =>
+        {
+          `x₂₅`
+          ()
+        }
+      case false =>
+        {
+          `y₂₅`
+          ()
+        }
+    }
+    def boolean_return_value(`x₂₆`: scala.Boolean, `y₂₆`: scala.Boolean, `b₂₆`: scala.Boolean): scala.Unit = return {
+      `x₂₆`
+      ()
+    }
+    def boolean_block_unit(`x₂₇`: scala.Boolean, `y₂₇`: scala.Boolean, `b₂₇`: scala.Boolean): scala.Unit = {
+      var `n₃`: scala.Int = 0
+      `n₃` = `n₃`.+(1)
+      `x₂₇`
+      ()
+    }
+    def boolean_mixed_unit(`x₂₈`: scala.Boolean, `y₂₈`: scala.Boolean, `b₂₈`: scala.Boolean): scala.Unit = {
+      if (`b₂₈`) return () else ()
+      `x₂₈`
+      ()
+    }
+    def boolean_nested_unit(`x₂₉`: scala.Boolean, `y₂₉`: scala.Boolean, `b₂₉`: scala.Boolean): scala.Unit = {
+      `x₂₉`
+      1
+      true
+      ()
+    }
+    def boolean_statement(`x₃₀`: scala.Boolean, `y₃₀`: scala.Boolean, `b₃₀`: scala.Boolean): scala.Int = {
+      `x₃₀`
+      7
+    }
+    def boolean_local_read(`x₃₁`: scala.Boolean, `y₃₁`: scala.Boolean, `b₃₁`: scala.Boolean): scala.Int = {
+      val `z₂`: scala.Boolean = `x₃₁`
+      `z₂`
+      7
+    }
+    def boolean_if_no_else(`x₃₂`: scala.Boolean, `y₃₂`: scala.Boolean, `b₃₂`: scala.Boolean): scala.Int = {
+      var `steps₅`: scala.Int = 0
+      if (`b₃₂`) {
+        `steps₅` = `steps₅`.+(1)
+        `x₃₂`
+        ()
+      } else ()
+
+      (`steps₅`: scala.Int)
+    }
+    def boolean_while_body(`x₃₃`: scala.Boolean, `y₃₃`: scala.Boolean, `b₃₃`: scala.Boolean): scala.Int = {
+      var `steps₆`: scala.Int = 0
+      while (`steps₆`.<(2)) {
+        `steps₆` = `steps₆`.+(1)
+        `x₃₃`
+        ()
+      }
+
+      (`steps₆`: scala.Int)
+    }
+    def boolean_effect_order(`x₃₄`: scala.Boolean, `y₃₄`: scala.Boolean, `b₃₄`: scala.Boolean): scala.Int = {
+      var `steps₇`: scala.Int = 0
+      `steps₇` = `steps₇`.*(10).+(1)
+      `x₃₄`
+      `steps₇` = `steps₇`.*(10).+(2)
+      `y₃₄`
+
+      (`steps₇`: scala.Int)
+    }
+    def boolean_match_statement(`x₃₅`: scala.Boolean, `y₃₅`: scala.Boolean, `b₃₅`: scala.Boolean): scala.Int = {
+      var `steps₈`: scala.Int = 0
+      `b₃₅` match {
+        case true =>
+          `steps₈` = 11
+          `x₃₅`
+        case false =>
+          `steps₈` = 22
+          `y₃₅`
+      }
+
+      (`steps₈`: scala.Int)
+    }
+    def boolean_preserve_result(`x₃₆`: scala.Boolean, `y₃₆`: scala.Boolean, `b₃₆`: scala.Boolean): scala.Boolean = {
+      `x₃₆`
+      `y₃₆`
+    }
+    def boolean_selector_statement(`x₃₇`: scala.Boolean, `y₃₇`: scala.Boolean, `b₃₇`: scala.Boolean): scala.Int = {
+      `x₃₇`
+      `b₃₇`
+    } match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def boolean_guard_statement(`x₃₈`: scala.Boolean, `y₃₈`: scala.Boolean, `b₃₈`: scala.Boolean): scala.Int = `b₃₈` match {
+      case n if {
+        `x₃₈`
+        `n₄`
+      } =>
+        1
+      case _ =>
+        2
+    }
+    def boolean_mixed_return(`x₃₉`: scala.Boolean, `y₃₉`: scala.Boolean, `b₃₉`: scala.Boolean): scala.Int = {
+      if (`b₃₉`) return 3 else ()
+      `x₃₉`
+      7
+    }
+    def boolean_all_returning(`x₄₀`: scala.Boolean, `y₄₀`: scala.Boolean, `b₄₀`: scala.Boolean): scala.Int = {
+      if (`b₄₀`) return 3 else return 4
+      `x₄₀`
+      7
+    }
+    def long_formal(`x₄₁`: scala.Long, `y₄₁`: scala.Long, `b₄₁`: scala.Boolean): scala.Unit = {
+      `x₄₁`
+      ()
+    }
+    def long_literal(`x₄₂`: scala.Long, `y₄₂`: scala.Long, `b₄₂`: scala.Boolean): scala.Unit = {
+      1L
+      ()
+    }
+    def long_ascription(`x₄₃`: scala.Long, `y₄₃`: scala.Long, `b₄₃`: scala.Boolean): scala.Unit = {
+      (`x₄₃`: scala.Long)
+      ()
+    }
+    def long_if_unit(`x₄₄`: scala.Long, `y₄₄`: scala.Long, `b₄₄`: scala.Boolean): scala.Unit = if (`b₄₄`) {
+      `x₄₄`
+      ()
+    } else {
+      `y₄₄`
+      ()
+    }
+    def long_match_unit(`x₄₅`: scala.Long, `y₄₅`: scala.Long, `b₄₅`: scala.Boolean): scala.Unit = `b₄₅` match {
+      case true =>
+        {
+          `x₄₅`
+          ()
+        }
+      case false =>
+        {
+          `y₄₅`
+          ()
+        }
+    }
+    def long_return_value(`x₄₆`: scala.Long, `y₄₆`: scala.Long, `b₄₆`: scala.Boolean): scala.Unit = return {
+      `x₄₆`
+      ()
+    }
+    def long_block_unit(`x₄₇`: scala.Long, `y₄₇`: scala.Long, `b₄₇`: scala.Boolean): scala.Unit = {
+      var `n₅`: scala.Int = 0
+      `n₅` = `n₅`.+(1)
+      `x₄₇`
+      ()
+    }
+    def long_mixed_unit(`x₄₈`: scala.Long, `y₄₈`: scala.Long, `b₄₈`: scala.Boolean): scala.Unit = {
+      if (`b₄₈`) return () else ()
+      `x₄₈`
+      ()
+    }
+    def long_nested_unit(`x₄₉`: scala.Long, `y₄₉`: scala.Long, `b₄₉`: scala.Boolean): scala.Unit = {
+      `x₄₉`
+      1
+      1L
+      ()
+    }
+    def long_statement(`x₅₀`: scala.Long, `y₅₀`: scala.Long, `b₅₀`: scala.Boolean): scala.Int = {
+      `x₅₀`
+      7
+    }
+    def long_local_read(`x₅₁`: scala.Long, `y₅₁`: scala.Long, `b₅₁`: scala.Boolean): scala.Int = {
+      val `z₃`: scala.Long = `x₅₁`
+      `z₃`
+      7
+    }
+    def long_if_no_else(`x₅₂`: scala.Long, `y₅₂`: scala.Long, `b₅₂`: scala.Boolean): scala.Int = {
+      var `steps₉`: scala.Int = 0
+      if (`b₅₂`) {
+        `steps₉` = `steps₉`.+(1)
+        `x₅₂`
+        ()
+      } else ()
+
+      (`steps₉`: scala.Int)
+    }
+    def long_while_body(`x₅₃`: scala.Long, `y₅₃`: scala.Long, `b₅₃`: scala.Boolean): scala.Int = {
+      var `steps₁₀`: scala.Int = 0
+      while (`steps₁₀`.<(2)) {
+        `steps₁₀` = `steps₁₀`.+(1)
+        `x₅₃`
+        ()
+      }
+
+      (`steps₁₀`: scala.Int)
+    }
+    def long_effect_order(`x₅₄`: scala.Long, `y₅₄`: scala.Long, `b₅₄`: scala.Boolean): scala.Int = {
+      var `steps₁₁`: scala.Int = 0
+      `steps₁₁` = `steps₁₁`.*(10).+(1)
+      `x₅₄`
+      `steps₁₁` = `steps₁₁`.*(10).+(2)
+      `y₅₄`
+
+      (`steps₁₁`: scala.Int)
+    }
+    def long_match_statement(`x₅₅`: scala.Long, `y₅₅`: scala.Long, `b₅₅`: scala.Boolean): scala.Int = {
+      var `steps₁₂`: scala.Int = 0
+      `b₅₅` match {
+        case true =>
+          `steps₁₂` = 11
+          `x₅₅`
+        case false =>
+          `steps₁₂` = 22
+          `y₅₅`
+      }
+
+      (`steps₁₂`: scala.Int)
+    }
+    def long_preserve_result(`x₅₆`: scala.Long, `y₅₆`: scala.Long, `b₅₆`: scala.Boolean): scala.Long = {
+      `x₅₆`
+      `y₅₆`
+    }
+    def long_selector_statement(`x₅₇`: scala.Long, `y₅₇`: scala.Long, `b₅₇`: scala.Boolean): scala.Int = {
+      `x₅₇`
+      `b₅₇`
+    } match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def long_guard_statement(`x₅₈`: scala.Long, `y₅₈`: scala.Long, `b₅₈`: scala.Boolean): scala.Int = `b₅₈` match {
+      case n if {
+        `x₅₈`
+        `n₆`
+      } =>
+        1
+      case _ =>
+        2
+    }
+    def long_mixed_return(`x₅₉`: scala.Long, `y₅₉`: scala.Long, `b₅₉`: scala.Boolean): scala.Int = {
+      if (`b₅₉`) return 3 else ()
+      `x₅₉`
+      7
+    }
+    def long_all_returning(`x₆₀`: scala.Long, `y₆₀`: scala.Long, `b₆₀`: scala.Boolean): scala.Int = {
+      if (`b₆₀`) return 3 else return 4
+      `x₆₀`
+      7
+    }
+    def float_formal(`x₆₁`: scala.Float, `y₆₁`: scala.Float, `b₆₁`: scala.Boolean): scala.Unit = {
+      `x₆₁`
+      ()
+    }
+    def float_literal(`x₆₂`: scala.Float, `y₆₂`: scala.Float, `b₆₂`: scala.Boolean): scala.Unit = {
+      1.0f
+      ()
+    }
+    def float_ascription(`x₆₃`: scala.Float, `y₆₃`: scala.Float, `b₆₃`: scala.Boolean): scala.Unit = {
+      (`x₆₃`: scala.Float)
+      ()
+    }
+    def float_if_unit(`x₆₄`: scala.Float, `y₆₄`: scala.Float, `b₆₄`: scala.Boolean): scala.Unit = if (`b₆₄`) {
+      `x₆₄`
+      ()
+    } else {
+      `y₆₄`
+      ()
+    }
+    def float_match_unit(`x₆₅`: scala.Float, `y₆₅`: scala.Float, `b₆₅`: scala.Boolean): scala.Unit = `b₆₅` match {
+      case true =>
+        {
+          `x₆₅`
+          ()
+        }
+      case false =>
+        {
+          `y₆₅`
+          ()
+        }
+    }
+    def float_return_value(`x₆₆`: scala.Float, `y₆₆`: scala.Float, `b₆₆`: scala.Boolean): scala.Unit = return {
+      `x₆₆`
+      ()
+    }
+    def float_block_unit(`x₆₇`: scala.Float, `y₆₇`: scala.Float, `b₆₇`: scala.Boolean): scala.Unit = {
+      var `n₇`: scala.Int = 0
+      `n₇` = `n₇`.+(1)
+      `x₆₇`
+      ()
+    }
+    def float_mixed_unit(`x₆₈`: scala.Float, `y₆₈`: scala.Float, `b₆₈`: scala.Boolean): scala.Unit = {
+      if (`b₆₈`) return () else ()
+      `x₆₈`
+      ()
+    }
+    def float_nested_unit(`x₆₉`: scala.Float, `y₆₉`: scala.Float, `b₆₉`: scala.Boolean): scala.Unit = {
+      `x₆₉`
+      1
+      1.0f
+      ()
+    }
+    def float_statement(`x₇₀`: scala.Float, `y₇₀`: scala.Float, `b₇₀`: scala.Boolean): scala.Int = {
+      `x₇₀`
+      7
+    }
+    def float_local_read(`x₇₁`: scala.Float, `y₇₁`: scala.Float, `b₇₁`: scala.Boolean): scala.Int = {
+      val `z₄`: scala.Float = `x₇₁`
+      `z₄`
+      7
+    }
+    def float_if_no_else(`x₇₂`: scala.Float, `y₇₂`: scala.Float, `b₇₂`: scala.Boolean): scala.Int = {
+      var `steps₁₃`: scala.Int = 0
+      if (`b₇₂`) {
+        `steps₁₃` = `steps₁₃`.+(1)
+        `x₇₂`
+        ()
+      } else ()
+
+      (`steps₁₃`: scala.Int)
+    }
+    def float_while_body(`x₇₃`: scala.Float, `y₇₃`: scala.Float, `b₇₃`: scala.Boolean): scala.Int = {
+      var `steps₁₄`: scala.Int = 0
+      while (`steps₁₄`.<(2)) {
+        `steps₁₄` = `steps₁₄`.+(1)
+        `x₇₃`
+        ()
+      }
+
+      (`steps₁₄`: scala.Int)
+    }
+    def float_effect_order(`x₇₄`: scala.Float, `y₇₄`: scala.Float, `b₇₄`: scala.Boolean): scala.Int = {
+      var `steps₁₅`: scala.Int = 0
+      `steps₁₅` = `steps₁₅`.*(10).+(1)
+      `x₇₄`
+      `steps₁₅` = `steps₁₅`.*(10).+(2)
+      `y₇₄`
+
+      (`steps₁₅`: scala.Int)
+    }
+    def float_match_statement(`x₇₅`: scala.Float, `y₇₅`: scala.Float, `b₇₅`: scala.Boolean): scala.Int = {
+      var `steps₁₆`: scala.Int = 0
+      `b₇₅` match {
+        case true =>
+          `steps₁₆` = 11
+          `x₇₅`
+        case false =>
+          `steps₁₆` = 22
+          `y₇₅`
+      }
+
+      (`steps₁₆`: scala.Int)
+    }
+    def float_preserve_result(`x₇₆`: scala.Float, `y₇₆`: scala.Float, `b₇₆`: scala.Boolean): scala.Float = {
+      `x₇₆`
+      `y₇₆`
+    }
+    def float_selector_statement(`x₇₇`: scala.Float, `y₇₇`: scala.Float, `b₇₇`: scala.Boolean): scala.Int = {
+      `x₇₇`
+      `b₇₇`
+    } match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def float_guard_statement(`x₇₈`: scala.Float, `y₇₈`: scala.Float, `b₇₈`: scala.Boolean): scala.Int = `b₇₈` match {
+      case n if {
+        `x₇₈`
+        `n₈`
+      } =>
+        1
+      case _ =>
+        2
+    }
+    def float_mixed_return(`x₇₉`: scala.Float, `y₇₉`: scala.Float, `b₇₉`: scala.Boolean): scala.Int = {
+      if (`b₇₉`) return 3 else ()
+      `x₇₉`
+      7
+    }
+    def float_all_returning(`x₈₀`: scala.Float, `y₈₀`: scala.Float, `b₈₀`: scala.Boolean): scala.Int = {
+      if (`b₈₀`) return 3 else return 4
+      `x₈₀`
+      7
+    }
+    def double_formal(`x₈₁`: scala.Double, `y₈₁`: scala.Double, `b₈₁`: scala.Boolean): scala.Unit = {
+      `x₈₁`
+      ()
+    }
+    def double_literal(`x₈₂`: scala.Double, `y₈₂`: scala.Double, `b₈₂`: scala.Boolean): scala.Unit = {
+      1.0
+      ()
+    }
+    def double_ascription(`x₈₃`: scala.Double, `y₈₃`: scala.Double, `b₈₃`: scala.Boolean): scala.Unit = {
+      (`x₈₃`: scala.Double)
+      ()
+    }
+    def double_if_unit(`x₈₄`: scala.Double, `y₈₄`: scala.Double, `b₈₄`: scala.Boolean): scala.Unit = if (`b₈₄`) {
+      `x₈₄`
+      ()
+    } else {
+      `y₈₄`
+      ()
+    }
+    def double_match_unit(`x₈₅`: scala.Double, `y₈₅`: scala.Double, `b₈₅`: scala.Boolean): scala.Unit = `b₈₅` match {
+      case true =>
+        {
+          `x₈₅`
+          ()
+        }
+      case false =>
+        {
+          `y₈₅`
+          ()
+        }
+    }
+    def double_return_value(`x₈₆`: scala.Double, `y₈₆`: scala.Double, `b₈₆`: scala.Boolean): scala.Unit = return {
+      `x₈₆`
+      ()
+    }
+    def double_block_unit(`x₈₇`: scala.Double, `y₈₇`: scala.Double, `b₈₇`: scala.Boolean): scala.Unit = {
+      var `n₉`: scala.Int = 0
+      `n₉` = `n₉`.+(1)
+      `x₈₇`
+      ()
+    }
+    def double_mixed_unit(`x₈₈`: scala.Double, `y₈₈`: scala.Double, `b₈₈`: scala.Boolean): scala.Unit = {
+      if (`b₈₈`) return () else ()
+      `x₈₈`
+      ()
+    }
+    def double_nested_unit(`x₈₉`: scala.Double, `y₈₉`: scala.Double, `b₈₉`: scala.Boolean): scala.Unit = {
+      `x₈₉`
+      1
+      1.0
+      ()
+    }
+    def double_statement(`x₉₀`: scala.Double, `y₉₀`: scala.Double, `b₉₀`: scala.Boolean): scala.Int = {
+      `x₉₀`
+      7
+    }
+    def double_local_read(`x₉₁`: scala.Double, `y₉₁`: scala.Double, `b₉₁`: scala.Boolean): scala.Int = {
+      val `z₅`: scala.Double = `x₉₁`
+      `z₅`
+      7
+    }
+    def double_if_no_else(`x₉₂`: scala.Double, `y₉₂`: scala.Double, `b₉₂`: scala.Boolean): scala.Int = {
+      var `steps₁₇`: scala.Int = 0
+      if (`b₉₂`) {
+        `steps₁₇` = `steps₁₇`.+(1)
+        `x₉₂`
+        ()
+      } else ()
+
+      (`steps₁₇`: scala.Int)
+    }
+    def double_while_body(`x₉₃`: scala.Double, `y₉₃`: scala.Double, `b₉₃`: scala.Boolean): scala.Int = {
+      var `steps₁₈`: scala.Int = 0
+      while (`steps₁₈`.<(2)) {
+        `steps₁₈` = `steps₁₈`.+(1)
+        `x₉₃`
+        ()
+      }
+
+      (`steps₁₈`: scala.Int)
+    }
+    def double_effect_order(`x₉₄`: scala.Double, `y₉₄`: scala.Double, `b₉₄`: scala.Boolean): scala.Int = {
+      var `steps₁₉`: scala.Int = 0
+      `steps₁₉` = `steps₁₉`.*(10).+(1)
+      `x₉₄`
+      `steps₁₉` = `steps₁₉`.*(10).+(2)
+      `y₉₄`
+
+      (`steps₁₉`: scala.Int)
+    }
+    def double_match_statement(`x₉₅`: scala.Double, `y₉₅`: scala.Double, `b₉₅`: scala.Boolean): scala.Int = {
+      var `steps₂₀`: scala.Int = 0
+      `b₉₅` match {
+        case true =>
+          `steps₂₀` = 11
+          `x₉₅`
+        case false =>
+          `steps₂₀` = 22
+          `y₉₅`
+      }
+
+      (`steps₂₀`: scala.Int)
+    }
+    def double_preserve_result(`x₉₆`: scala.Double, `y₉₆`: scala.Double, `b₉₆`: scala.Boolean): scala.Double = {
+      `x₉₆`
+      `y₉₆`
+    }
+    def double_selector_statement(`x₉₇`: scala.Double, `y₉₇`: scala.Double, `b₉₇`: scala.Boolean): scala.Int = {
+      `x₉₇`
+      `b₉₇`
+    } match {
+      case true =>
+        1
+      case false =>
+        2
+    }
+    def double_guard_statement(`x₉₈`: scala.Double, `y₉₈`: scala.Double, `b₉₈`: scala.Boolean): scala.Int = `b₉₈` match {
+      case n if {
+        `x₉₈`
+        `n₁₀`
+      } =>
+        1
+      case _ =>
+        2
+    }
+    def double_mixed_return(`x₉₉`: scala.Double, `y₉₉`: scala.Double, `b₉₉`: scala.Boolean): scala.Int = {
+      if (`b₉₉`) return 3 else ()
+      `x₉₉`
+      7
+    }
+    def double_all_returning(`x₁₀₀`: scala.Double, `y₁₀₀`: scala.Double, `b₁₀₀`: scala.Boolean): scala.Int = {
+      if (`b₁₀₀`) return 3 else return 4
+      `x₁₀₀`
+      7
+    }
+    def divide_unit(`x₁₀₁`: scala.Int): scala.Unit = {
+      10./(`x₁₀₁`)
+      ()
+    }
+    def divide_statement(`x₁₀₂`: scala.Int): scala.Int = {
+      10./(`x₁₀₂`)
+      7
+    }
+    def divide_if(`x₁₀₃`: scala.Int, `b₁₀₁`: scala.Boolean): scala.Int = {
+      if (`b₁₀₁`) {
+        10./(`x₁₀₃`)
+        ()
+      } else ()
+      7
+    }
+    def divide_after_return(`x₁₀₄`: scala.Int, `b₁₀₂`: scala.Boolean): scala.Int = {
+      if (`b₁₀₂`) return 3 else ()
+      10./(`x₁₀₄`)
+      7
+    }
+  }
+}
