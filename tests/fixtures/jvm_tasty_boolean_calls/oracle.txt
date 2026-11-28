@@ -1,0 +1,81 @@
+Scala 3.9.0 / TASTy 28.9.0: same-class call DEFDEF excerpts
+Extracted from -Yprint-tasty; original addresses and shared references retained.
+
+    30:           TERMREFpkg 11 [scala]
+
+   123:       DEFDEF(30) 27 [direct]
+   126:         PARAM(5) 13 [x]
+   129:           IDENTtpt 14 [Int]
+   131:             SHAREDtype 41
+   133:         IDENTtpt 15 [Boolean]
+   135:           SHAREDtype 47
+   137:         APPLY(16)
+   139:           SELECTin(11) 28 [positive[Signed Signature(List(scala.Int),scala.Boolean) @positive]]
+   142:             QUALTHIS
+   143:               IDENTtpt 2 [BooleanCalls]
+   145:                 TYPEREFsymbol 5
+   147:                   TERMREFpkg 1 [example]
+   149:             SHAREDtype 145
+   152:           TERMREFdirect 126
+
+   155:       DEFDEF(27) 29 [explicit]
+   158:         PARAM(5) 13 [x]
+   161:           IDENTtpt 14 [Int]
+   163:             SHAREDtype 41
+   165:         IDENTtpt 15 [Boolean]
+   167:           SHAREDtype 47
+   169:         APPLY(13)
+   171:           SELECTin(8) 28 [positive[Signed Signature(List(scala.Int),scala.Boolean) @positive]]
+   174:             THIS
+   175:               SHAREDtype 145
+   178:             SHAREDtype 145
+   181:           TERMREFdirect 158
+
+   184:       DEFDEF(20) 30 [noarg]
+   187:         EMPTYCLAUSE
+   188:         IDENTtpt 15 [Boolean]
+   190:           SHAREDtype 47
+   192:         APPLY(12)
+   194:           SELECTin(10) 31 [ready[Signed Signature(List(),scala.Boolean) @ready]]
+   197:             QUALTHIS
+   198:               IDENTtpt 2 [BooleanCalls]
+   200:                 SHAREDtype 145
+   203:             SHAREDtype 145
+
+   206:       DEFDEF(43) 32 [nested]
+   209:         PARAM(5) 13 [x]
+   212:           IDENTtpt 14 [Int]
+   214:             SHAREDtype 41
+   216:         IDENTtpt 15 [Boolean]
+   218:           SHAREDtype 47
+   220:         APPLY(29)
+   222:           SELECTin(10) 33 [identity[Signed Signature(List(scala.Boolean),scala.Boolean) @identity]]
+   225:             QUALTHIS
+   226:               IDENTtpt 2 [BooleanCalls]
+   228:                 SHAREDtype 145
+   231:             SHAREDtype 145
+   234:           APPLY(15)
+   236:             SELECTin(10) 28 [positive[Signed Signature(List(scala.Int),scala.Boolean) @positive]]
+   239:               QUALTHIS
+   240:                 IDENTtpt 2 [BooleanCalls]
+   242:                   SHAREDtype 145
+   245:               SHAREDtype 145
+   248:             TERMREFdirect 209
+
+   299:       DEFDEF(39) 37 [mixedCall]
+   302:         PARAM(5) 13 [x]
+   305:           IDENTtpt 14 [Int]
+   307:             SHAREDtype 41
+   309:         PARAM(5) 21 [b]
+   312:           IDENTtpt 15 [Boolean]
+   314:             SHAREDtype 47
+   316:         IDENTtpt 15 [Boolean]
+   318:           SHAREDtype 47
+   320:         APPLY(18)
+   322:           SELECTin(10) 38 [mixed[Signed Signature(List(scala.Int, scala.Boolean),scala.Boolean) @mixed]]
+   325:             QUALTHIS
+   326:               IDENTtpt 2 [BooleanCalls]
+   328:                 SHAREDtype 145
+   331:             SHAREDtype 145
+   334:           TERMREFdirect 302
+   337:           TERMREFdirect 309

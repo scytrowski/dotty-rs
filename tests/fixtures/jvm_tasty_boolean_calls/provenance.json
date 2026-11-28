@@ -1,0 +1,24 @@
+{
+  "compiler_artifacts_sha256": {
+    "compiler-interface-1.12.0.jar": "92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3",
+    "scala-asm-9.9.0-scala-1.jar": "75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375",
+    "scala-library-3.9.0.jar": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
+    "scala3-compiler_3-3.9.0.jar": "3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a",
+    "scala3-interfaces-3.9.0.jar": "64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db",
+    "scala3-library_3-3.9.0.jar": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+    "tasty-core_3-3.9.0.jar": "66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f",
+    "util-interface-1.11.5.jar": "1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af"
+  },
+  "java_consumer_sha256": "307a0b9f84b0d0527918601827f839140b494915d630bc3ef75d9b75dee311c0",
+  "jdk_release": {
+    "IMPLEMENTOR": "Eclipse Adoptium",
+    "IMPLEMENTOR_VERSION": "Temurin-21.0.13+9",
+    "JAVA_VERSION": "21.0.13",
+    "OS_ARCH": "x86_64"
+  },
+  "oracle_sha256": "da19f7e281c7676e92f45c53a4458d2da38dfd1e15993fa294e7a31b2220a995",
+  "scala_consumer_sha256": "41356800b52bfdbc6b2da2b6cb720e5dc21f0b93a0fd94efe8762473e8536bf6",
+  "scala_source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "source_sha256": "3434588e972b0d9ce5ecfb162b526a910c8ec945f608ccbee248b255d8b3162d",
+  "tasty_sha256": "e9f4d90cdecff8f29e29abd998db5a9207564c6c890f288a6db91f3b52f367eb"
+}
