@@ -23,8 +23,8 @@ Evaluate statements once in source order, preserving effects, conditional paths,
 exceptions and supported exits. A normal discarded Int/Boolean/Float consumes
 one physical slot with POP; Long/Double consume two with POP2. Unit and diverging
 paths supply no value to pop. The final expression retains its exact result kind.
-This also fixes the current Double-valued While-body path that emits POP and is
-then correctly rejected by the class-file analyzer as PopCategoryTwo.
+This fixes the previous Double-valued While-body path that emitted POP and was
+correctly rejected by the class-file analyzer as PopCategoryTwo.
 
 Excluded: source Unit locals with primitive initializers (currently rejected by
 the typer), reference/null/String/Any discard, boxing, new arithmetic/operators,
@@ -67,3 +67,20 @@ The runner authenticates provenance and unchanged original artifact hashes.
 Extend the existing mandatory jvm_tasty_expressions target and independent
 jvm_source_compilation target. Keep the 38-target strict inventory and shard
 assignments; update measured target/shard timings after implementation.
+
+## Implemented validation
+
+Both POP2 forms have linear/CFG analysis coverage and JDK 21 verification with
+residual wide values and reference/null frame metadata. Primitive loop tests
+assert exact descriptors, loads, discard opcodes, stack/local limits and frames.
+Independent source-to-JVM execution runs the 1928-check Java client.
+
+The existing strict expression target includes deterministic paired emission,
+104 individual method compositions, malformed Unit wrapper mutations for each
+primitive family, missing source edges, depth limits, case-scope rejection,
+single/batch Unit root identity and existing Int-call adaptation. A separate
+pickler test authenticates discarded formal references and ordered BLOCK stats.
+The pinned consumer runs Java and Scala clients on original Rust output and
+separate from-TASTy output: four executions, 1928 checks each. It also verifies
+that original files remain unchanged. These are semantic interoperability checks,
+not a claim of byte-identical Scala trees or optimization.

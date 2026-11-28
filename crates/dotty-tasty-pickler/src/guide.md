@@ -97,7 +97,7 @@ proven returning path. Long singleton case binders retain LONGCONST types and
 registered direct references; reads authenticate ownership and case visibility.
 
 Calls with Long arguments or results, Long fields/constructor parameters, arithmetic,
-conversions and discarded Long expressions remain outside
+conversions remain outside
 this producer slice. Interoperability requires consuming original Rust artifacts
 with Scala 3.9 and executing both original JVM output and from-tasty output; the
 Scala numeric raw printer is not used as the value oracle.
@@ -125,7 +125,7 @@ validation bounds the spelling before conversion and checks the same finite f64
 bits produced by the typer. Suffixed literals retain their exact Constant bits.
 
 Fields, constructor parameters, calls taking/returning floating values, arithmetic,
-comparison, widening, boxing and discarded floating statements remain unsupported
+comparison, widening and boxing remain unsupported
 in this paired producer slice. Same-type Long/Float/Double expression ascriptions
 preserve the original TYPED nodes without runtime conversion. Independent JVM
 support does not expand this contract. Runtime NaN checks establish classification;
@@ -178,3 +178,19 @@ conditions, guards and short-circuit operands remain unsupported. Complete outpu
 requires read-only body validation and exact ordinary-local agreement with the
 JVM plan; failure exposes no partial artifact. The pinned Scala gate consumes
 original Rust TASTy and executes independently rebuilt from-TASTy classes.
+
+## Primitive statements and Unit adaptation
+
+Already supported Int/Boolean/Long/Float/Double expressions can appear as
+non-final block statements and While bodies. Canonical expected-Unit adaptations
+retain their BLOCK with one original statement and synthetic UNITCONST tail.
+Validation authenticates the complete wrapper, exact source mapping, types and
+spans before temporarily allowing its original-child edge. Descendant bindings,
+local/case scope and traversal budgets remain checked; validation is read-only.
+Primitive-valued While bodies retain their actual typed tree and wire shape.
+
+This includes Unit method bodies, supported If/Match branches, ascriptions and
+local returns while preserving evaluation order, exceptions and existing operand
+restrictions. Reference discard, boxing, new arithmetic and new call/field
+signatures remain unsupported. Scala 3.9 consumes original Rust artifacts and
+executes both original and independently rebuilt from-TASTy output.

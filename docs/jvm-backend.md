@@ -67,7 +67,7 @@ Long arguments to object creation and approved direct-parent constructor calls
 (including Long constants and forwarded constructor parameters), Long-valued
 `If` joins, and Long locals updated across Boolean/Int-controlled `While`
 loops. Long arithmetic,
-comparisons, static Long calls, and category-two stack manipulation remain
+comparisons, static Long calls, and category-two duplication remain
 outside the supported subset.
 The #1519 `LongCategory2.scala` acceptance batch verifies the complete
 three-class source path and its signed 64-bit execution cases on JDK 21; the
@@ -710,8 +710,8 @@ assignments, and returns use category-correct `lconst`/`ldc2_w`, `lload`,
 Double literals use raw-bit constants, and their parameters, initialized
 locals, mutable local assignments, and method returns use `fload`/`fstore`/
 `freturn` and `dload`/`dstore`/`dreturn`. Float is category one; Double uses
-two local/stack slots. Discarded Float expressions use `pop`; discarded Double
-expressions remain unsupported because this subset has no category-two pop.
+two local/stack slots. Discarded Float expressions use `pop`; discarded Long/Double
+expressions use `pop2`.
 Private instance Long fields use
 descriptor `J`; constructor initializers, field reads, and mutable field writes
 preserve their two-slot stack and local behavior. Descriptor validation
@@ -721,7 +721,7 @@ calls preserve source argument order and exact planned method owner/descriptor;
 Long results keep their two-slot stack width through returns and `If` joins.
 Long local updates may cross a loop backedge only when the initialized
 head/tail pair agrees at the header. Long arithmetic/comparisons, implicit
-conversions, and discarded Long or Double expressions remain unsupported.
+conversions remain unsupported.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
@@ -782,8 +782,9 @@ the final expression or other value positions, and immutable planned-class
 reference locals in supported straight-line blocks. Standalone expression APIs have
 no local layout and return `MissingLocalBinding` for local references. Typed
 `Block` lowering evaluates supported stats from left to right, then
-lowers the final expression once. An unused Int/Boolean value is discarded
-with one `pop`; Unit already leaves an empty operand stack and needs no pop.
+lowers the final expression once. An unused Int/Boolean/Float value is discarded
+with one `pop`; Long/Double use `pop2`. Unit already leaves an empty operand stack
+and needs no pop.
 The final value remains available to its parent expression or method return,
 including exact planned reference results. Unused initialized references are
 discarded with one `pop`.
@@ -802,8 +803,8 @@ when the body can fall through. The source initialized-local set after an
 `If` includes only locals initialized on every reachable arm; after a loop it
 contains only locals initialized before entry. The classfile analyzer still
 tracks actual reference classes through branch and back-edge joins. Unit bodies
-leave the stack empty; Int/Boolean
-body values are discarded once. The condition and body share the existing
+leave the stack empty; Int/Boolean/Long/Float/Double
+body values are discarded once with their physical slot width. The condition and body share the existing
 depth/node budgets. Since a loop may execute
 zero times, initialization performed only in its body is not considered
 definite after the loop; the class-file CFG analyzer verifies header/back-edge
@@ -921,9 +922,11 @@ artifact.
 
 The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
 category-one JVM stack value. Linear and CFG analysis reject using it on a
-category-two Long. Source blocks and loop bodies that discard a Long return a
-typed unsupported error; `pop2` and `dup2` are not emitted. This bytecode
-primitive does not infer Scala expression effects.
+category-two Long or Double. `CodeBuilder::pop2` accepts either one category-two
+value or two category-one values, validates before changing stack metadata, and
+rejects underflow or a category-one top above a category-two value. Blocks and
+loop bodies use it for discarded Long/Double values; `dup2` remains unsupported.
+These bytecode primitives do not infer Scala expression effects.
 
 The CI JVM gate writes this generated class to disk, inspects it with `javap`,
 compiles a small Java caller with `javac`, and executes it with
@@ -1498,3 +1501,12 @@ for distinct Object-rooted classes with one integer-literal method each:
 ¹ Baseline at `8ea7c987d7` using the same client workload. Preparation includes
 validation and metadata projection. The last column starts after preparation.
 These numbers measure a simple method shape and exclude parallel scheduling.
+
+## Primitive value discard parity
+
+The [primitive value discard contract](jvm-tasty-primitive-value-discard.md)
+covers primitive block statements, While bodies and authenticated expected-Unit
+adaptations across JVM and semantic TASTy. The 104-method fixture has independent
+Java/Scala clients, each checking 1928 cases against original Rust classes and
+classes rebuilt from Rust-produced TASTy by pinned Scala 3.9. Effects, exceptions,
+local exits, exact final values, stack widths and frames have focused coverage.

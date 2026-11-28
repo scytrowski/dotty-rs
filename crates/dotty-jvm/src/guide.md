@@ -73,7 +73,7 @@ Long verification entry per value. Guarded cases and normal/returning paths
 share the existing selector-once and case-scope rules. A proven returning Block,
 If or Match can retain the canonical Long type of its unreachable tail, including
 a checked method parameter/local TermRef. Long selectors use two-slot temporaries and LCmp; this does not add
-arithmetic, conversions or category-two discard operations.
+arithmetic or conversions.
 
 Literal alternatives such as `case 0 | 1` can be nested or parenthesized and
 retain source case order. Each case has one shared guard/body: even duplicate
@@ -91,8 +91,7 @@ If and Match nodes may retain a floating constant/type/formal/local tail type
 only after lowering proves the exit and authenticates planned binding kinds.
 Float uses one physical slot and verifier tag 2; Double uses two slots and one
 verifier tag 3 entry. These are distinct from Integer/tag 1 and Long/tag 4.
-Floating arithmetic, conversions and category-two discard remain
-outside this increment. Paired TASTy support covers method values and control
+Floating arithmetic and conversions remain unsupported. Paired TASTy support covers method values and control
 flow, with narrower field/call support than this independent JVM backend.
 
 Float/Double selectors support same-family literals and alternatives, wildcard
@@ -124,3 +123,13 @@ Ordinary Boolean `val`/`var` declarations keep exact planned symbols and local
 slots, and can drive branches, loops, selectors and guards. Proven returning
 branches authenticate Boolean TermRef tails, including singleton case bindings,
 without confusing Boolean with Int or manufacturing a Nothing type.
+
+## Primitive statement values
+
+Supported Int/Boolean/Long/Float/Double expressions can be discarded in block
+statements and While bodies. Evaluation preserves source order, effects,
+exceptions and validated local returns. POP consumes Int/Boolean/Float; POP2
+consumes Long/Double. Unit and proven returning paths require no pop. The final
+block expression keeps its exact result type. Expected-Unit method bodies borrow
+the frontend's actual adapted root; lowering does not fabricate source bindings.
+This support does not add arithmetic, conversions or call/field signatures.
