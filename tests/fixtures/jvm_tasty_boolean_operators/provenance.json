@@ -9,15 +9,15 @@
     "tasty-core_3-3.9.0.jar": "66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f",
     "util-interface-1.11.5.jar": "1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af"
   },
-  "java_consumer_sha256": "7dfc9f47ba4926526537d70d3bcadad206bb6eec5a43da90d9c7984f26125373",
+  "java_consumer_sha256": "e858987a7d0279b2b680e72171eba26f3de73dfdcb7431a66d805c0256fdb760",
   "jdk_release": {
     "IMPLEMENTOR": "Eclipse Adoptium",
     "IMPLEMENTOR_VERSION": "Temurin-21.0.13+9",
     "JAVA_VERSION": "21.0.13",
     "OS_ARCH": "x86_64"
   },
-  "oracle_sha256": "20f79203bad5f90a6226abc3ab64e1e50f035c2368d4738dc434a9228937d27a",
-  "scala_consumer_sha256": "544cd243fd0e5c0a7e50239004710dfea495b2f2068fead6b369317f18ffc2ea",
+  "oracle_sha256": "6755b54f306478053df1c18cc0fb4e8091ec28067de412abdb82a9f1e765c9f7",
+  "scala_consumer_sha256": "a6f9bcfb5e92be6122d54b4538d45fa6cad5bd9a705df6b277ef8de502ac80b0",
   "scala_source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
   "source_sha256": "49b65c2ff815b22354ecfe644531c42b13b49a7efe1a407ee74d1e253567a5a4",
   "tasty_sha256": "3057f7193b82062841e826ccc4510139ab6a04931fb349a25877dd8fd36a1745"

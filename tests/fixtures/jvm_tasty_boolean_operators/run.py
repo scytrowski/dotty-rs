@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import runpy
 import tempfile
 
@@ -15,6 +16,22 @@ CLASS = "BooleanOperators"
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def reference_excerpt(raw):
+    """Keep the seven formal-operand trees, with original wire addresses/names."""
+    trees = raw.split("\nTrees (", 1)[1]
+    scala_package = re.search(r"(?m)^ *\d+: +TERMREFpkg \d+ \[scala\]$", trees)[0]
+    methods = list(re.finditer(
+        r"(?m)^ *\d+:       DEFDEF\(\d+\) \d+ \[([^\]]+)\]$", trees))
+    excerpts = []
+    for current, following in zip(methods, methods[1:]):
+        if current[1].endswith("_formals"):
+            excerpts.append(trees[current.start():following.start()].rstrip())
+    assert len(excerpts) == 7, "missing Boolean operator reference tree"
+    return ("Scala 3.9.0 / TASTy 28.9.0: formal-operand DEFDEF excerpts\n"
+            "Extracted from -Yprint-tasty; original addresses and shared references retained.\n\n"
+            + scala_package + "\n\n" + "\n\n".join(excerpts) + "\n")
 
 
 def consume(toolchain, candidate, output):
@@ -77,8 +94,7 @@ def main():
         raw = toolchain.compiler(["-release", "21", "-Yprint-tasty", "-sourceroot", HERE, "-d", candidate,
                             HERE / f"{CLASS}.scala"])
         consume(toolchain, candidate, output)
-        printed = raw.replace(str(output), "<oracle>")
-        (HERE / "oracle.txt").write_text(printed)
+        (HERE / "oracle.txt").write_text(reference_excerpt(raw))
         receipt = {
             "scala_source_revision": ORACLE["REVISION"],
             "compiler_artifacts_sha256": toolchain.artifacts,

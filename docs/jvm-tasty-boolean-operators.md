@@ -61,6 +61,10 @@ against original and separately rebuilt from-TASTy classes with `-Xverify:all`.
 Their expected truth tables are independent constants; ordered effects, discarded
 values, exceptions and early returns distinguish eager and short-circuit paths.
 Reference generation is Scala-produced evidence, not Rust acceptance.
+The clients iterate over all four Boolean argument pairs. `oracle.txt` retains
+only the seven formal-operand DEFDEF excerpts from Scala's `-Yprint-tasty` dump;
+wire addresses and shared references remain unchanged. Regenerate the excerpts
+and provenance by running the fixture's `run.py` without a candidate argument.
 
 Candidate mode must consume actual Rust artifacts, compile independent clients,
 execute both original and from-TASTy classes and authenticate unchanged original
