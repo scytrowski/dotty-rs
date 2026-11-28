@@ -5692,8 +5692,8 @@ fn boolean_eager_operators_validate_canonical_source_bindings_read_only() {
             "package example; class Logic {{def f(a: Boolean,b: Boolean): Boolean = a {operator} b}}"
         );
         let mut validated = false;
-        // This test exercises borrowed plan validation. Complete expression
-        // emission is covered independently by the producer integration tests.
+        // Validate explicitly before encoding, checking that the proof borrows
+        // the canonical plan without changing either arena.
         let _output = source_outputs_named(&source, "Logic.scala", |plan| {
             let before = format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast);
             let checked = plan.validate().unwrap();
@@ -5704,7 +5704,8 @@ fn boolean_eager_operators_validate_canonical_source_bindings_read_only() {
                 format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast)
             );
             validated = true;
-        });
+        })
+        .unwrap();
         assert!(validated, "{operator}");
     }
 }
