@@ -51,7 +51,13 @@ pub(super) fn emit_match(
         selector.ty,
         Some(matched.selector),
     )? {
-        Some(kind @ (JvmType::Int | JvmType::Boolean | JvmType::Long)) => kind,
+        Some(
+            kind @ (JvmType::Int
+            | JvmType::Boolean
+            | JvmType::Long
+            | JvmType::Float
+            | JvmType::Double),
+        ) => kind,
         _ => {
             return Err(unsupported(
                 matched.selector,
@@ -147,6 +153,21 @@ pub(super) fn emit_match(
                 }
                 vec![literal.value.clone()]
             }
+            TreeKind::Literal(literal)
+                if matches!(
+                    literal.value,
+                    Constant::FloatBits(_) | Constant::DoubleBits(_)
+                ) =>
+            {
+                if !matches!(context.store.types.try_get(pattern.ty), Some(Type::Constant(typed)) if *typed == literal.value)
+                {
+                    return Err(unsupported(
+                        case.pattern,
+                        "inconsistent floating match literal",
+                    ));
+                }
+                vec![literal.value.clone()]
+            }
             TreeKind::Ident(ident)
                 if !ident.backquoted
                     && ident.name.is_term()
@@ -159,6 +180,8 @@ pub(super) fn emit_match(
                 let expected = match selector_type {
                     JvmType::Int => context.definitions.int,
                     JvmType::Long => context.definitions.long,
+                    JvmType::Float => context.definitions.float,
+                    JvmType::Double => context.definitions.double,
                     _ => context.definitions.boolean,
                 };
                 let child_depth = depth + if binder.is_some() { 4 } else { 3 };
@@ -202,6 +225,8 @@ pub(super) fn emit_match(
                 match selector_type {
                     JvmType::Int => "non-Int match pattern type",
                     JvmType::Long => "non-Long match pattern type",
+                    JvmType::Float => "non-Float match pattern type",
+                    JvmType::Double => "non-Double match pattern type",
                     _ => "non-Boolean match pattern type",
                 },
             ));
@@ -273,11 +298,13 @@ fn emit_cases(
 ) -> Result<Flow, JvmCodegenError> {
     let build_error = |error| JvmCodegenError::CodeBuilder { tree, error };
     let (slot, selector_type) = selector;
-    if selector_type == JvmType::Long {
-        code.lstore(slot).map_err(build_error)?;
-    } else {
-        code.istore(slot).map_err(build_error)?;
+    match selector_type {
+        JvmType::Long => code.lstore(slot),
+        JvmType::Float => code.fstore(slot),
+        JvmType::Double => code.dstore(slot),
+        _ => code.istore(slot),
     }
+    .map_err(build_error)?;
     let mut join: Option<dotty_classfile::bytecode::CodeLabel> = None;
     let before = context.initialized_locals.clone();
     let mut joined: Option<HashSet<SymbolId>> = None;
@@ -313,6 +340,18 @@ fn emit_cases(
                             .and_then(|c| c.lcmp())
                             .map_err(build_error)?;
                     }
+                    Constant::FloatBits(bits) => {
+                        code.fload(slot)
+                            .and_then(|c| c.fconst_bits(*bits))
+                            .and_then(|c| c.fcmpl())
+                            .map_err(build_error)?;
+                    }
+                    Constant::DoubleBits(bits) => {
+                        code.dload(slot)
+                            .and_then(|c| c.dconst_bits(*bits))
+                            .and_then(|c| c.dcmpl())
+                            .map_err(build_error)?;
+                    }
                     Constant::Int(value) => {
                         code.iload(slot)
                             .and_then(|c| c.iconst(*value))
@@ -326,14 +365,20 @@ fn emit_cases(
                     _ => unreachable!("validated match literal"),
                 }
                 if ordinal + 1 == literals.len() {
-                    if selector_type == JvmType::Long {
+                    if matches!(
+                        selector_type,
+                        JvmType::Long | JvmType::Float | JvmType::Double
+                    ) {
                         code.ifne(next.clone()).map_err(build_error)?;
                     } else {
                         code.if_icmpne(next.clone()).map_err(build_error)?;
                     }
                 } else {
                     let hit = hit.as_ref().expect("multiple alternatives").clone();
-                    if selector_type == JvmType::Long {
+                    if matches!(
+                        selector_type,
+                        JvmType::Long | JvmType::Float | JvmType::Double
+                    ) {
                         code.ifeq(hit).map_err(build_error)?;
                     } else {
                         code.if_icmpeq(hit).map_err(build_error)?;
@@ -345,15 +390,14 @@ fn emit_cases(
             }
         }
         if let Some(local) = binder {
-            if selector_type == JvmType::Long {
-                code.lload(slot)
-                    .and_then(|c| c.lstore(usize::from(local.slot())))
-                    .map_err(build_error)?;
-            } else {
-                code.iload(slot)
-                    .and_then(|c| c.istore(usize::from(local.slot())))
-                    .map_err(build_error)?;
+            let target = usize::from(local.slot());
+            match selector_type {
+                JvmType::Long => code.lload(slot).and_then(|c| c.lstore(target)),
+                JvmType::Float => code.fload(slot).and_then(|c| c.fstore(target)),
+                JvmType::Double => code.dload(slot).and_then(|c| c.dstore(target)),
+                _ => code.iload(slot).and_then(|c| c.istore(target)),
             }
+            .map_err(build_error)?;
             context.initialized_locals.insert(local.symbol());
         }
         if let Some(guard) = guard {
@@ -439,6 +483,14 @@ fn collect_alternative_literals(
                 (JvmType::Long, Constant::Long(value)) => {
                     (Constant::Long(*value), "inconsistent Long match literal")
                 }
+                (JvmType::Float, Constant::FloatBits(bits)) => (
+                    Constant::FloatBits(*bits),
+                    "inconsistent floating match literal",
+                ),
+                (JvmType::Double, Constant::DoubleBits(bits)) => (
+                    Constant::DoubleBits(*bits),
+                    "inconsistent floating match literal",
+                ),
                 (JvmType::Boolean, Constant::Boolean(value)) => (
                     Constant::Boolean(*value),
                     "inconsistent Boolean match literal",
@@ -461,6 +513,8 @@ fn collect_alternative_literals(
                 != (match selector_type {
                     JvmType::Int => context.definitions.int,
                     JvmType::Long => context.definitions.long,
+                    JvmType::Float => context.definitions.float,
+                    JvmType::Double => context.definitions.double,
                     _ => context.definitions.boolean,
                 })
                 || alternative.alternatives.is_empty()
@@ -470,6 +524,8 @@ fn collect_alternative_literals(
                     match selector_type {
                         JvmType::Int => "invalid Int match alternative",
                         JvmType::Long => "invalid Long match alternative",
+                        JvmType::Float => "invalid Float match alternative",
+                        JvmType::Double => "invalid Double match alternative",
                         _ => "invalid Boolean match alternative",
                     },
                 ));
