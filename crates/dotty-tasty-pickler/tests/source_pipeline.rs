@@ -31,6 +31,121 @@ const LOCALS: &str = include_str!("fixtures/Locals.scala");
 const NUMERIC_BLOCKS: &str = "package example\nclass NumericBlocks:\n  def run: Int =\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n    9\n    10\n    11\n    12\n    13\n    14\n    15\n    16\n    17\n    18\n    19\n    20\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
+#[test]
+fn same_class_boolean_calls_validate_exact_borrowed_roots() {
+    let source = "package example; class Calls { def identity(b: Boolean): Boolean = b; def ready(): Boolean = true; def run(b: Boolean): Boolean = this.identity(b) && ready() }";
+    let mut validated = false;
+    // This increment tests validation; complete encoding is enabled separately.
+    let _encoding = source_outputs_named(source, "Calls.scala", |plan| {
+        let before = format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast);
+        let checked = plan.validate().unwrap();
+        assert!(std::ptr::eq(checked.plan().store, plan.store));
+        assert_eq!(checked.plan().methods[2].body, plan.methods[2].body);
+        assert_eq!(
+            before,
+            format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast)
+        );
+        validated = true;
+    });
+    assert!(validated);
+}
+
+#[test]
+fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
+    let source = "package example; class Calls { def base(x: Int,b: Boolean): Boolean = b; def other(x: Int,b: Boolean): Boolean = !b; def run(x: Int,b: Boolean): Boolean = this.base(x,b); def second(x: Int,b: Boolean): Boolean = this.other(x,b) }";
+    for mode in 0..6 {
+        let error = source_outputs_named_with_tree_edits(
+            source,
+            "Calls.scala",
+            ValidationLimits::default(),
+            |_, typed, _, store| {
+                let calls = typed
+                    .iter()
+                    .filter_map(|(id, tree)| {
+                        let TreeKind::Apply(apply) = &tree.kind else {
+                            return None;
+                        };
+                        let TreeKind::Select(selection) = &typed.get(apply.function).kind else {
+                            return None;
+                        };
+                        let name = store.names.resolve(selection.name.text());
+                        matches!(name, "base" | "other").then_some((id, apply.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                let (root, call) = &calls[0];
+                let other_type = typed.get(calls[1].1.function).ty;
+                let int_arg_type = typed.get(call.args[0]).ty;
+                match mode {
+                    0 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args.pop();
+                    }
+                    1 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args.swap(0, 1);
+                    }
+                    2 => typed.get_mut(call.function).ty = other_type,
+                    3 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.kind = ApplyKind::Using;
+                    }
+                    4 => typed.get_mut(call.args[1]).ty = int_arg_type,
+                    5 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args[1] = *root;
+                    }
+                    _ => unreachable!(),
+                }
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            match mode {
+                0 | 3 => matches!(
+                    error,
+                    PickleError::Unsupported {
+                        feature: UnsupportedFeature::BodyExpression,
+                        ..
+                    }
+                ),
+                1 => matches!(error, PickleError::BodyBinding { .. }),
+                5 => matches!(error, PickleError::RepeatedExpression { .. }),
+                2 => matches!(error, PickleError::NameMismatch { .. }),
+                4 => matches!(error, PickleError::BodyType { .. }),
+                _ => false,
+            },
+            "mode {mode}: {error:?}"
+        );
+    }
+    let nested = source.replace("this.base(x,b)", "this.base(x,this.base(x,b))");
+    let error = source_outputs_named_with_limits(
+        &nested,
+        "Calls.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0
+        }
+    );
+}
+
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
 const OPERATIONS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Operations.hex");
 const PARAMETERS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Parameters.hex");
