@@ -66,3 +66,28 @@ The runner authenticates provenance and unchanged original class/TASTy hashes.
 Scala-produced reference evidence is separate from Rust-output acceptance.
 Extend the existing mandatory `jvm_tasty_floating_values` target and independent
 `jvm_source_compilation` target without adding a strict shard target.
+
+## Implemented verification
+
+The independent real-source JVM pipeline passes the 3502-check Java client
+without producing TASTy. Paired Rust output passes all four original/from-TASTy
+Java/Scala client runs with unchanged original artifact hashes. Fresh sessions
+produce identical class and TASTy bytes. Rust preserves 111 MATCH, 196 CASEDEF,
+76 BIND, 42 pattern TYPED plus two expression ascriptions, and 30 RETURN nodes.
+
+Focused tests pin FCmpL/DCmpL opcodes 0x95/0x97, their two/four physical stack
+slots, same-width wrong-kind rejection, exact descriptors/instructions/frames,
+and one/two-slot selector and binder layouts. Raw signed-zero corruption,
+malformed wrappers, missing source edges, mismatched singleton joins and
+missing/duplicate/cross-case binding evidence reject read-only. Limits and
+atomic temporary-slot exhaustion remain explicit. Singleton binders preserve
+FLOATCONST/DOUBLECONST types and direct declaration references.
+
+The existing mandatory floating target now runs 24 tests. Its pinned Scala/JDK
+serial execution measured 14.21 seconds locally. The strict inventory remains
+38 targets with unchanged shard assignments; shard 4's estimate includes the
+increase. The new contract is also a strict workflow path trigger.
+
+The full workspace check passes 8689 tests (57 existing ignored) and 44
+all-feature doctests. Formatting, frontend boundaries, Clippy and rustdoc with
+warnings denied, the standalone compiler client and workflow checks also pass.

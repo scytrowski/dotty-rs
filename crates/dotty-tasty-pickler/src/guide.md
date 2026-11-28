@@ -45,7 +45,7 @@ shapes independently. This crate performs no filesystem publication.
 ## Bounded primitive expressions
 
 Complete plans can preserve Int/Boolean/Unit/Long/Float/Double ascriptions as TYPED nodes and
-Int/Boolean/Long-selector matches as MATCH with ordered CASEDEF nodes. Matches support
+Int/Boolean/Long/Float/Double-selector matches as MATCH with ordered CASEDEF nodes. Matches support
 Int/Boolean/Unit/Long/Float/Double results and require a final unguarded irrefutable
 case unless unguarded Boolean cases cover both values with an unguarded final case;
 guards and canonical Int/Boolean/Long binders follow the contract below. Extractors remain
@@ -55,7 +55,7 @@ remain canonical; only their validated Int application is specialized to the
 Scala Int wire signature. Ordinary Int locals use exact source/typed/symbol/scope
 bindings, including declarations whose Int type was inferred by the typer.
 
-Guarded Int/Boolean/Long matches preserve optional guards as the final CASEDEF child, after
+Guarded Int/Boolean/Long/Float/Double matches preserve optional guards as the final CASEDEF child, after
 pattern and body. Pattern bindings arrive through
 `SourceTypedBindings::pattern_value_bindings`, using the exact source/typed,
 symbol and case-scope tuple from the frontend. The producer emits BIND labels
@@ -65,20 +65,20 @@ mutation. The subset includes variable roots and explicit bindings over Int/Bool
 literals or wildcards, with a final unguarded irrefutable case or complete
 unguarded Boolean coverage as described below.
 
-Same-type primitive patterns retain TYPED nodes, explicit unqualified Int/Boolean/Long
+Same-type primitive patterns retain TYPED nodes, explicit unqualified Int/Boolean/Long/Float/Double
 type syntax and any outer BIND. A source `n: Int` maps to a typed Bind around a
 synthetic `Typed(_, Int)`; validation authenticates the identifier-to-Bind and
 type-tree edges without inventing source mappings for synthetic nodes. Explicit
-`n @ (_: Int)` has its own genuine inner mappings. Boolean and Long forms follow the same
+`n @ (_: Int)` has its own genuine inner mappings. Boolean, Long, Float and Double forms follow the same
 rules. These patterns are irrefutable only without a guard and must then be the
-final case. Typed alternatives, reference tests and numeric selectors beyond
-Int/Boolean/Long remain unsupported.
+final case. Typed alternatives, reference tests and selectors beyond
+Int/Boolean/Long/Float/Double remain unsupported.
 
 Local returns are supported in explicitly typed ordinary Int/Boolean/Unit/Long/Float/Double
 methods. RETURN references the exact current method declaration. A bounded
 read-only flow validator separates normal completion from a proven local exit;
 it does not interpret arbitrary Nothing-typed expressions as supported returns.
-Blocks, If, While and Int/Boolean/Long matches retain their source/typed bindings, including
+Blocks, If, While and Int/Boolean/Long/Float/Double matches retain their source/typed bindings, including
 the typer's checked Unit adaptation for an If without else. Bare return uses the
 actual synthetic Unit value already supplied by the typer. Non-local targets,
 returns in lambdas/local definitions and reference results remain
@@ -90,7 +90,7 @@ outside this producer subset.
 Ordinary single-clause methods may use canonical Long parameters/results and
 full signed 64-bit constants, including mixed Int/Boolean/Long formal order.
 Long locals may be inferred or explicit, immutable or mutable. Supported If,
-While, Int/Boolean/Long-selector Match and local Return paths preserve canonical source/typed
+While, Int/Boolean/Long/Float/Double-selector Match and local Return paths preserve canonical source/typed
 identity, exact values and case scope. A Long return targets the same current
 DEFDEF as other local primitive returns. No scalar value is supplied for a
 proven returning path. Long singleton case binders retain LONGCONST types and
@@ -104,13 +104,13 @@ Scala numeric raw printer is not used as the value oracle.
 
 ## Literal alternative patterns
 
-Int/Boolean/Long matches also preserve literal alternatives as nested ALTERNATIVE nodes.
+Int/Boolean/Long/Float/Double matches also preserve literal alternatives as nested ALTERNATIVE nodes.
 Validation checks every original source/typed child edge, literal payload,
 constant type, source order and span, with the existing expression budgets.
 Parentheses retain their real source bindings. Guards remain the final CASEDEF
 child after its one pattern and body. Nested alternatives and duplicates are
 supported; wildcards or bindings inside alternatives, bindings around them and
-selectors other than Int/Boolean/Long are rejected. No semantic-store mutation or partial complete
+selectors other than Int/Boolean/Long/Float/Double are rejected. No semantic-store mutation or partial complete
 artifact escapes validation failure.
 
 ## Bounded floating method values
@@ -131,6 +131,16 @@ preserve the original TYPED nodes without runtime conversion. Independent JVM
 support does not expand this contract. Runtime NaN checks establish classification;
 raw codec bit preservation does not promise payload fidelity through arbitrary
 JVM execution. Failed validation is read-only and emits no partial complete file.
+
+Floating selectors preserve same-family FLOATCONST/DOUBLECONST patterns,
+ordered ALTERNATIVE children and canonical typed wildcard/binder wrappers.
+Literal singleton binders retain raw-bit constant types and registered direct
+references. Validation distinguishes positive and negative zero even though
+runtime matching treats them as equal. Every floating match requires a final
+unguarded irrefutable case; no NaN/infinity stable patterns, widening or general
+exhaustivity analysis is introduced. Source singleton zero cases rejected by the
+frontend remain rejected. The pinned Scala oracle checks original Rust output
+and separately rebuilt from-TASTy output; a Rust round trip alone is insufficient.
 
 ## Boolean-selector matches
 
