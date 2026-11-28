@@ -1065,3 +1065,22 @@ shape; pinned Scala accepts these original Rust-produced BLOCK/WHILE trees.
 Malformed wrappers, missing bindings, scope escapes, cycles and traversal limits
 reject without complete artifacts. Existing unsupported operand returns and
 reference/wide-call boundaries remain explicit.
+
+## Boolean eager and equality operator parity
+
+The [Boolean operator contract](jvm-tasty-boolean-operators.md) extends the
+existing infix expression subset with `&`, `|`, `^`, `==` and `!=` on Boolean
+operands. Canonical Boolean equality members remain distinct from Any equality
+specialized for Int. All five use signed `(scala.Boolean): scala.Boolean`
+SELECTin selections under APPLY, retaining original receiver/RHS identity and
+source order. Primitive projection checks exact member metadata, scope and
+signature; the source validator authenticates all source/typed operand edges.
+
+The 105-method reference and Rust-produced fixture each run four independent
+client executions (Java/Scala on original/from-TASTy classes), 448 checks each.
+Eager effects and ArithmeticException are preserved even when the left operand
+already determines the result; existing `&&`/`||` retain their skipped-RHS paths.
+Exact Boolean descriptors, opcodes/frames, source symbol identities, all primitive
+result widths, malformed plans, limits and deterministic single/batch output are
+covered. General Boolean calls, universal equality, explicit operator application
+syntax and unsupported singleton-binder receivers remain outside this subset.

@@ -27,7 +27,9 @@ Excluded: new call/field/constructor signatures, general Boolean-returning calls
 Any/reference equality, boxing, conversions, numeric arithmetic, missing Int
 `|`/`^`, explicit operator application syntax such as `a.&(b)`, operand/condition/
 guard/initializer returns, non-local returns and unsupported ordinary nested
-same-name shadowing. The independent pre-existing TASTy failure for literal-Unit
+same-name shadowing. A singleton-typed case binder may supply an RHS value, but
+using it as an operator receiver remains unsupported by the source typer.
+The independent pre-existing TASTy failure for literal-Unit
 If branches (`if flag then () else ()`) remains outside this increment; supported
 Unit assignments, adaptations and matches retain their existing contracts.
 
@@ -69,3 +71,20 @@ the 38-target inventory and assignments. Add focused validation/projection tests
 exact descriptors/instructions/frames, identity/scope/limit mutation negatives and
 fresh-session determinism. Run complete repository checks, mandatory JDK 21 and
 all strict TASTy shards, follow-ups and aggregate before completion.
+
+## Implemented verification
+
+The existing strict expression target now has 40 tests. Ten new regressions cover
+all 105 fixture methods individually and together, exact opcodes/descriptors and
+comparison stack maps, signed names and owners, distinct Boolean/Int equality
+source symbols, operand/value compositions, all existing primitive result widths,
+unsupported boundaries, missing source edges, projection limits and deterministic
+single/batch output. The pinned consumer accepts actual Rust artifacts and checks
+unchanged originals after all four 448-check executions.
+
+Focused source validation also checks ten tree mutations per new operator and
+expression depth exhaustion. Projection tests cover all eight Boolean member
+identities, exact wire shapes, wrong metadata/receiver/parameter/result/arity,
+incomplete or malformed signatures, read-only failure and poisoned-context
+rejection. Standard repository, mandatory JDK and all 38 strict TASTy gates are
+required in addition to this focused evidence.
