@@ -1,14 +1,15 @@
 //! Semantic validation and bounded TASTy production for Scala 3.9.0.
 //!
 //! The base [`ValidatedPicklePlan`] validates a public, ordinary top-level class in one explicit
-//! package, its default constructor and Int-result methods with literals,
-//! formal references, same-class parameterless references, or bounded
-//! same-class calls with one plain Int clause. Methods may have no value clause, one
-//! explicit empty clause, or one plain Int-parameter clause.
+//! package, its default constructor and bounded primitive method expressions.
+//! Ordinary same-class applications support one plain clause of Int/Boolean
+//! parameters and an Int/Boolean result, including an explicit empty clause.
+//! Calls retain the exact planned method, parameter order and current-this receiver;
+//! cross-class calls require separate bounded proofs.
 //! [`EncodingContext`] projects names, types and canonical references into owned
 //! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a
 //! structurally validated, explicitly incomplete declaration document.
-//! [`ValidatedPicklePlan::pickle`] includes the actual typed Int RHS in an owned
+//! [`ValidatedPicklePlan::pickle`] includes the supported actual typed RHS in an owned
 //! file. Independent Scala interoperability is checked by the pinned oracle.
 //! See `docs/tasty-pickler-design.md` and `docs/tasty-pickler-oracle.md`.
 //!

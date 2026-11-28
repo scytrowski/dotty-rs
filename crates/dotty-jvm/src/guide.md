@@ -116,7 +116,7 @@ Guards guarantee no coverage; duplicate alternatives add no values. The JVM clos
 the final mismatch edge using this proof while retaining binder initialization and
 case order. Partial matches and general MatchError lowering remain unsupported.
 Paired TASTy production also supports ordinary Boolean locals and
-bounded Boolean value blocks; arbitrary Boolean-returning calls remain outside
+bounded Boolean value blocks; cross-class Boolean-returning calls remain outside
 that paired subset.
 
 Ordinary Boolean `val`/`var` declarations keep exact planned symbols and local
@@ -145,3 +145,14 @@ and Scala-rebuilt TASTy with independent clients, checking effects, exceptions,
 Unit discard and local returns as well as truth tables. This adds no new call
 signatures or implicit conversions; standalone JVM and paired source subsets
 continue to have separate contracts.
+
+## Paired same-class Int/Boolean calls
+
+The paired subset now includes ordinary public calls within the current class,
+with one plain Int/Boolean parameter list and an Int/Boolean result. Existing
+instance-call lowering retains canonical targets, exact mixed descriptors, `Z`
+Boolean identity and Integer verifier categories. Implicit current `this` and
+explicit unqualified `this` compose with locals, conditions, matches, guards,
+loops and ordinary local returns. Argument order, callee mutations, eager and
+short-circuit effects, exceptions and Unit discard are checked on original JVM
+output and classes rebuilt independently from Rust TASTy by pinned Scala 3.9.

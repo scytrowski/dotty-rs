@@ -160,7 +160,7 @@ unguarded cases cover both Boolean values and the last case has no guard. Covera
 is collected during the same bounded source/typed pattern validation; guard-bearing
 cases contribute no guaranteed values. Original cases, alternatives and BIND targets
 are retained in TASTy, with no synthetic fallback. Partial matches, singleton-only
-coverage, arbitrary Boolean-returning calls and typed/extractor patterns remain
+coverage, cross-class Boolean-returning calls and typed/extractor patterns remain
 unsupported. Complete paired output checks declaration/symbol/case/scope agreement
 with the JVM local plan.
 
@@ -212,7 +212,29 @@ single-class and batch plans; pinned Scala 3.9 consumes original Rust artifacts
 and separately rebuilds their TASTy with independent Java/Scala execution.
 
 This remains the existing infix subset: explicit operator application syntax,
-universal/reference equality, boxing and general Boolean calls are unsupported.
+universal/reference equality, boxing and cross-class Boolean calls are unsupported.
 Singleton case binders may supply RHS values; using such a binder as an operator
 receiver remains a source-typer limitation. The independent pre-existing
 literal-Unit If branch limitation also remains explicit.
+
+## Same-class Int/Boolean calls
+
+Ordinary public source methods may call planned methods of the same class with
+one plain parameter list, including `()`, canonical Int/Boolean parameters and an
+Int/Boolean result. Implicit current `this` and explicit unqualified `this` retain
+QUALTHIS and THIS respectively under signed SELECTin/APPLY. Parameter signatures
+keep their original order; arguments retain their exact source/typed bindings.
+Canonical method/class/formal identity is checked before encoding.
+
+Calls compose with supported operators, locals, assignments, ascriptions, If/Match
+values, guards, selectors, loops, Unit discard and ordinary local returns. Arguments
+evaluate once in source order; callee effects and exceptions remain observable,
+including around eager and short-circuit operators. Validation borrows the original
+session and retains scope, work/depth limits and failure without partial output.
+
+Existing Int contextual calls and bounded reference factories keep their contracts.
+New cross-class, inherited/super, private, inferred-result, parameterless-getter,
+curried/contextual, by-name/default/varargs and polymorphic shapes are excluded.
+This does not add Unit/Long/Float/Double/reference call signatures. Pinned Scala 3.9
+checks actual Rust originals and separately rebuilt from-TASTy classes with
+independent looped Java/Scala consumers.

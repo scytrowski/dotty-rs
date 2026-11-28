@@ -53,3 +53,23 @@ focused validation/projection tests, exact descriptors and call instructions,
 identity/arity/type/binding mutations, bounded rejection, fresh-session determinism,
 mandatory JDK 21 execution and pinned Scala consumers of actual Rust output.
 Retain the existing strict `jvm_tasty_expressions` target and all repository gates.
+
+## Implemented verification
+
+The strict expression target has 48 tests, including eight call regressions:
+fresh-session deterministic output, strict JDK execution, pinned Scala consumers,
+exact invocation targets/descriptors/stack sizes, value/control-flow compositions,
+unsupported boundaries, missing source edges/projection depth and class identity
+in deterministic batches. The reference includes mutating Int-field callees to
+distinguish eager and skipped RHS calls without adding a new field ABI.
+
+Focused pickler tests check read-only validation, mixed signed parameter order,
+canonical class owners, explicit/implicit receiver syntax, substituted arguments
+and targets, invalid arena references, cycles, wrong receiver/result types and
+depth exhaustion. Returns within Int or Boolean call arguments remain rejected;
+ordinary local returns in method bodies retain their existing behavior.
+
+The target remains on shard 3 of the existing 38-target strict inventory and uses
+`DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1`. A local serial run with pinned Scala 3.9
+and JDK 21 passed all 48 tests in 33.97 seconds; the corresponding timing estimate
+is recorded without rebalancing the four shards.
