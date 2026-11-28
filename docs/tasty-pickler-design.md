@@ -1082,5 +1082,22 @@ Eager effects and ArithmeticException are preserved even when the left operand
 already determines the result; existing `&&`/`||` retain their skipped-RHS paths.
 Exact Boolean descriptors, opcodes/frames, source symbol identities, all primitive
 result widths, malformed plans, limits and deterministic single/batch output are
-covered. General Boolean calls, universal equality, explicit operator application
+covered. Cross-class Boolean calls, universal equality, explicit operator application
 syntax and unsupported singleton-binder receivers remain outside this subset.
+
+## Same-class Int/Boolean method calls
+
+The [same-class call contract](jvm-tasty-boolean-calls.md) extends ordinary planned
+applications to Int/Boolean parameters and results with one plain parameter list.
+Validation authenticates the selected method, source declaration, current-this
+receiver, exact signature and every source/typed argument edge. Shared argument
+validation preserves existing Int calls and their traversal/repeated-node checks.
+Projection emits exact mixed signed parameter names, class-owned SELECTin and APPLY;
+Boolean results retain their builtin identity rather than a source-class signature.
+
+The compact 30-method reference and actual Rust artifacts each run Java/Scala clients
+against originals and separately rebuilt from-TASTy classes, 78 checks per execution.
+Mutating callees, argument order, skipped/eager effects, exceptions, guards, loops,
+Unit discard and ordinary returns are covered. The existing strict expression target
+also checks exact JVM targets/descriptors/stacks, TASTy signatures/owners/receiver
+syntax, malformed bindings and types, limits and deterministic single/batch output.

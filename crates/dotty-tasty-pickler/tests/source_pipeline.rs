@@ -31,6 +31,209 @@ const LOCALS: &str = include_str!("fixtures/Locals.scala");
 const NUMERIC_BLOCKS: &str = "package example\nclass NumericBlocks:\n  def run: Int =\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n    9\n    10\n    11\n    12\n    13\n    14\n    15\n    16\n    17\n    18\n    19\n    20\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
+#[test]
+fn same_class_boolean_calls_validate_exact_borrowed_roots() {
+    let source = "package example; class Calls { def identity(b: Boolean): Boolean = b; def ready(): Boolean = true; def run(b: Boolean): Boolean = this.identity(b) && ready() }";
+    let mut validated = false;
+    source_outputs_named(source, "Calls.scala", |plan| {
+        let before = format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast);
+        let checked = plan.validate().unwrap();
+        assert!(std::ptr::eq(checked.plan().store, plan.store));
+        assert_eq!(checked.plan().methods[2].body, plan.methods[2].body);
+        assert_eq!(
+            before,
+            format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast)
+        );
+        validated = true;
+    })
+    .unwrap();
+    assert!(validated);
+}
+
+#[test]
+fn same_class_boolean_call_signatures_keep_parameter_order_and_this_syntax() {
+    use dotty_tasty::tasty::*;
+    let source = "package example\nclass Calls {\n def truth(x: Int,b: Boolean): Boolean = b\n def score(b: Boolean,x: Int): Int = x\n def empty(): Boolean = true\n def implicitCall(x: Int,b: Boolean): Boolean = truth(x,b)\n def explicitCall(x: Int,b: Boolean): Boolean = this.truth(x,b)\n def intCall(x: Int,b: Boolean): Int = score(b,x)\n def noarg(): Boolean = empty()\n}";
+    let (_, first) = source_outputs_named(source, "Calls.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(source, "Calls.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut seen = Vec::new();
+    let mut explicit = 0;
+    for node in index.iter().filter(|node| node.tag == SELECTIN_TAG) {
+        let selected = node.decode_select_in().unwrap();
+        let Some(RenderedSignedName::Signed {
+            original,
+            signature,
+        }) = file.render_signed_name(selected.name).unwrap()
+        else {
+            continue;
+        };
+        let (parameters, result) = match original.as_str() {
+            "truth" => (vec!["scala.Int", "scala.Boolean"], "scala.Boolean"),
+            "score" => (vec!["scala.Boolean", "scala.Int"], "scala.Int"),
+            "empty" => (vec![], "scala.Boolean"),
+            _ => continue,
+        };
+        assert_eq!(
+            signature.parameters,
+            parameters
+                .into_iter()
+                .map(|p| RenderedParamSig::TermParameter(p.into()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(signature.result, result);
+        assert!(matches!(selected.underlying_type,
+            RawTree::NatAst { tag: TYPEREFSYMBOL_TAG, value, .. }
+            if value == first.declarations()[0].address));
+        match selected.qualifier {
+            RawTree::Ast { tag: THIS_TAG, .. } => explicit += 1,
+            RawTree::Ast {
+                tag: QUALTHIS_TAG, ..
+            } => (),
+            other => panic!("unexpected call receiver {other:?}"),
+        }
+        seen.push(original);
+    }
+    seen.sort();
+    assert_eq!(seen, ["empty", "score", "truth", "truth"]);
+    assert_eq!(explicit, 1);
+}
+
+#[test]
+fn same_class_boolean_calls_reject_substituted_edges_and_exhausted_depth() {
+    let source = "package example; class Calls { def base(x: Int,b: Boolean): Boolean = b; def other(x: Int,b: Boolean): Boolean = !b; def run(x: Int,b: Boolean): Boolean = this.base(x,b); def second(x: Int,b: Boolean): Boolean = this.other(x,b) }";
+    for mode in 0..8 {
+        let error = source_outputs_named_with_tree_edits(
+            source,
+            "Calls.scala",
+            ValidationLimits::default(),
+            |_, typed, _, store| {
+                let calls = typed
+                    .iter()
+                    .filter_map(|(id, tree)| {
+                        let TreeKind::Apply(apply) = &tree.kind else {
+                            return None;
+                        };
+                        let TreeKind::Select(selection) = &typed.get(apply.function).kind else {
+                            return None;
+                        };
+                        let name = store.names.resolve(selection.name.text());
+                        matches!(name, "base" | "other").then_some((id, apply.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                let (root, call) = &calls[0];
+                let other_type = typed.get(calls[1].1.function).ty;
+                let int_arg_type = typed.get(call.args[0]).ty;
+                match mode {
+                    0 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args.pop();
+                    }
+                    1 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args.swap(0, 1);
+                    }
+                    2 => typed.get_mut(call.function).ty = other_type,
+                    3 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.kind = ApplyKind::Using;
+                    }
+                    4 => typed.get_mut(call.args[1]).ty = int_arg_type,
+                    5 => {
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args[1] = *root;
+                    }
+                    6 => {
+                        let mut foreign = AstArena::new();
+                        let mut invalid = foreign.alloc(typed.get(call.args[0]).clone());
+                        for _ in typed.iter() {
+                            invalid = foreign.alloc(typed.get(call.args[0]).clone());
+                        }
+                        let TreeKind::Apply(a) = &mut typed.get_mut(*root).kind else {
+                            panic!()
+                        };
+                        a.args[1] = invalid;
+                    }
+                    7 => {
+                        let TreeKind::Select(select) = typed.get(call.function).kind else {
+                            panic!()
+                        };
+                        typed.get_mut(select.qualifier).ty = int_arg_type;
+                    }
+                    _ => unreachable!(),
+                }
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            match mode {
+                0 | 3 => matches!(
+                    error,
+                    PickleError::Unsupported {
+                        feature: UnsupportedFeature::BodyExpression,
+                        ..
+                    }
+                ),
+                1 => matches!(error, PickleError::BodyBinding { .. }),
+                5 => matches!(error, PickleError::RepeatedExpression { .. }),
+                2 => matches!(error, PickleError::NameMismatch { .. }),
+                4 => matches!(error, PickleError::BodyType { .. }),
+                6 => matches!(error, PickleError::InvalidTypedTree { .. }),
+                7 => matches!(
+                    error,
+                    PickleError::Reference {
+                        reason: ReferenceError::Owner,
+                        ..
+                    }
+                ),
+                _ => false,
+            },
+            "mode {mode}: {error:?}"
+        );
+    }
+    let nested = source.replace("this.base(x,b)", "this.base(x,this.base(x,b))");
+    let error = source_outputs_named_with_limits(
+        &nested,
+        "Calls.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0
+        }
+    );
+}
+
+#[test]
+fn same_class_call_int_argument_cannot_return_through_the_caller() {
+    let source = "package example\nclass Calls {\n def truth(x: Int): Boolean = x > 0\n def f(x: Int): Boolean = truth({return true; x})\n}";
+    assert!(matches!(
+        source_outputs_named(source, "Calls.scala", |_| {}),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        })
+    ));
+}
+
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
 const OPERATIONS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Operations.hex");
 const PARAMETERS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Parameters.hex");

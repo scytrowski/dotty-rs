@@ -1,5 +1,9 @@
 # JVM backend boundary
 
+Ordinary same-class calls with Int/Boolean parameters and results in both outputs
+follow [the same-class call contract](jvm-tasty-boolean-calls.md), including exact
+method identity, mixed parameter order, effects and short-circuit compositions.
+
 Float/Double selectors, signed-zero equality, NaN fallback and canonical floating
 case binders in both outputs follow
 [the floating-selector contract](jvm-tasty-floating-selector-matches.md).

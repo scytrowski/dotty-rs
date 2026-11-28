@@ -17,6 +17,7 @@ on:
       - 'docs/jvm-tasty-floating-selector-matches.md'
       - 'docs/jvm-tasty-primitive-value-discard.md'
       - 'docs/jvm-tasty-boolean-operators.md'
+      - 'docs/jvm-tasty-boolean-calls.md'
       - 'docs/jvm-tasty-factory-result-arguments.md'
       - 'docs/jvm-tasty-reference-local-flows.md'
       - 'Cargo.toml'

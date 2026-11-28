@@ -880,7 +880,6 @@ fn out_of_scope_boolean_shapes_do_not_publish_artifacts() {
         "def f(x: Boolean): Boolean = x match { case n if n => n; case _ => n }",
         "def f(x: Boolean): Boolean = x match { case n => { n = true; n } }",
         "def f(x: Boolean): Int = x match { case 1 => 1; case _ => 2 }",
-        "def g(x: Boolean): Boolean = x; def f(x: Boolean): Int = g(x) match { case true => 1; case _ => 2 }",
     ] {
         let result = emit_paired_jvm_tasty_class(
             &format!("package example; class BooleanMatches {{ {method} }}"),

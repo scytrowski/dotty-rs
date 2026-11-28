@@ -500,6 +500,11 @@ impl SourceTypedBindings for ClassSourceTypedBindings<'_> {
 /// preserve evaluation order and exceptions without introducing boxed Unit values.
 /// Primitive operators and bounded Int/Boolean-selector matches are accepted
 /// only when both producers validate the same roots.
+/// Ordinary same-class applications support one plain list of Int/Boolean parameters
+/// and an Int/Boolean result, with implicit current `this` or explicit unqualified
+/// `this`. Function, receiver and argument bindings retain their canonical identities
+/// and source order. General cross-class calls and new numeric call signatures are
+/// outside this subset.
 /// Boolean matches may omit a final fallback only when authenticated unguarded cases cover both values and the final case has no guard; guarded cases guarantee no coverage.
 /// The callback keeps the borrowed session alive
 /// for the entire planning receipt lifetime.

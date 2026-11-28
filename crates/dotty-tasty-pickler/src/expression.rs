@@ -1009,7 +1009,7 @@ fn lower_expression_inner(
                 reason: crate::ReferenceError::Owner,
             });
         }
-        if tree.ty != context.definitions().int {
+        if tree.ty != context.definitions().int && tree.ty != context.definitions().boolean {
             if application.args.len() != 1 {
                 return Err(PickleError::Unsupported {
                     feature: UnsupportedFeature::BodyExpression,
@@ -1060,14 +1060,7 @@ fn lower_expression_inner(
         )?;
         let mut fields = vec![AstField::Tree(function_label)];
         for &argument in &application.args {
-            let argument_depth = if matches!(
-                ast.try_get(argument).map(|argument| &argument.kind),
-                Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::Select(_))
-            ) {
-                depth + 1
-            } else {
-                depth
-            };
+            let argument_depth = child_expression_depth(ast, argument, depth);
             fields.push(AstField::Tree(lower_expression_inner(
                 store,
                 ast,

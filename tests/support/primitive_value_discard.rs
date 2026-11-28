@@ -210,7 +210,6 @@ fn primitive_discard_retains_existing_unsupported_boundaries() {
         "def f(x: Double): Unit = x + 1d",
         "def f(x: Long): Unit = x + 1L",
         "def source(x: Long): Long = x; def f(x: Long): Unit = source(x)",
-        "def source(x: Boolean): Boolean = x; def f(x: Boolean): Unit = source(x)",
         "def f(x: Double): Double = {val y = {return x; x}; y}",
         "def f(x: Double): Int = true match {case n if {return 3; n} => 1;case _ => 2}",
         "def f(x: Double): Int = true match {case n if {({return 3; x}: Unit); n} => 1;case _ => 2}",

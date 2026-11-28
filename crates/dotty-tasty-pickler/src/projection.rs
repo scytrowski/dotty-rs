@@ -1465,7 +1465,7 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
-    /// Lowers a verified plain Int method application target as SELECTin.
+    /// Lowers a verified Int/Boolean application or the existing reference factory target.
     pub(crate) fn same_class_method_select_in(
         &mut self,
         class: SymbolId,
@@ -1507,9 +1507,17 @@ impl<'a> EncodingContext<'a> {
             };
             if (signature.kind != dotty_core::MethodKind::Plain
                 && signature.result != c.definitions.int)
+                || ((signature.result == c.definitions.boolean
+                    || signature
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.ty == c.definitions.boolean))
+                    && signature.kind != dotty_core::MethodKind::Plain)
                 || signature.params.len() != parameter_count
                 || signature.params.iter().any(|parameter| {
-                    parameter.erased || parameter.varargs || parameter.ty != c.definitions.int
+                    parameter.erased
+                        || parameter.varargs
+                        || ![c.definitions.int, c.definitions.boolean].contains(&parameter.ty)
                 })
             {
                 return Err(reference(method, ReferenceError::Metadata));
@@ -1521,53 +1529,56 @@ impl<'a> EncodingContext<'a> {
             let owner_package_ref = c.package_reference(package)?;
             let class_name = c.utf8(c.text(record.name.text())?)?;
             let method_name = c.utf8(c.text(method_record.name.text())?)?;
-            let parameter_signature = c.utf8("scala")?;
-            let int = c.utf8("Int")?;
-            let int_signature = c.intern(NameKey::Qualified(parameter_signature, int))?;
-            let result_signature = if signature.result == c.definitions.int {
-                int_signature
-            } else {
-                let Type::TypeRef {
-                    prefix,
-                    target: TypeRefTarget::Symbol(result_class),
-                } = c.ty(signature.result)?
-                else {
-                    return Err(reference(method, ReferenceError::Metadata));
+            let mut parameter_signatures = Vec::with_capacity(parameter_count);
+            for parameter in &signature.params {
+                let name = c.primitive_type_name(parameter.ty)?;
+                parameter_signatures.push(i32::try_from(name).map_err(|_| {
+                    PickleError::LimitExceeded {
+                        kind: LimitKind::Names,
+                        limit: i32::MAX as usize,
+                    }
+                })?);
+            }
+            let result_signature =
+                if [c.definitions.int, c.definitions.boolean].contains(&signature.result) {
+                    c.primitive_type_name(signature.result)?
+                } else {
+                    let Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(result_class),
+                    } = c.ty(signature.result)?
+                    else {
+                        return Err(reference(method, ReferenceError::Metadata));
+                    };
+                    let result_record = c.symbol(*result_class)?;
+                    let result_owner = result_record
+                        .owner
+                        .ok_or(reference(*result_class, ReferenceError::Owner))?;
+                    if !matches!(
+                        c.ty(*prefix)?,
+                        Type::TypeRef {
+                            prefix: package_prefix,
+                            target: TypeRefTarget::Symbol(package),
+                        } if *package_prefix == c.definitions.no_prefix && *package == result_owner
+                    ) || result_record.kind != SymbolKind::Class
+                        || result_record.origin != SymbolOrigin::Source(c.source)
+                        || result_record.visibility != Visibility::Public
+                        || !result_record.flags.is_empty()
+                        || !result_record.annotations.is_empty()
+                    {
+                        return Err(reference(*result_class, ReferenceError::Metadata));
+                    }
+                    if !c.same_source_external.contains(result_class) {
+                        return Err(reference(*result_class, ReferenceError::NotRegistered));
+                    }
+                    let package = c.package_name(result_owner)?;
+                    let result_name = c.utf8(c.text(result_record.name.text())?)?;
+                    c.intern(NameKey::Qualified(package, result_name))?
                 };
-                let result_record = c.symbol(*result_class)?;
-                let result_owner = result_record
-                    .owner
-                    .ok_or(reference(*result_class, ReferenceError::Owner))?;
-                if !matches!(
-                    c.ty(*prefix)?,
-                    Type::TypeRef {
-                        prefix: package_prefix,
-                        target: TypeRefTarget::Symbol(package),
-                    } if *package_prefix == c.definitions.no_prefix && *package == result_owner
-                ) || result_record.kind != SymbolKind::Class
-                    || result_record.origin != SymbolOrigin::Source(c.source)
-                    || result_record.visibility != Visibility::Public
-                    || !result_record.flags.is_empty()
-                    || !result_record.annotations.is_empty()
-                {
-                    return Err(reference(*result_class, ReferenceError::Metadata));
-                }
-                if !c.same_source_external.contains(result_class) {
-                    return Err(reference(*result_class, ReferenceError::NotRegistered));
-                }
-                let package = c.package_name(result_owner)?;
-                let result_name = c.utf8(c.text(result_record.name.text())?)?;
-                c.intern(NameKey::Qualified(package, result_name))?
-            };
-            let parameter_signature =
-                i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
-                    kind: LimitKind::Names,
-                    limit: i32::MAX as usize,
-                })?;
             let signed_name = c.intern(NameKey::SignedMany(
                 method_name,
                 result_signature,
-                vec![parameter_signature; parameter_count],
+                parameter_signatures,
             ))?;
             let type_ref = c
                 .wire
