@@ -243,6 +243,53 @@ impl Validator<'_, '_> {
             ("&&", p.definitions.boolean, p.definitions.boolean)
         } else if *target == boolean_symbols.or_else {
             ("||", p.definitions.boolean, p.definitions.boolean)
+        } else if let Some((_, name)) = [
+            (boolean_symbols.eager_and, "&"),
+            (boolean_symbols.eager_or, "|"),
+            (boolean_symbols.xor, "^"),
+            (boolean_symbols.equal, "=="),
+            (boolean_symbols.not_equal, "!="),
+        ]
+        .into_iter()
+        .find(|(symbol, _)| symbol == target)
+        {
+            // Authenticate the selected member itself before admitting the new
+            // source shape. Boolean equality keeps its own canonical identity;
+            // the Any-to-Int equality specialization above is separate.
+            let owner = self.ty(p.definitions.boolean)?.reference_symbol();
+            let record = self.symbol(*target)?;
+            if record.kind != SymbolKind::Method || record.owner != owner {
+                return Err(PickleError::Reference {
+                    symbol: *target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            if record.origin != SymbolOrigin::Builtin
+                || record.visibility != Visibility::Public
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+                || record.name.namespace() != Namespace::Term
+            {
+                return Err(PickleError::Reference {
+                    symbol: *target,
+                    reason: crate::ReferenceError::Metadata,
+                });
+            }
+            let signature_type = self.complete(*target)?;
+            if !matches!(self.ty(signature_type)?, Type::Method(signature)
+                if signature.kind == MethodKind::Plain
+                    && signature.params.len() == 1
+                    && signature.params[0].ty == p.definitions.boolean
+                    && !signature.params[0].erased
+                    && !signature.params[0].varargs
+                    && signature.result == p.definitions.boolean)
+            {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: TypeRole::Parameter,
+                });
+            }
+            (name, p.definitions.boolean, p.definitions.boolean)
         } else {
             return Err(PickleError::Reference {
                 symbol: *target,
