@@ -172,6 +172,8 @@ fn boolean_calls_compose_with_existing_value_and_control_flow_families() {
         "def f(x: Int): Int = score((truth(x)))",
         "def f(x: Int): Int = score(x match {case n if truth(n) => true; case _ => false})",
         "def f(x: Int): Int = {val n: Int = x; score(truth(n))}",
+        "def f(x: Boolean): Boolean = { val flag = identity(x); flag }",
+        "def f(x: Boolean): Int = identity(x) match {case true => 1;case _ => 2}",
         "def f(x: Int): Unit = truth(x)",
         "def f(x: Int): Boolean = if x > 0 then f(x - 1) else true",
     ] {

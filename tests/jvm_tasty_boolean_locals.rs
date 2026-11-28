@@ -459,7 +459,6 @@ fn unsupported_boolean_flag_shapes_do_not_publish_artifact_pairs() {
         "def f(x: Boolean): Boolean = { var flag = x; flag = 1; flag }",
         "def f(x: Boolean): Boolean = { if x then { val flag = true; () } else (); flag }",
         "def f(x: Boolean): Boolean = { val flag = x; if x then { val flag = false; flag } else flag }",
-        "def id(x: Boolean): Boolean = x; def f(x: Boolean): Boolean = { val flag = id(x); flag }",
         "def f(x: Boolean): Boolean = { val flag: Boolean = { return x; false }; flag }",
         "def f(x: Boolean): Boolean = { var flag = false; flag = { return x; false }; flag }",
         "def f(x: Boolean): Boolean = x && { return false; true }",
