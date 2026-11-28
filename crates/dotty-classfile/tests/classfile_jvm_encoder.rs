@@ -3317,3 +3317,126 @@ fn lcmp_preserves_signed_64_bit_comparisons_and_cfg_frames() {
         "long comparison ok"
     );
 }
+
+#[test]
+fn floating_comparisons_preserve_ieee_equality_and_cfg_frames() {
+    let mut class = ClassFileBuilder::new(
+        "FloatingCompare",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    for (family, descriptor) in [("f", "FF"), ("d", "DD")] {
+        class
+            .add_static_method(
+                format!("{family}compare"),
+                format!("({descriptor})I"),
+                |code| {
+                    if family == "f" {
+                        code.fload(0)?.fload(1)?.fcmpl()?;
+                    } else {
+                        code.dload(0)?.dload(2)?.dcmpl()?;
+                    }
+                    code.ireturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        class
+            .add_static_method(
+                format!("{family}equal"),
+                format!("({descriptor})Z"),
+                |code| {
+                    let different = code.new_label()?;
+                    if family == "f" {
+                        code.fload(0)?.fload(1)?.fcmpl()?;
+                    } else {
+                        code.dload(0)?.dload(2)?.dcmpl()?;
+                    }
+                    code.ifne(different.clone())?.iconst(1)?.ireturn()?;
+                    code.mark(different)?.iconst(0)?.ireturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    let bytes = class.encode().unwrap();
+    let decoded = decode_and_validate(&bytes);
+    for (index, first, second, cmp, slots) in [(0, 0x22, 0x23, 0x95, 2), (2, 0x26, 0x28, 0x97, 4)] {
+        let compare = code(&decoded.methods[index]);
+        assert_eq!(compare.code, [first, second, cmp, 0xac]);
+        assert_eq!((compare.max_stack, compare.max_locals), (slots, slots));
+        let equal = code(&decoded.methods[index + 1]);
+        assert_eq!(
+            equal.code,
+            [first, second, cmp, 0x9a, 0, 5, 0x04, 0xac, 0x03, 0xac]
+        );
+        assert_eq!((equal.max_stack, equal.max_locals), (slots, slots));
+        assert!(equal.attributes.iter().any(|a| matches!(a, Attribute::Other(raw) if decoded.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))));
+    }
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    fs::write(directory.path().join("FloatingCompare.class"), bytes).unwrap();
+    let client = directory.path().join("FloatingCompareHarness.java");
+    fs::write(&client, r#"public class FloatingCompareHarness {
+      public static void main(String[] args) {
+        float[] floats = {Float.NEGATIVE_INFINITY, -Float.MAX_VALUE, -Float.MIN_VALUE, -0.0f, 0.0f, Float.MIN_VALUE, Float.MIN_NORMAL, 1.5f, Math.nextUp(1.5f), Float.MAX_VALUE, Float.POSITIVE_INFINITY, Float.intBitsToFloat(0x7fc12345), Float.intBitsToFloat(0xffc12345), Float.intBitsToFloat(0x7f812345)};
+        for (float a : floats) for (float b : floats) {
+          int expected = Float.isNaN(a) || Float.isNaN(b) ? -1 : a > b ? 1 : a == b ? 0 : -1;
+          if (FloatingCompare.fcompare(a, b) != expected) throw new AssertionError(a + " vs " + b);
+          if (FloatingCompare.fequal(a, b) != (a == b)) throw new AssertionError("float branch");
+        }
+        double[] doubles = {Double.NEGATIVE_INFINITY, -Double.MAX_VALUE, -Double.MIN_VALUE, -0.0, 0.0, Double.MIN_VALUE, Double.MIN_NORMAL, 1.5, Math.nextUp(1.5), Double.MAX_VALUE, Double.POSITIVE_INFINITY, Double.longBitsToDouble(0x7ff8123456789abcL), Double.longBitsToDouble(0xfff8123456789abcL), Double.longBitsToDouble(0x7ff0123456789abcL)};
+        for (double a : doubles) for (double b : doubles) {
+          int expected = Double.isNaN(a) || Double.isNaN(b) ? -1 : a > b ? 1 : a == b ? 0 : -1;
+          if (FloatingCompare.dcompare(a, b) != expected) throw new AssertionError(a + " vs " + b);
+          if (FloatingCompare.dequal(a, b) != (a == b)) throw new AssertionError("double branch");
+        }
+        System.out.println("floating comparison ok");
+      }
+    }"#).unwrap();
+    let path = directory.path().to_string_lossy().into_owned();
+    let compiled = run(
+        "javac",
+        &[
+            "--release",
+            "21",
+            "-cp",
+            &path,
+            "-d",
+            &path,
+            client.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let output = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-ea",
+            "-cp",
+            &path,
+            "FloatingCompareHarness",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "floating comparison ok"
+    );
+}
