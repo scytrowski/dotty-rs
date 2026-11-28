@@ -35,8 +35,7 @@ const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 fn same_class_boolean_calls_validate_exact_borrowed_roots() {
     let source = "package example; class Calls { def identity(b: Boolean): Boolean = b; def ready(): Boolean = true; def run(b: Boolean): Boolean = this.identity(b) && ready() }";
     let mut validated = false;
-    // This increment tests validation; complete encoding is enabled separately.
-    let _encoding = source_outputs_named(source, "Calls.scala", |plan| {
+    source_outputs_named(source, "Calls.scala", |plan| {
         let before = format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast);
         let checked = plan.validate().unwrap();
         assert!(std::ptr::eq(checked.plan().store, plan.store));
@@ -46,8 +45,60 @@ fn same_class_boolean_calls_validate_exact_borrowed_roots() {
             format!("{:?}{:?}{:?}", plan.store, plan.source_ast, plan.typed_ast)
         );
         validated = true;
-    });
+    })
+    .unwrap();
     assert!(validated);
+}
+
+#[test]
+fn same_class_boolean_call_signatures_keep_parameter_order_and_this_syntax() {
+    use dotty_tasty::tasty::*;
+    let source = "package example\nclass Calls {\n def truth(x: Int,b: Boolean): Boolean = b\n def score(b: Boolean,x: Int): Int = x\n def empty(): Boolean = true\n def implicitCall(x: Int,b: Boolean): Boolean = truth(x,b)\n def explicitCall(x: Int,b: Boolean): Boolean = this.truth(x,b)\n def intCall(x: Int,b: Boolean): Int = score(b,x)\n def noarg(): Boolean = empty()\n}";
+    let (_, first) = source_outputs_named(source, "Calls.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(source, "Calls.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut seen = Vec::new();
+    let mut explicit = 0;
+    for node in index.iter().filter(|node| node.tag == SELECTIN_TAG) {
+        let selected = node.decode_select_in().unwrap();
+        let Some(RenderedSignedName::Signed {
+            original,
+            signature,
+        }) = file.render_signed_name(selected.name).unwrap()
+        else {
+            continue;
+        };
+        let (parameters, result) = match original.as_str() {
+            "truth" => (vec!["scala.Int", "scala.Boolean"], "scala.Boolean"),
+            "score" => (vec!["scala.Boolean", "scala.Int"], "scala.Int"),
+            "empty" => (vec![], "scala.Boolean"),
+            _ => continue,
+        };
+        assert_eq!(
+            signature.parameters,
+            parameters
+                .into_iter()
+                .map(|p| RenderedParamSig::TermParameter(p.into()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(signature.result, result);
+        assert!(matches!(selected.underlying_type,
+            RawTree::NatAst { tag: TYPEREFSYMBOL_TAG, value, .. }
+            if value == first.declarations()[0].address));
+        match selected.qualifier {
+            RawTree::Ast { tag: THIS_TAG, .. } => explicit += 1,
+            RawTree::Ast {
+                tag: QUALTHIS_TAG, ..
+            } => (),
+            other => panic!("unexpected call receiver {other:?}"),
+        }
+        seen.push(original);
+    }
+    seen.sort();
+    assert_eq!(seen, ["empty", "score", "truth", "truth"]);
+    assert_eq!(explicit, 1);
 }
 
 #[test]

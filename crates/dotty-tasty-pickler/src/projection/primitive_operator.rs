@@ -426,7 +426,7 @@ impl<'a> EncodingContext<'a> {
         }
     }
 
-    fn primitive_type_name(&mut self, ty: TypeId) -> Result<NameRef, PickleError> {
+    pub(super) fn primitive_type_name(&mut self, ty: TypeId) -> Result<NameRef, PickleError> {
         let builtin = if ty == self.definitions.int {
             Builtin::Int
         } else if ty == self.definitions.boolean {
