@@ -5535,10 +5535,12 @@ fn numeric_ascriptions_authenticate_type_syntax_spans_bindings_bits_and_cycles()
 #[test]
 fn primitive_typed_wildcards_preserve_pattern_type_syntax_in_method_only_plans() {
     use dotty_tasty::tasty::*;
-    for ty in ["Int", "Boolean", "Long"] {
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
         let value = match ty {
             "Boolean" => "true",
             "Long" => "7L",
+            "Float" => "7f",
+            "Double" => "7d",
             _ => "7",
         };
         let source = format!(
@@ -5586,4 +5588,48 @@ fn long_match_literals_preserve_full_width_and_order_in_method_only_plans() {
         .collect();
     assert_eq!(values, [1, 4_294_967_297, -4_294_967_295]);
     assert_eq!(index.iter_nodes_with_tag(ALTERNATIVE_TAG).count(), 1);
+}
+
+#[test]
+fn floating_match_literals_preserve_raw_bits_and_source_order_in_method_only_plans() {
+    use dotty_tasty::tasty::*;
+    for (ty, literals, tag, expected) in [
+        (
+            "Float",
+            "0.0f | -0.0f | 1.5F",
+            FLOATCONST_TAG,
+            vec![0, 0x80000000, 0x3fc00000],
+        ),
+        (
+            "Double",
+            "0.0 | -0.0 | 1.5D",
+            DOUBLECONST_TAG,
+            vec![0, 0x8000000000000000, 0x3ff8000000000000],
+        ),
+    ] {
+        let source = format!(
+            "package example; class Patterns {{ def f(x: {ty}): Int = x match {{ case {literals} => 7; case _ => 8 }} }}"
+        );
+        let (_, output) = source_outputs_named(&source, "Patterns.scala", |_| {}).unwrap();
+        let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let payload = file.section(StandardSection::Asts).unwrap().payload;
+        let values: Vec<u64> = index
+            .iter_nodes_with_tag(tag)
+            .map(|node| {
+                let RawTree::Leaf(term) =
+                    RawTree::decode(&mut Reader::new(&payload[node.offset..])).unwrap()
+                else {
+                    panic!()
+                };
+                match term.value {
+                    TermValue::Int(value) => u64::from(u32::from_ne_bytes(value.to_ne_bytes())),
+                    TermValue::LongInt(value) => u64::from_ne_bytes(value.to_ne_bytes()),
+                    _ => panic!(),
+                }
+            })
+            .collect();
+        assert_eq!(values, expected);
+        assert_eq!(index.iter_nodes_with_tag(ALTERNATIVE_TAG).count(), 1);
+    }
 }

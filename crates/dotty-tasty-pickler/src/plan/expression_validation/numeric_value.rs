@@ -159,11 +159,19 @@ impl Validator<'_, '_> {
                     && self.registered_local_symbols.contains(target)
                     && self.visible_locals.contains(target);
                 let complete = self.complete(*target)?;
-                // Only already authenticated, visible local declarations may
-                // retain a Long singleton type while yielding a Long value.
+                // Only authenticated, visible locals may yield their numeric
+                // family while retaining a raw-bit-exact singleton declaration.
                 let singleton_local = local
-                    && result_type == p.definitions.long
-                    && matches!(self.ty(complete)?, Type::Constant(Constant::Long(_)));
+                    && match self.ty(complete)? {
+                        Type::Constant(Constant::Long(_)) => result_type == p.definitions.long,
+                        Type::Constant(Constant::FloatBits(_)) => {
+                            result_type == p.definitions.float
+                        }
+                        Type::Constant(Constant::DoubleBits(_)) => {
+                            result_type == p.definitions.double
+                        }
+                        _ => false,
+                    };
                 if !formal && !local
                     || symbol.name != value.name
                     || symbol.owner != Some(method.symbol)

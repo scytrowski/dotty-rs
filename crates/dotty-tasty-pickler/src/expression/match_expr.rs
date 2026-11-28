@@ -233,6 +233,23 @@ fn lower_pattern_type(
         })?;
         return context.wire_node(AstNode::Leaf(term));
     }
+    let floating = match store.types.try_get(ty) {
+        Some(Type::Constant(Constant::FloatBits(bits))) => Some((
+            dotty_tasty::tasty::FLOATCONST_TAG,
+            TermValue::Int(i32::from_ne_bytes(bits.to_ne_bytes())),
+        )),
+        Some(Type::Constant(Constant::DoubleBits(bits))) => Some((
+            dotty_tasty::tasty::DOUBLECONST_TAG,
+            TermValue::LongInt(i64::from_ne_bytes(bits.to_ne_bytes())),
+        )),
+        _ => None,
+    };
+    if let Some((tag, value)) = floating {
+        let term = SimpleTerm::new(tag, value).map_err(|cause| PickleError::Encoding {
+            cause: Box::new(cause.into()),
+        })?;
+        return context.wire_node(AstNode::Leaf(term));
+    }
     if let Some(Type::Constant(Constant::Boolean(value))) = store.types.try_get(ty) {
         let tag = if *value {
             dotty_tasty::tasty::TRUECONST_TAG

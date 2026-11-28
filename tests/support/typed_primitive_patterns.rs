@@ -16,7 +16,7 @@ fn emit(methods: &str) -> PairedJvmTastyArtifacts {
 #[test]
 fn implicit_and_explicit_typed_binders_keep_pattern_wrappers() {
     use dotty_tasty::tasty::*;
-    for ty in ["Int", "Boolean", "Long"] {
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
         for pattern in [
             format!("_: {ty}"),
             format!("n: {ty}"),
@@ -191,7 +191,7 @@ fn pinned_scala_consumes_original_and_recompiled_typed_pattern_artifacts() {
 
 #[test]
 fn typed_pattern_guards_and_fallbacks_keep_the_existing_ordering_contract() {
-    for ty in ["Int", "Boolean", "Long"] {
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
         for cases in [
             format!("case _: {ty} => 1; case _ => 2"),
             format!("case n: {ty} => 1; case _ => 2"),
@@ -242,8 +242,6 @@ fn typed_pattern_guards_and_fallbacks_keep_the_existing_ordering_contract() {
 #[test]
 fn unsupported_typed_pattern_shapes_never_publish_a_pair() {
     for method in [
-        "def f(x: Float): Int = x match { case _: Float => 1 }",
-        "def f(x: Double): Int = x match { case _: Double => 1 }",
         "def f(x: Int): Int = x match { case _: Boolean => 1; case _ => 2 }",
         "def f(x: Boolean): Int = x match { case _: Int => 1; case _ => 2 }",
         "def f(x: Int): Int = x match { case _: Long => 1; case _ => 2 }",
@@ -276,7 +274,7 @@ fn malformed_typed_pattern_nodes_are_rejected_without_mutation() {
         ast::{AstArena, TreeKind},
     };
     use dotty_tasty_pickler::{ClassStatePicklePlan, PickleError, PrimaryConstructorInputPlan};
-    for ty in ["Int", "Boolean", "Long"] {
+    for ty in ["Int", "Boolean", "Long", "Float", "Double"] {
         for pattern in [
             format!("_: {ty}"),
             format!("n: {ty}"),
