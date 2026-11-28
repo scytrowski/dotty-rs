@@ -214,6 +214,12 @@ fn tasty_rejects_missing_duplicate_or_cross_case_pattern_evidence_without_mutati
         "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n if enabled => n; case n => n } }",
         "package example; class GuardedMatches { def f(x: Long, enabled: Boolean): Long = x match { case n: Long if enabled => n; case n: Long => n } }",
         "package example; class GuardedMatches { def f(enabled: Boolean): Long = 1L match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Float, enabled: Boolean): Float = x match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Float, enabled: Boolean): Float = x match { case n: Float if enabled => n; case n: Float => n } }",
+        "package example; class GuardedMatches { def f(enabled: Boolean): Float = -0.0f match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Double, enabled: Boolean): Double = x match { case n if enabled => n; case n => n } }",
+        "package example; class GuardedMatches { def f(x: Double, enabled: Boolean): Double = x match { case n: Double if enabled => n; case n: Double => n } }",
+        "package example; class GuardedMatches { def f(enabled: Boolean): Double = -0.0d match { case n if enabled => n; case n => n } }",
     ] {
         dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan(
             source,

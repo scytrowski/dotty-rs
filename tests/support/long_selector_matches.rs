@@ -570,8 +570,6 @@ fn unsupported_long_match_shapes_never_publish_a_pair() {
         "def f(x: Long): Int = x match { case n @ (m: Long) => 1 }",
         "def f(x: Long): Long = x match { case n if true => n; case _ => n }",
         "def f(x: Long): Int = x match { case n if n == 1L => 1; case _ => 2 }",
-        "def f(x: Float): Int = x match { case _ => 1 }",
-        "def f(x: Double): Int = x match { case _ => 1 }",
     ] {
         let source = format!("package example; class LongSelectorMatches {{ {method} }}");
         let result = emit_paired_jvm_tasty_class(

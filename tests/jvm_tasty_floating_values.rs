@@ -600,7 +600,6 @@ fn unsupported_floating_shapes_never_publish_a_pair() {
         "def f(x: Float): Float = x + 1.0f",
         "def f(x: Double): Boolean = x < 1.0",
         "def f(x: Float): Double = x",
-        "def f(x: Double): Int = x match { case 0.0 => 1; case _ => 2 }",
         "def f(x: Float): Int = { x; 1 }",
         "def f(x: Double): Int = { x; 1 }",
         "def f(x: Double): Double = { val saved: Double = x; saved = x; saved }",
@@ -749,3 +748,6 @@ fn legacy_numeric_method_plans_respect_validation_and_encoding_depth() {
         .unwrap();
     }
 }
+
+#[path = "support/floating_selector_matches.rs"]
+mod floating_selector_matches;

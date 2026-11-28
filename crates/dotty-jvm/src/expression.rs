@@ -5804,6 +5804,118 @@ mod tests {
         (f, root, pattern)
     }
 
+    fn floating_alternative_match_fixture(
+        kind: JvmType,
+    ) -> (Fixture, TreeId<Typed>, TreeId<Typed>) {
+        let (mut f, root, pattern) = long_alternative_match_fixture();
+        let TreeKind::Match(matched) = f.ast.get(root).kind.clone() else {
+            panic!()
+        };
+        let TreeKind::Alternative(alt) = f.ast.get(pattern).kind.clone() else {
+            panic!()
+        };
+        let canonical = if kind == JvmType::Float {
+            f.definitions.float
+        } else {
+            f.definitions.double
+        };
+        let values = if kind == JvmType::Float {
+            [
+                Constant::FloatBits(1.0f32.to_bits()),
+                Constant::FloatBits(0),
+                Constant::FloatBits(0x80000000),
+            ]
+        } else {
+            [
+                Constant::DoubleBits(1.0f64.to_bits()),
+                Constant::DoubleBits(0),
+                Constant::DoubleBits(0x8000000000000000),
+            ]
+        };
+        for (id, value) in [matched.selector, alt.alternatives[0], alt.alternatives[1]]
+            .into_iter()
+            .zip(values)
+        {
+            f.ast.get_mut(id).ty = f.store.types.alloc(Type::Constant(value.clone()));
+            f.ast.get_mut(id).kind = TreeKind::Literal(dotty_core::ast::Literal { value });
+        }
+        f.ast.get_mut(pattern).ty = canonical;
+        let TreeKind::CaseDef(last) = f.ast.get(*matched.cases.last().unwrap()).kind else {
+            panic!()
+        };
+        f.ast.get_mut(last.pattern).ty = canonical;
+        (f, root, pattern)
+    }
+
+    #[test]
+    fn floating_alternatives_preserve_zero_bits_and_temporary_width() {
+        for kind in [JvmType::Float, JvmType::Double] {
+            let (mut f, root, pattern) = floating_alternative_match_fixture(kind);
+            let layout = JvmLocalLayout {
+                method: f.method.symbol(),
+                locals: vec![],
+                by_symbol: Default::default(),
+                max_locals: 1,
+            };
+            let mut context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+            context.local_layout = Some(&layout);
+            let mut code = CodeBuilder::new();
+            assert_eq!(
+                emit_expression(&mut context, root, &mut code, 0).unwrap(),
+                Flow::Value(JvmType::Int)
+            );
+            assert_eq!(context.temporary_local_slots, 0);
+            code.ireturn().unwrap();
+            let bytes = method_body_bytes(&f, code);
+            let cmp = if kind == JvmType::Float { 0x95 } else { 0x97 };
+            assert_eq!(bytes.iter().filter(|&&b| b == cmp).count(), 2);
+            assert_eq!(bytes[1], if kind == JvmType::Float { 0x44 } else { 0x48 });
+            let TreeKind::Alternative(alt) = f.ast.get(pattern).kind.clone() else {
+                panic!()
+            };
+            let leaf = alt.alternatives[1];
+            // Runtime-equal zeros must still have distinct authenticated types.
+            let wrong = if kind == JvmType::Float {
+                Constant::FloatBits(0)
+            } else {
+                Constant::DoubleBits(0)
+            };
+            f.ast.get_mut(leaf).ty = f.store.types.alloc(Type::Constant(wrong));
+            let before = format!("{:?}{:?}", f.store, f.ast);
+            assert_eq!(
+                lower_expression(&f.store, &f.ast, &f.definitions, &f.method, root).unwrap_err(),
+                JvmCodegenError::UnsupportedTypedExpression {
+                    tree: leaf,
+                    node: "inconsistent floating match literal"
+                }
+            );
+            assert_eq!(format!("{:?}{:?}", f.store, f.ast), before);
+        }
+    }
+
+    #[test]
+    fn floating_selector_temporary_exhaustion_is_atomic() {
+        for kind in [JvmType::Float, JvmType::Double] {
+            let (f, root, _) = floating_alternative_match_fixture(kind);
+            let width = kind.slot_width();
+            let layout = JvmLocalLayout {
+                method: f.method.symbol(),
+                locals: vec![],
+                by_symbol: Default::default(),
+                max_locals: u16::MAX - u16::from(width) + 1,
+            };
+            let mut context = JvmLoweringContext::new(&f.store, &f.ast, &f.definitions, &f.method);
+            context.local_layout = Some(&layout);
+            assert_eq!(
+                emit_expression(&mut context, root, &mut CodeBuilder::new(), 0).unwrap_err(),
+                JvmCodegenError::TooManyLocalSlots {
+                    method: f.method.symbol()
+                }
+            );
+            assert_eq!(context.temporary_local_slots, 0);
+        }
+    }
+
     #[test]
     fn long_alternatives_use_lcmp_and_one_two_slot_selector_temporary() {
         let (f, root, _) = long_alternative_match_fixture();
@@ -5910,6 +6022,14 @@ mod tests {
             JvmType::Int => (fixture.definitions.int, Constant::Int(1)),
             JvmType::Boolean => (fixture.definitions.boolean, Constant::Boolean(true)),
             JvmType::Long => (fixture.definitions.long, Constant::Long(1)),
+            JvmType::Float => (
+                fixture.definitions.float,
+                Constant::FloatBits(1.0f32.to_bits()),
+            ),
+            JvmType::Double => (
+                fixture.definitions.double,
+                Constant::DoubleBits(1.0f64.to_bits()),
+            ),
             _ => unreachable!(),
         };
         let singleton = fixture.store.types.alloc(Type::Constant(constant.clone()));
@@ -5956,7 +6076,13 @@ mod tests {
 
     #[test]
     fn same_type_primitive_patterns_lower_to_one_selector_store_without_runtime_test() {
-        for kind in [JvmType::Int, JvmType::Boolean, JvmType::Long] {
+        for kind in [
+            JvmType::Int,
+            JvmType::Boolean,
+            JvmType::Long,
+            JvmType::Float,
+            JvmType::Double,
+        ] {
             let (fixture, root, _) = typed_pattern_fixture(kind);
             let layout = JvmLocalLayout {
                 method: fixture.method.symbol(),
@@ -5979,10 +6105,11 @@ mod tests {
             code.ireturn().unwrap();
             assert_eq!(
                 method_body_bytes(&fixture, code),
-                if kind == JvmType::Long {
-                    [0x0a, 0x40, 0x10, 7, 0xac]
-                } else {
-                    [0x04, 0x3c, 0x10, 7, 0xac]
+                match kind {
+                    JvmType::Long => [0x0a, 0x40, 0x10, 7, 0xac],
+                    JvmType::Float => [0x0c, 0x44, 0x10, 7, 0xac],
+                    JvmType::Double => [0x0f, 0x48, 0x10, 7, 0xac],
+                    _ => [0x04, 0x3c, 0x10, 7, 0xac],
                 }
             );
         }
@@ -5990,7 +6117,13 @@ mod tests {
 
     #[test]
     fn malformed_typed_primitive_patterns_reject_read_only() {
-        for kind in [JvmType::Int, JvmType::Boolean, JvmType::Long] {
+        for kind in [
+            JvmType::Int,
+            JvmType::Boolean,
+            JvmType::Long,
+            JvmType::Float,
+            JvmType::Double,
+        ] {
             for mode in 0..8 {
                 let (mut fixture, root, pattern) = typed_pattern_fixture(kind);
                 let TreeKind::Typed(value) = fixture.ast.get(pattern).kind else {

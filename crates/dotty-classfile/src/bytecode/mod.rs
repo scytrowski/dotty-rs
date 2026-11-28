@@ -72,14 +72,15 @@
 //! | `FConst(Zero..Two)` / `DConst(Zero..One)` | `fconst_0..2` `0x0b..0x0d`; `dconst_0..1` `0x0e..0x0f` |
 //! | `Ldc(Float)` / `Ldc2(Double)` | `ldc` / `ldc_w` `0x12` / `0x13`; `ldc2_w` `0x14` |
 //! | `FLoad` / `DLoad`, `FStore` / `DStore` | `fload` `0x17`, `dload` `0x18`, `fstore` `0x38`, `dstore` `0x39`; compact `_0.._3` and `wide` forms follow the local index |
+//! | `FCmpL` / `DCmpL` | `fcmpl` `0x95`; `dcmpl` `0x97`; two same-kind operands become Int (-1 for NaN) |
 //! | `FReturn` / `DReturn` | `freturn` `0xae`; `dreturn` `0xaf` |
 //!
 //! The [`Instruction`] enum covers the straight-line instruction families
 //! listed above. [`code_sequence::BranchInstruction`] additionally models
 //! symbolic `goto`/`goto_w`, integer conditional branches, and reference
 //! identity/null branches. It does not choose branch widths or emit branch
-//! bytes. Float/double arithmetic, conversions, comparisons, symbolic CFG
-//! transfers and automatic frames remain unsupported, as do `invokeinterface`,
+//! bytes. Float/double arithmetic, conversions and comparisons other than
+//! FCmpL/DCmpL remain unsupported, as do `invokeinterface`,
 //! `invokedynamic`, switches, `jsr`/`ret`, exception handlers, monitor
 //! operations, array operations, and all other JVM instructions outside the
 //! table above. There are no catch-all opcode or raw-byte variants, so
@@ -455,6 +456,12 @@ pub enum Instruction {
     /// Compares signed longs: consumes two category-two values and pushes Int -1, 0 or 1.
     /// The result describes the first operand relative to the second.
     LCmp,
+    /// Compares two floats, pushing Int -1, 0 or 1 for the first relative to the second.
+    /// Either NaN produces -1; positive and negative zero compare equal.
+    FCmpL,
+    /// Compares two doubles, consuming four slots and pushing Int -1, 0 or 1.
+    /// Either NaN produces -1; positive and negative zero compare equal.
+    DCmpL,
     /// Duplicates the top category-one stack value.
     Dup,
     /// Removes the top category-one stack value.

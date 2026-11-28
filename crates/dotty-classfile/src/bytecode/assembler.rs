@@ -459,6 +459,8 @@ fn write_instruction(
         Instruction::IOr => writer.write_u1(0x80),
         Instruction::IXor => writer.write_u1(0x82),
         Instruction::LCmp => writer.write_u1(0x94),
+        Instruction::FCmpL => writer.write_u1(0x95),
+        Instruction::DCmpL => writer.write_u1(0x97),
         Instruction::Dup => writer.write_u1(0x59),
         Instruction::Pop => writer.write_u1(0x57),
         Instruction::GetField(reference) => {
@@ -1151,6 +1153,24 @@ mod tests {
             [0x03, 0x99, 0x00, 0x06, 0x7e, 0x80, 0x82, 0xb1]
         );
         assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn floating_comparisons_have_exact_opcodes_and_labeled_layout() {
+        let pool = ConstantPool::default();
+        for (op, byte) in [(Instruction::FCmpL, 0x95), (Instruction::DCmpL, 0x97)] {
+            assert_eq!(assemble(&[op], &pool).unwrap(), [byte]);
+            let mut sequence = super::super::CodeSequence::new();
+            let end = sequence.new_label().unwrap();
+            sequence.instruction(op);
+            sequence.branch(super::super::BranchInstruction::IfEq(end.clone()));
+            sequence.instruction(op);
+            sequence.bind(end).unwrap();
+            sequence.instruction(Instruction::IReturn);
+            let assembled = assemble_labeled(&sequence, &pool).unwrap();
+            assert_eq!(assembled.bytes, [byte, 0x99, 0, 4, byte, 0xac]);
+            assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5]);
+        }
     }
 
     #[test]

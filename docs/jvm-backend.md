@@ -1,5 +1,9 @@
 # JVM backend boundary
 
+Float/Double selectors, signed-zero equality, NaN fallback and canonical floating
+case binders in both outputs follow
+[the floating-selector contract](jvm-tasty-floating-selector-matches.md).
+
 Long selectors, full-width literal comparisons and canonical Long case binders
 in both outputs follow [the Long-selector contract](jvm-tasty-long-selector-matches.md).
 

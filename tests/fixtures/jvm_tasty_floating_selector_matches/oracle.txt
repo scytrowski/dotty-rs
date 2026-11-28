@@ -1,0 +1,703 @@
+/** Decompiled from <oracle>/reference/example/FloatingSelectorMatches.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("FloatingSelectorMatches.scala") class FloatingSelectorMatches() {
+    def f_literal(x: scala.Float, b: scala.Boolean, a: scala.Float): scala.Int = x match {
+      case 1.5f =>
+        11
+      case _ =>
+        33
+    }
+    def f_zero_order(`x₂`: scala.Float, `b₂`: scala.Boolean, `a₂`: scala.Float): scala.Int = `x₂` match {
+      case 0.0f =>
+        11
+      case -0.0f =>
+        22
+      case _ =>
+        33
+    }
+    def f_negative_zero_order(`x₃`: scala.Float, `b₃`: scala.Boolean, `a₃`: scala.Float): scala.Int = `x₃` match {
+      case -0.0f =>
+        11
+      case 0.0f =>
+        22
+      case _ =>
+        33
+    }
+    def f_extremes(`x₄`: scala.Float, `b₄`: scala.Boolean, `a₄`: scala.Float): scala.Int = `x₄` match {
+      case 1.4E-45f =>
+        11
+      case 3.4028235E38f =>
+        22
+      case _ =>
+        33
+    }
+    def f_alternatives(`x₅`: scala.Float, `b₅`: scala.Boolean, `a₅`: scala.Float): scala.Int = `x₅` match {
+      case (0.0f | -0.0f | 1.5f) if `b₅` =>
+        11
+      case _ =>
+        33
+    }
+    def f_nested_alternatives(`x₆`: scala.Float, `b₆`: scala.Boolean, `a₆`: scala.Float): scala.Int = `x₆` match {
+      case (1.5f | (2.5f | 3.5f)) =>
+        11
+      case _ =>
+        33
+    }
+    def f_binder(`x₇`: scala.Float, `b₇`: scala.Boolean, `a₇`: scala.Float): scala.Float = `x₇` match {
+      case n =>
+        (n: scala.Float)
+    }
+    def f_bound_literal(`x₈`: scala.Float, `b₈`: scala.Boolean, `a₈`: scala.Float): scala.Float = `x₈` match {
+      case n @ 1.5f =>
+        (`n₂`: scala.Float)
+      case n =>
+        (`n₃`: scala.Float)
+    }
+    def f_typed_binder(`x₉`: scala.Float, `b₉`: scala.Boolean, `a₉`: scala.Float): scala.Float = `x₉` match {
+      case n: scala.Float =>
+        (`n₄`: scala.Float)
+    }
+    def f_typed_wildcard(`x₁₀`: scala.Float, `b₁₀`: scala.Boolean, `a₁₀`: scala.Float): scala.Int = `x₁₀` match {
+      case _: scala.Float =>
+        42
+    }
+    def f_explicit_typed_binder(`x₁₁`: scala.Float, `b₁₁`: scala.Boolean, `a₁₁`: scala.Float): scala.Float = `x₁₁` match {
+      case n: scala.Float =>
+        (`n₅`: scala.Float)
+    }
+    def f_guarded_binder(`x₁₂`: scala.Float, `b₁₂`: scala.Boolean, `a₁₂`: scala.Float): scala.Float = `x₁₂` match {
+      case n if `b₁₂` =>
+        (`n₆`: scala.Float)
+      case _ =>
+        `a₁₂`
+    }
+    def f_guarded_typed(`x₁₃`: scala.Float, `b₁₃`: scala.Boolean, `a₁₃`: scala.Float): scala.Float = `x₁₃` match {
+      case n: scala.Float if `b₁₃` =>
+        (`n₇`: scala.Float)
+      case _: scala.Float =>
+        `a₁₃`
+    }
+    def f_nested(`x₁₄`: scala.Float, `b₁₄`: scala.Boolean, `a₁₄`: scala.Float): scala.Float = `x₁₄` match {
+      case n =>
+        (`n₈` match {
+          case 1.5f =>
+            `a₁₄`
+          case _: scala.Float =>
+            `n₈`
+        }: scala.Float)
+    }
+    def f_ascribed_selector(`x₁₅`: scala.Float, `b₁₅`: scala.Boolean, `a₁₅`: scala.Float): scala.Float = (`x₁₅`: scala.Float) match {
+      case n =>
+        (`n₉`: scala.Float)
+    }
+    def f_explicit_local(`x₁₆`: scala.Float, `b₁₆`: scala.Boolean, `a₁₆`: scala.Float): scala.Float = {
+      val saved: scala.Float = `x₁₆`
+      saved match {
+        case n =>
+          (`n₁₀`: scala.Float)
+      }
+    }
+    def f_inferred_local(`x₁₇`: scala.Float, `b₁₇`: scala.Boolean, `a₁₇`: scala.Float): scala.Float = {
+      val `saved₂`: scala.Float = `x₁₇`
+      `saved₂` match {
+        case n =>
+          (`n₁₁`: scala.Float)
+      }
+    }
+    def f_mutable_selector(`x₁₈`: scala.Float, `b₁₈`: scala.Boolean, `a₁₈`: scala.Float): scala.Float = {
+      var `saved₃`: scala.Float = `x₁₈`
+      `saved₃` = if (`b₁₈`) `x₁₈` else 0.0f
+      `saved₃` match {
+        case n =>
+          (`n₁₂`: scala.Float)
+      }
+    }
+    def f_local_result(`x₁₉`: scala.Float, `b₁₉`: scala.Boolean, `a₁₉`: scala.Float): scala.Float = {
+      val `saved₄`: scala.Float = `x₁₉` match {
+        case n =>
+          (`n₁₃`: scala.Float)
+      }
+
+      (`saved₄`: scala.Float)
+    }
+    def f_assignment_result(`x₂₀`: scala.Float, `b₂₀`: scala.Boolean, `a₂₀`: scala.Float): scala.Float = {
+      var `saved₅`: scala.Float = `x₂₀`
+      `saved₅` = `x₂₀` match {
+        case 1.5f =>
+          `a₂₀`
+        case n =>
+          (`n₁₄`: scala.Float)
+      }
+
+      (`saved₅`: scala.Float)
+    }
+    def f_effect(`x₂₁`: scala.Float, `b₂₁`: scala.Boolean, `a₂₁`: scala.Float): scala.Int = {
+      var steps: scala.Int = 0
+      val picked: scala.Int = {
+        steps = steps.*(10).+(1)
+        `x₂₁`
+      } match {
+        case (0.0f | -0.0f | 1.5f) if {
+          steps = steps.*(10).+(2)
+          `b₂₁`
+        } =>
+          steps = steps.*(10).+(3)
+          7
+        case _ =>
+          steps = steps.*(10).+(4)
+          8
+      }
+      steps.*(100).+(picked)
+    }
+    def f_shadow(`x₂₂`: scala.Float, `b₂₂`: scala.Boolean, `a₂₂`: scala.Float): scala.Float = {
+      val `n₁₅`: scala.Float = `x₂₂`
+      `x₂₂` match {
+        case n if `b₂₂` =>
+          (`n₁₆`: scala.Float)
+        case _: scala.Float =>
+          `n₁₅`
+      }
+    }
+    def f_mixed_nested(`x₂₃`: scala.Float, `b₂₃`: scala.Boolean, `a₂₃`: scala.Float): scala.Float = `b₂₃` match {
+      case true =>
+        `x₂₃` match {
+          case n =>
+            (`n₁₇`: scala.Float)
+        }
+      case false =>
+        `x₂₃` match {
+          case 1.5f =>
+            `a₂₃`
+          case n: scala.Float =>
+            (`n₁₈`: scala.Float)
+        }
+    }
+    def f_while_selector(`x₂₄`: scala.Float, `b₂₄`: scala.Boolean, `a₂₄`: scala.Float): scala.Float = {
+      var i: scala.Int = 1
+      var `saved₆`: scala.Float = `x₂₄`
+      while (i.>(0)) {
+        `saved₆` = if (`b₂₄`) `x₂₄` else 0.0f
+        i = i.-(1)
+      }
+
+      (`saved₆`: scala.Float)
+    } match {
+      case n =>
+        (`n₁₉`: scala.Float)
+    }
+    def f_all_returns(`x₂₅`: scala.Float, `b₂₅`: scala.Boolean, `a₂₅`: scala.Float): scala.Float = `x₂₅` match {
+      case 1.5f =>
+        return `a₂₅`
+      case n =>
+        return `n₂₀`
+    }
+    def f_non_tail_return(`x₂₆`: scala.Float, `b₂₆`: scala.Boolean, `a₂₆`: scala.Float): scala.Float = {
+      if (`b₂₆`) return `x₂₆` else ()
+      `x₂₆` match {
+        case 1.5f =>
+          `a₂₆`
+        case n =>
+          (`n₂₁`: scala.Float)
+      }
+    }
+    def f_plain_singleton(`x₂₇`: scala.Float, `b₂₇`: scala.Boolean, `a₂₇`: scala.Float): scala.Float = -0.0f match {
+      case n =>
+        (`n₂₂`: -0.0f)
+    }
+    def f_bound_singleton(`x₂₈`: scala.Float, `b₂₈`: scala.Boolean, `a₂₈`: scala.Float): scala.Float = 1.5f match {
+      case n @ 1.5f =>
+        (`n₂₃`: 1.5f)
+      case n =>
+        (`n₂₄`: 1.5f)
+    }
+    def f_typed_singleton(`x₂₉`: scala.Float, `b₂₉`: scala.Boolean, `a₂₉`: scala.Float): scala.Float = -0.0f match {
+      case n: scala.Float =>
+        (`n₂₅`: -0.0f)
+    }
+    def f_nested_singleton(`x₃₀`: scala.Float, `b₃₀`: scala.Boolean, `a₃₀`: scala.Float): scala.Float = 1.5f match {
+      case n =>
+        `n₂₆` match {
+          case k =>
+            (k: scala.Float)
+        }
+    }
+    def f_result_Int_normal(`x₃₁`: scala.Float, `b₃₁`: scala.Boolean, `a₃₁`: scala.Float): scala.Int = `x₃₁` match {
+      case 1.5f =>
+        7
+      case _ =>
+        0
+    }
+    def f_result_Int_guarded(`x₃₂`: scala.Float, `b₃₂`: scala.Boolean, `a₃₂`: scala.Float): scala.Int = `x₃₂` match {
+      case n: scala.Float if `b₃₂` =>
+        7
+      case _: scala.Float =>
+        0
+    }
+    def f_result_Int_returns(`x₃₃`: scala.Float, `b₃₃`: scala.Boolean, `a₃₃`: scala.Float): scala.Int = `x₃₃` match {
+      case 1.5f =>
+        return 7
+      case _ =>
+        return 0
+    }
+    def f_result_Boolean_normal(`x₃₄`: scala.Float, `b₃₄`: scala.Boolean, `a₃₄`: scala.Float): scala.Boolean = `x₃₄` match {
+      case 1.5f =>
+        true
+      case _ =>
+        false
+    }
+    def f_result_Boolean_guarded(`x₃₅`: scala.Float, `b₃₅`: scala.Boolean, `a₃₅`: scala.Float): scala.Boolean = `x₃₅` match {
+      case n: scala.Float if `b₃₅` =>
+        true
+      case _: scala.Float =>
+        false
+    }
+    def f_result_Boolean_returns(`x₃₆`: scala.Float, `b₃₆`: scala.Boolean, `a₃₆`: scala.Float): scala.Boolean = `x₃₆` match {
+      case 1.5f =>
+        return true
+      case _ =>
+        return false
+    }
+    def f_result_Unit_normal(`x₃₇`: scala.Float, `b₃₇`: scala.Boolean, `a₃₇`: scala.Float): scala.Unit = `x₃₇` match {
+      case 1.5f =>
+        ()
+      case _ =>
+        ()
+    }
+    def f_result_Unit_guarded(`x₃₈`: scala.Float, `b₃₈`: scala.Boolean, `a₃₈`: scala.Float): scala.Unit = `x₃₈` match {
+      case n: scala.Float if `b₃₈` =>
+        ()
+      case _: scala.Float =>
+        ()
+    }
+    def f_result_Unit_returns(`x₃₉`: scala.Float, `b₃₉`: scala.Boolean, `a₃₉`: scala.Float): scala.Unit = `x₃₉` match {
+      case 1.5f =>
+        return ()
+      case _ =>
+        return ()
+    }
+    def f_result_Long_normal(`x₄₀`: scala.Float, `b₄₀`: scala.Boolean, `a₄₀`: scala.Float): scala.Long = `x₄₀` match {
+      case 1.5f =>
+        9223372036854775807L
+      case _ =>
+        0L
+    }
+    def f_result_Long_guarded(`x₄₁`: scala.Float, `b₄₁`: scala.Boolean, `a₄₁`: scala.Float): scala.Long = `x₄₁` match {
+      case n: scala.Float if `b₄₁` =>
+        9223372036854775807L
+      case _: scala.Float =>
+        0L
+    }
+    def f_result_Long_returns(`x₄₂`: scala.Float, `b₄₂`: scala.Boolean, `a₄₂`: scala.Float): scala.Long = `x₄₂` match {
+      case 1.5f =>
+        return 9223372036854775807L
+      case _ =>
+        return 0L
+    }
+    def f_result_Float_normal(`x₄₃`: scala.Float, `b₄₃`: scala.Boolean, `a₄₃`: scala.Float): scala.Float = `x₄₃` match {
+      case 1.5f =>
+        -0.0f
+      case _ =>
+        0.0f
+    }
+    def f_result_Float_guarded(`x₄₄`: scala.Float, `b₄₄`: scala.Boolean, `a₄₄`: scala.Float): scala.Float = `x₄₄` match {
+      case n: scala.Float if `b₄₄` =>
+        -0.0f
+      case _: scala.Float =>
+        0.0f
+    }
+    def f_result_Float_returns(`x₄₅`: scala.Float, `b₄₅`: scala.Boolean, `a₄₅`: scala.Float): scala.Float = `x₄₅` match {
+      case 1.5f =>
+        return -0.0f
+      case _ =>
+        return 0.0f
+    }
+    def f_result_Double_normal(`x₄₆`: scala.Float, `b₄₆`: scala.Boolean, `a₄₆`: scala.Float): scala.Double = `x₄₆` match {
+      case 1.5f =>
+        -0.0
+      case _ =>
+        0.0
+    }
+    def f_result_Double_guarded(`x₄₇`: scala.Float, `b₄₇`: scala.Boolean, `a₄₇`: scala.Float): scala.Double = `x₄₇` match {
+      case n: scala.Float if `b₄₇` =>
+        -0.0
+      case _: scala.Float =>
+        0.0
+    }
+    def f_result_Double_returns(`x₄₈`: scala.Float, `b₄₈`: scala.Boolean, `a₄₈`: scala.Float): scala.Double = `x₄₈` match {
+      case 1.5f =>
+        return -0.0
+      case _ =>
+        return 0.0
+    }
+    def d_literal(`x₄₉`: scala.Double, `b₄₉`: scala.Boolean, `a₄₉`: scala.Double): scala.Int = `x₄₉` match {
+      case 1.5 =>
+        11
+      case _ =>
+        33
+    }
+    def d_zero_order(`x₅₀`: scala.Double, `b₅₀`: scala.Boolean, `a₅₀`: scala.Double): scala.Int = `x₅₀` match {
+      case 0.0 =>
+        11
+      case -0.0 =>
+        22
+      case _ =>
+        33
+    }
+    def d_negative_zero_order(`x₅₁`: scala.Double, `b₅₁`: scala.Boolean, `a₅₁`: scala.Double): scala.Int = `x₅₁` match {
+      case -0.0 =>
+        11
+      case 0.0 =>
+        22
+      case _ =>
+        33
+    }
+    def d_extremes(`x₅₂`: scala.Double, `b₅₂`: scala.Boolean, `a₅₂`: scala.Double): scala.Int = `x₅₂` match {
+      case 4.9E-324 =>
+        11
+      case 1.7976931348623157E308 =>
+        22
+      case _ =>
+        33
+    }
+    def d_alternatives(`x₅₃`: scala.Double, `b₅₃`: scala.Boolean, `a₅₃`: scala.Double): scala.Int = `x₅₃` match {
+      case (0.0 | -0.0 | 1.5) if `b₅₃` =>
+        11
+      case _ =>
+        33
+    }
+    def d_nested_alternatives(`x₅₄`: scala.Double, `b₅₄`: scala.Boolean, `a₅₄`: scala.Double): scala.Int = `x₅₄` match {
+      case (1.5 | (2.5 | 3.5)) =>
+        11
+      case _ =>
+        33
+    }
+    def d_binder(`x₅₅`: scala.Double, `b₅₅`: scala.Boolean, `a₅₅`: scala.Double): scala.Double = `x₅₅` match {
+      case n =>
+        (`n₂₇`: scala.Double)
+    }
+    def d_bound_literal(`x₅₆`: scala.Double, `b₅₆`: scala.Boolean, `a₅₆`: scala.Double): scala.Double = `x₅₆` match {
+      case n @ 1.5 =>
+        (`n₂₈`: scala.Double)
+      case n =>
+        (`n₂₉`: scala.Double)
+    }
+    def d_typed_binder(`x₅₇`: scala.Double, `b₅₇`: scala.Boolean, `a₅₇`: scala.Double): scala.Double = `x₅₇` match {
+      case n: scala.Double =>
+        (`n₃₀`: scala.Double)
+    }
+    def d_typed_wildcard(`x₅₈`: scala.Double, `b₅₈`: scala.Boolean, `a₅₈`: scala.Double): scala.Int = `x₅₈` match {
+      case _: scala.Double =>
+        42
+    }
+    def d_explicit_typed_binder(`x₅₉`: scala.Double, `b₅₉`: scala.Boolean, `a₅₉`: scala.Double): scala.Double = `x₅₉` match {
+      case n: scala.Double =>
+        (`n₃₁`: scala.Double)
+    }
+    def d_guarded_binder(`x₆₀`: scala.Double, `b₆₀`: scala.Boolean, `a₆₀`: scala.Double): scala.Double = `x₆₀` match {
+      case n if `b₆₀` =>
+        (`n₃₂`: scala.Double)
+      case _ =>
+        `a₆₀`
+    }
+    def d_guarded_typed(`x₆₁`: scala.Double, `b₆₁`: scala.Boolean, `a₆₁`: scala.Double): scala.Double = `x₆₁` match {
+      case n: scala.Double if `b₆₁` =>
+        (`n₃₃`: scala.Double)
+      case _: scala.Double =>
+        `a₆₁`
+    }
+    def d_nested(`x₆₂`: scala.Double, `b₆₂`: scala.Boolean, `a₆₂`: scala.Double): scala.Double = `x₆₂` match {
+      case n =>
+        (`n₃₄` match {
+          case 1.5 =>
+            `a₆₂`
+          case _: scala.Double =>
+            `n₃₄`
+        }: scala.Double)
+    }
+    def d_ascribed_selector(`x₆₃`: scala.Double, `b₆₃`: scala.Boolean, `a₆₃`: scala.Double): scala.Double = (`x₆₃`: scala.Double) match {
+      case n =>
+        (`n₃₅`: scala.Double)
+    }
+    def d_explicit_local(`x₆₄`: scala.Double, `b₆₄`: scala.Boolean, `a₆₄`: scala.Double): scala.Double = {
+      val `saved₇`: scala.Double = `x₆₄`
+      `saved₇` match {
+        case n =>
+          (`n₃₆`: scala.Double)
+      }
+    }
+    def d_inferred_local(`x₆₅`: scala.Double, `b₆₅`: scala.Boolean, `a₆₅`: scala.Double): scala.Double = {
+      val `saved₈`: scala.Double = `x₆₅`
+      `saved₈` match {
+        case n =>
+          (`n₃₇`: scala.Double)
+      }
+    }
+    def d_mutable_selector(`x₆₆`: scala.Double, `b₆₆`: scala.Boolean, `a₆₆`: scala.Double): scala.Double = {
+      var `saved₉`: scala.Double = `x₆₆`
+      `saved₉` = if (`b₆₆`) `x₆₆` else 0.0
+      `saved₉` match {
+        case n =>
+          (`n₃₈`: scala.Double)
+      }
+    }
+    def d_local_result(`x₆₇`: scala.Double, `b₆₇`: scala.Boolean, `a₆₇`: scala.Double): scala.Double = {
+      val `saved₁₀`: scala.Double = `x₆₇` match {
+        case n =>
+          (`n₃₉`: scala.Double)
+      }
+
+      (`saved₁₀`: scala.Double)
+    }
+    def d_assignment_result(`x₆₈`: scala.Double, `b₆₈`: scala.Boolean, `a₆₈`: scala.Double): scala.Double = {
+      var `saved₁₁`: scala.Double = `x₆₈`
+      `saved₁₁` = `x₆₈` match {
+        case 1.5 =>
+          `a₆₈`
+        case n =>
+          (`n₄₀`: scala.Double)
+      }
+
+      (`saved₁₁`: scala.Double)
+    }
+    def d_effect(`x₆₉`: scala.Double, `b₆₉`: scala.Boolean, `a₆₉`: scala.Double): scala.Int = {
+      var `steps₂`: scala.Int = 0
+      val `picked₂`: scala.Int = {
+        `steps₂` = `steps₂`.*(10).+(1)
+        `x₆₉`
+      } match {
+        case (0.0 | -0.0 | 1.5) if {
+          `steps₂` = `steps₂`.*(10).+(2)
+          `b₆₉`
+        } =>
+          `steps₂` = `steps₂`.*(10).+(3)
+          7
+        case _ =>
+          `steps₂` = `steps₂`.*(10).+(4)
+          8
+      }
+      `steps₂`.*(100).+(`picked₂`)
+    }
+    def d_shadow(`x₇₀`: scala.Double, `b₇₀`: scala.Boolean, `a₇₀`: scala.Double): scala.Double = {
+      val `n₄₁`: scala.Double = `x₇₀`
+      `x₇₀` match {
+        case n if `b₇₀` =>
+          (`n₄₂`: scala.Double)
+        case _: scala.Double =>
+          `n₄₁`
+      }
+    }
+    def d_mixed_nested(`x₇₁`: scala.Double, `b₇₁`: scala.Boolean, `a₇₁`: scala.Double): scala.Double = `b₇₁` match {
+      case true =>
+        `x₇₁` match {
+          case n =>
+            (`n₄₃`: scala.Double)
+        }
+      case false =>
+        `x₇₁` match {
+          case 1.5 =>
+            `a₇₁`
+          case n: scala.Double =>
+            (`n₄₄`: scala.Double)
+        }
+    }
+    def d_while_selector(`x₇₂`: scala.Double, `b₇₂`: scala.Boolean, `a₇₂`: scala.Double): scala.Double = {
+      var `i₂`: scala.Int = 1
+      var `saved₁₂`: scala.Double = `x₇₂`
+      while (`i₂`.>(0)) {
+        `saved₁₂` = if (`b₇₂`) `x₇₂` else 0.0
+        `i₂` = `i₂`.-(1)
+      }
+
+      (`saved₁₂`: scala.Double)
+    } match {
+      case n =>
+        (`n₄₅`: scala.Double)
+    }
+    def d_all_returns(`x₇₃`: scala.Double, `b₇₃`: scala.Boolean, `a₇₃`: scala.Double): scala.Double = `x₇₃` match {
+      case 1.5 =>
+        return `a₇₃`
+      case n =>
+        return `n₄₆`
+    }
+    def d_non_tail_return(`x₇₄`: scala.Double, `b₇₄`: scala.Boolean, `a₇₄`: scala.Double): scala.Double = {
+      if (`b₇₄`) return `x₇₄` else ()
+      `x₇₄` match {
+        case 1.5 =>
+          `a₇₄`
+        case n =>
+          (`n₄₇`: scala.Double)
+      }
+    }
+    def d_plain_singleton(`x₇₅`: scala.Double, `b₇₅`: scala.Boolean, `a₇₅`: scala.Double): scala.Double = -0.0 match {
+      case n =>
+        (`n₄₈`: -0.0)
+    }
+    def d_bound_singleton(`x₇₆`: scala.Double, `b₇₆`: scala.Boolean, `a₇₆`: scala.Double): scala.Double = 1.5 match {
+      case n @ 1.5 =>
+        (`n₄₉`: 1.5)
+      case n =>
+        (`n₅₀`: 1.5)
+    }
+    def d_typed_singleton(`x₇₇`: scala.Double, `b₇₇`: scala.Boolean, `a₇₇`: scala.Double): scala.Double = -0.0 match {
+      case n: scala.Double =>
+        (`n₅₁`: -0.0)
+    }
+    def d_nested_singleton(`x₇₈`: scala.Double, `b₇₈`: scala.Boolean, `a₇₈`: scala.Double): scala.Double = 1.5 match {
+      case n =>
+        `n₅₂` match {
+          case k =>
+            (`k₂`: scala.Double)
+        }
+    }
+    def d_raw_pattern(`x₇₉`: scala.Double, `b₇₉`: scala.Boolean, `a₇₉`: scala.Double): scala.Int = `x₇₉` match {
+      case 1.5 =>
+        11
+      case _ =>
+        33
+    }
+    def d_result_Int_normal(`x₈₀`: scala.Double, `b₈₀`: scala.Boolean, `a₈₀`: scala.Double): scala.Int = `x₈₀` match {
+      case 1.5 =>
+        7
+      case _ =>
+        0
+    }
+    def d_result_Int_guarded(`x₈₁`: scala.Double, `b₈₁`: scala.Boolean, `a₈₁`: scala.Double): scala.Int = `x₈₁` match {
+      case n: scala.Double if `b₈₁` =>
+        7
+      case _: scala.Double =>
+        0
+    }
+    def d_result_Int_returns(`x₈₂`: scala.Double, `b₈₂`: scala.Boolean, `a₈₂`: scala.Double): scala.Int = `x₈₂` match {
+      case 1.5 =>
+        return 7
+      case _ =>
+        return 0
+    }
+    def d_result_Boolean_normal(`x₈₃`: scala.Double, `b₈₃`: scala.Boolean, `a₈₃`: scala.Double): scala.Boolean = `x₈₃` match {
+      case 1.5 =>
+        true
+      case _ =>
+        false
+    }
+    def d_result_Boolean_guarded(`x₈₄`: scala.Double, `b₈₄`: scala.Boolean, `a₈₄`: scala.Double): scala.Boolean = `x₈₄` match {
+      case n: scala.Double if `b₈₄` =>
+        true
+      case _: scala.Double =>
+        false
+    }
+    def d_result_Boolean_returns(`x₈₅`: scala.Double, `b₈₅`: scala.Boolean, `a₈₅`: scala.Double): scala.Boolean = `x₈₅` match {
+      case 1.5 =>
+        return true
+      case _ =>
+        return false
+    }
+    def d_result_Unit_normal(`x₈₆`: scala.Double, `b₈₆`: scala.Boolean, `a₈₆`: scala.Double): scala.Unit = `x₈₆` match {
+      case 1.5 =>
+        ()
+      case _ =>
+        ()
+    }
+    def d_result_Unit_guarded(`x₈₇`: scala.Double, `b₈₇`: scala.Boolean, `a₈₇`: scala.Double): scala.Unit = `x₈₇` match {
+      case n: scala.Double if `b₈₇` =>
+        ()
+      case _: scala.Double =>
+        ()
+    }
+    def d_result_Unit_returns(`x₈₈`: scala.Double, `b₈₈`: scala.Boolean, `a₈₈`: scala.Double): scala.Unit = `x₈₈` match {
+      case 1.5 =>
+        return ()
+      case _ =>
+        return ()
+    }
+    def d_result_Long_normal(`x₈₉`: scala.Double, `b₈₉`: scala.Boolean, `a₈₉`: scala.Double): scala.Long = `x₈₉` match {
+      case 1.5 =>
+        9223372036854775807L
+      case _ =>
+        0L
+    }
+    def d_result_Long_guarded(`x₉₀`: scala.Double, `b₉₀`: scala.Boolean, `a₉₀`: scala.Double): scala.Long = `x₉₀` match {
+      case n: scala.Double if `b₉₀` =>
+        9223372036854775807L
+      case _: scala.Double =>
+        0L
+    }
+    def d_result_Long_returns(`x₉₁`: scala.Double, `b₉₁`: scala.Boolean, `a₉₁`: scala.Double): scala.Long = `x₉₁` match {
+      case 1.5 =>
+        return 9223372036854775807L
+      case _ =>
+        return 0L
+    }
+    def d_result_Float_normal(`x₉₂`: scala.Double, `b₉₂`: scala.Boolean, `a₉₂`: scala.Double): scala.Float = `x₉₂` match {
+      case 1.5 =>
+        -0.0f
+      case _ =>
+        0.0f
+    }
+    def d_result_Float_guarded(`x₉₃`: scala.Double, `b₉₃`: scala.Boolean, `a₉₃`: scala.Double): scala.Float = `x₉₃` match {
+      case n: scala.Double if `b₉₃` =>
+        -0.0f
+      case _: scala.Double =>
+        0.0f
+    }
+    def d_result_Float_returns(`x₉₄`: scala.Double, `b₉₄`: scala.Boolean, `a₉₄`: scala.Double): scala.Float = `x₉₄` match {
+      case 1.5 =>
+        return -0.0f
+      case _ =>
+        return 0.0f
+    }
+    def d_result_Double_normal(`x₉₅`: scala.Double, `b₉₅`: scala.Boolean, `a₉₅`: scala.Double): scala.Double = `x₉₅` match {
+      case 1.5 =>
+        -0.0
+      case _ =>
+        0.0
+    }
+    def d_result_Double_guarded(`x₉₆`: scala.Double, `b₉₆`: scala.Boolean, `a₉₆`: scala.Double): scala.Double = `x₉₆` match {
+      case n: scala.Double if `b₉₆` =>
+        -0.0
+      case _: scala.Double =>
+        0.0
+    }
+    def d_result_Double_returns(`x₉₇`: scala.Double, `b₉₇`: scala.Boolean, `a₉₇`: scala.Double): scala.Double = `x₉₇` match {
+      case 1.5 =>
+        return -0.0
+      case _ =>
+        return 0.0
+    }
+    def f_bind_positive_zero(`x₉₈`: scala.Float, `b₉₈`: scala.Boolean, `a₉₈`: scala.Float): scala.Float = `x₉₈` match {
+      case n @ 0.0f =>
+        (`n₅₃`: scala.Float)
+      case n =>
+        (`n₅₄`: scala.Float)
+    }
+    def f_bind_negative_zero(`x₉₉`: scala.Float, `b₉₉`: scala.Boolean, `a₉₉`: scala.Float): scala.Float = `x₉₉` match {
+      case n @ -0.0f =>
+        (`n₅₅`: scala.Float)
+      case n =>
+        (`n₅₆`: scala.Float)
+    }
+    def f_singleton_bind_negative_zero(`x₁₀₀`: scala.Float, `b₁₀₀`: scala.Boolean, `a₁₀₀`: scala.Float): scala.Float = -0.0f match {
+      case n @ -0.0f =>
+        (`n₅₇`: -0.0f)
+      case n =>
+        (`n₅₈`: -0.0f)
+    }
+    def d_bind_positive_zero(`x₁₀₁`: scala.Double, `b₁₀₁`: scala.Boolean, `a₁₀₁`: scala.Double): scala.Double = `x₁₀₁` match {
+      case n @ 0.0 =>
+        (`n₅₉`: scala.Double)
+      case n =>
+        (`n₆₀`: scala.Double)
+    }
+    def d_bind_negative_zero(`x₁₀₂`: scala.Double, `b₁₀₂`: scala.Boolean, `a₁₀₂`: scala.Double): scala.Double = `x₁₀₂` match {
+      case n @ -0.0 =>
+        (`n₆₁`: scala.Double)
+      case n =>
+        (`n₆₂`: scala.Double)
+    }
+    def d_singleton_bind_negative_zero(`x₁₀₃`: scala.Double, `b₁₀₃`: scala.Boolean, `a₁₀₃`: scala.Double): scala.Double = -0.0 match {
+      case n @ -0.0 =>
+        (`n₆₃`: -0.0)
+      case n =>
+        (`n₆₄`: -0.0)
+    }
+  }
+}

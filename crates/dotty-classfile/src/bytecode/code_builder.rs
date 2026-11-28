@@ -580,6 +580,20 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Compares two floats and pushes Int -1, 0 or 1 for the first relative to the second.
+    /// Consumes two slots. Either NaN yields -1; signed zeros compare equal.
+    pub fn fcmpl(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::FCmpL);
+        Ok(self)
+    }
+
+    /// Compares two doubles and pushes Int -1, 0 or 1 for the first relative to the second.
+    /// Consumes four slots. Either NaN yields -1; signed zeros compare equal.
+    pub fn dcmpl(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::DCmpL);
+        Ok(self)
+    }
+
     /// Duplicates the top category-one value.
     pub fn dup(&mut self) -> Result<&mut Self, CodeBuilderError> {
         self.push(Instruction::Dup);

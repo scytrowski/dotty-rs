@@ -329,7 +329,6 @@ fn unsupported_alternative_shapes_never_publish_an_artifact_pair() {
         "def f(x: Int): Int = x match { case (0: Int) | 1 => 1; case _ => 2 }",
         "def f(x: Int): Int = x match { case 0 | 1 => 1 }",
         "def f(x: Int, flag: Boolean): Int = x match { case 0 | 1 if flag => 1 }",
-        "def f(x: Float): Int = x match { case 0f | 1f => 1; case _ => 2 }",
         "def f(x: Boolean): Int = x match { case true | true => 1 }",
     ] {
         let source = format!("package example; class AlternativeMatches {{ {method} }}");

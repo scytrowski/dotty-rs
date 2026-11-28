@@ -1988,6 +1988,16 @@ impl Frame {
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.push(instruction_index, ValueKind::Int)?;
             }
+            Instruction::FCmpL | Instruction::DCmpL => {
+                let kind = if instruction == Instruction::FCmpL {
+                    ValueKind::Float
+                } else {
+                    ValueKind::Double
+                };
+                self.pop_expected(instruction_index, kind)?;
+                self.pop_expected(instruction_index, kind)?;
+                self.push(instruction_index, ValueKind::Int)?;
+            }
             Instruction::LCmp => {
                 self.pop_expected(instruction_index, ValueKind::Long)?;
                 self.pop_expected(instruction_index, ValueKind::Long)?;
@@ -3601,7 +3611,7 @@ impl CfgCodeAnalyzer {
     ///
     /// This compatibility entry point supports primitive constants, primitive
     /// local loads/stores and returns, `dup`/`pop` for category-one values,
-    /// integer arithmetic/comparisons, signed Long `lcmp`, and gotos.
+    /// integer arithmetic/comparisons, signed Long `lcmp`, Float/Double `fcmpl`/`dcmpl`, and gotos.
     /// Reference, exception and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
     /// receiver moves, primitive field accesses, and exact `invokevirtual`
@@ -4092,6 +4102,8 @@ fn validate_flow_instruction_with_context(
             | Instruction::IOr
             | Instruction::IXor
             | Instruction::LCmp
+            | Instruction::FCmpL
+            | Instruction::DCmpL
             | Instruction::Dup
             | Instruction::Pop
             | Instruction::Return
@@ -9009,6 +9021,90 @@ mod tests {
                 available: 0,
             })
         );
+    }
+
+    #[test]
+    fn floating_comparisons_validate_operand_kinds_and_physical_slots() {
+        let pool = ConstantPool::default();
+        for (op, load, good, bad, kind, wrong, descriptor, width) in [
+            (
+                Instruction::FCmpL,
+                Instruction::FLoad as fn(LocalIndex) -> Instruction,
+                Instruction::FConst(super::super::SmallFloatConstant::Zero),
+                Instruction::IConst(SmallIntConstant::Zero),
+                ValueKind::Float,
+                ValueKind::Int,
+                "(FF)I",
+                1,
+            ),
+            (
+                Instruction::DCmpL,
+                Instruction::DLoad as fn(LocalIndex) -> Instruction,
+                Instruction::DConst(super::super::SmallDoubleConstant::Zero),
+                Instruction::LConst(SmallLongConstant::Zero),
+                ValueKind::Double,
+                ValueKind::Long,
+                "(DD)I",
+                2,
+            ),
+        ] {
+            let instructions = [
+                load(LocalIndex::new(0)),
+                load(LocalIndex::new(width)),
+                op,
+                Instruction::IReturn,
+            ];
+            let result = analyze(descriptor, true, &instructions, &pool).unwrap();
+            assert_eq!(
+                (result.max_stack, result.max_locals),
+                (2 * width, 2 * width)
+            );
+            let mut sequence = CodeSequence::new();
+            for i in instructions {
+                sequence.instruction(i);
+            }
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            let flow = CfgCodeAnalyzer::analyze(&graph, descriptor, true, &pool).unwrap();
+            assert_eq!((flow.max_stack, flow.max_locals), (2 * width, 2 * width));
+            for prefix in [vec![], vec![good], vec![good, bad], vec![bad, good]] {
+                let expected = if prefix.len() < 2 {
+                    AnalysisError::StackUnderflow {
+                        instruction: prefix.len(),
+                        needed: 1,
+                        available: 0,
+                    }
+                } else {
+                    AnalysisError::StackTypeMismatch {
+                        instruction: 2,
+                        expected: kind,
+                        actual: wrong,
+                    }
+                };
+                let mut sequence = CodeSequence::new();
+                for &i in &prefix {
+                    sequence.instruction(i);
+                }
+                sequence.instruction(op).instruction(Instruction::IReturn);
+                let graph = ControlFlowGraph::build(&sequence).unwrap();
+                assert_eq!(
+                    CfgCodeAnalyzer::analyze(&graph, "()I", true, &pool),
+                    Err(expected.clone())
+                );
+                let mut instructions = prefix;
+                instructions.extend([op, Instruction::IReturn]);
+                assert_eq!(analyze("()I", true, &instructions, &pool), Err(expected));
+            }
+            let count = 65_535 / usize::from(width) + 1;
+            let mut instructions = vec![good; count];
+            instructions.extend([op, Instruction::IReturn]);
+            assert_eq!(
+                analyze("()I", true, &instructions, &pool),
+                Err(AnalysisError::StackLimitExceeded {
+                    instruction: count - 1,
+                    slots: 65_536
+                })
+            );
+        }
     }
 
     #[test]
